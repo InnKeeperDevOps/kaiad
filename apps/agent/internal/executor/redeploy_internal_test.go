@@ -216,6 +216,34 @@ func TestParseAndRenderVolumes(t *testing.T) {
 	}
 }
 
+func TestParseAndRenderSecretEnv(t *testing.T) {
+	p := richPayload("none")
+	p["secretEnv"] = []interface{}{
+		map[string]interface{}{"name": "DB_PASSWORD", "secret": "mcbans-db", "key": "password"},
+		map[string]interface{}{"name": "API_KEY", "secret": "ksec", "key": "k", "optional": true},
+	}
+	in, err := parseRedeployPayload(p)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(in.secretEnv) != 2 || in.secretEnv[0].secret != "mcbans-db" || !in.secretEnv[1].optional {
+		t.Fatalf("secretEnv not parsed: %+v", in.secretEnv)
+	}
+	yaml := renderK8sManifests(in, "mcbans-prod")
+	for _, want := range []string{
+		`- name: "DB_PASSWORD"`,
+		"valueFrom:",
+		"secretKeyRef:",
+		`name: "mcbans-db"`,
+		`key: "password"`,
+		"optional: true",
+	} {
+		if !strings.Contains(yaml, want) {
+			t.Fatalf("rendered manifest missing %q in:\n%s", want, yaml)
+		}
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

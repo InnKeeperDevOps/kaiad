@@ -137,6 +137,19 @@ export const pipelineVolumeSchema = z
     }
   });
 
+// One env var sourced from an existing k8s Secret. Kaiad references
+// (name+key), never stores, the secret value.
+export const pipelineSecretEnvSchema = z.object({
+  /** Env var name set in the container. */
+  name: z.string().min(1),
+  /** Existing Secret's metadata.name (in the deploy namespace). */
+  secret: z.string().min(1),
+  /** Key within that Secret. */
+  key: z.string().min(1),
+  /** Tolerate the Secret/key being absent at pod start. */
+  optional: z.boolean().optional()
+});
+
 export const pipelineRuntimeSchema = z.object({
   /**
    * Base image for the pushed runtime image. Defaults to "scratch" so
@@ -164,6 +177,14 @@ export const pipelineRuntimeSchema = z.object({
    * not template secret material through kaiad.yaml.
    */
   env: z.record(z.string()).default({}),
+  /**
+   * Env vars sourced from an existing Kubernetes Secret
+   * (container.env[].valueFrom.secretKeyRef). Kaiad references the
+   * Secret by name + key — it never stores or templates the secret
+   * value. The Secret must already exist in the deploy namespace.
+   * Per-environment `environments.<env>.secretEnv` replaces this list.
+   */
+  secretEnv: z.array(pipelineSecretEnvSchema).default([]),
   /**
    * Volumes mounted into the deployed container (rendered as k8s
    * pod.spec.volumes + container.volumeMounts). Per-environment
@@ -277,7 +298,12 @@ export const pipelineEnvironmentSchema = z.object({
    * Per-environment volumes. Replaces the top-level `runtime.volumes`
    * list when present (e.g. a different NFS server per environment).
    */
-  volumes: z.array(pipelineVolumeSchema).optional()
+  volumes: z.array(pipelineVolumeSchema).optional(),
+  /**
+   * Per-environment secret env. Replaces the top-level
+   * `runtime.secretEnv` list when present.
+   */
+  secretEnv: z.array(pipelineSecretEnvSchema).optional()
 });
 
 // Environment names: lowercase alphanum + hyphen, max 63 chars (matches
@@ -446,6 +472,7 @@ export type PipelineBuild = z.infer<typeof pipelineBuildSchema>;
 export type PipelineRuntime = z.infer<typeof pipelineRuntimeSchema>;
 export type PipelineDockerfile = z.infer<typeof pipelineDockerfileSchema>;
 export type PipelineVolume = z.infer<typeof pipelineVolumeSchema>;
+export type PipelineSecretEnv = z.infer<typeof pipelineSecretEnvSchema>;
 export type PipelineDomain = z.infer<typeof pipelineDomainSchema>;
 export type PipelineLoadBalancer = z.infer<typeof pipelineLoadBalancerSchema>;
 export type PipelineEnvironment = z.infer<typeof pipelineEnvironmentSchema>;
@@ -479,6 +506,11 @@ export function resolveEnvironment(
    * list when non-empty, else the top-level `runtime.volumes`.
    */
   volumes: PipelineVolume[];
+  /**
+   * Resolved secret env: per-environment `environments.<env>.secretEnv`
+   * when non-empty, else the top-level `runtime.secretEnv`.
+   */
+  secretEnv: PipelineSecretEnv[];
 } {
   const env = def.environments[envName];
   return {
@@ -487,7 +519,8 @@ export function resolveEnvironment(
     loadBalancer: env?.loadBalancer ?? def.loadBalancer,
     namespace: env?.namespace ?? def.namespace ?? "",
     env: { ...(def.runtime?.env ?? {}), ...(env?.env ?? {}) },
-    volumes: env?.volumes?.length ? env.volumes : (def.runtime?.volumes ?? [])
+    volumes: env?.volumes?.length ? env.volumes : (def.runtime?.volumes ?? []),
+    secretEnv: env?.secretEnv?.length ? env.secretEnv : (def.runtime?.secretEnv ?? [])
   };
 }
 
@@ -690,4 +723,17 @@ export function selectPipeline(
     };
   }
   return { ok: true, pipeline };
+}
+
+/**
+ * Thin re-exports of the `yaml` library so consumers (e.g. the panel
+ * pipeline editor) parse/serialize with the exact same implementation
+ * Kaiad validates with — no separate yaml dependency, no version skew.
+ */
+export function yamlParse(text: string): unknown {
+  return yaml.parse(text);
+}
+
+export function yamlStringify(value: unknown): string {
+  return yaml.stringify(value, { lineWidth: 0 });
 }

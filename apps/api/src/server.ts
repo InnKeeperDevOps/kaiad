@@ -141,6 +141,8 @@ import {
   listLatestBuildsForBoundServices,
   listLoadBalancerStatusForTenant,
   listMissingDeploysForAgent,
+  getServicePipelineOverride,
+  setServicePipelineOverride,
   listRunningServicesForAgent,
   popLoadBalancerStatusForAgentService,
   upsertLoadBalancerStatus,
@@ -2748,6 +2750,106 @@ export function buildServer(opts: BuildServerOptions = {}) {
     return { builds };
   });
 
+  // --- Pipeline override (panel-stored kaiad.yaml) ---
+  //
+  // When set, the build worker uses this verbatim instead of the repo's
+  // kaiad.yaml (full replace) and it becomes the build's pipeline_yaml.
+  app.get<{ Params: { id: string } }>(
+    "/api/v1/services/:id/pipeline-override",
+    async (req, reply) => {
+      const session = await resolveSession(authStore, req.headers.authorization);
+      if (!session) {
+        return reply.status(401).send(
+          apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId })
+        );
+      }
+      const svc = await domainStore.getService(session.tenantId, req.params.id);
+      if (!svc) {
+        return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Service not found", correlationId: (req as any).correlationId }));
+      }
+      const q = await getBuildsQuery();
+      if (!q) return { override: null, pipelineName: svc.pipelineName ?? null };
+      const override = await getServicePipelineOverride(q, session.tenantId, req.params.id);
+      return { override: override ?? null, pipelineName: svc.pipelineName ?? null };
+    }
+  );
+
+  app.put<{ Params: { id: string }; Body: { yaml?: unknown } }>(
+    "/api/v1/services/:id/pipeline-override",
+    async (req, reply) => {
+      const session = await resolveSession(authStore, req.headers.authorization);
+      if (!session) {
+        return reply.status(401).send(
+          apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId })
+        );
+      }
+      if (session.kind === "apiCredential" || (session.role !== "owner" && session.role !== "admin")) {
+        return reply.status(403).send(
+          apiErrorSchema.parse({ code: "FORBIDDEN", message: "Owner or admin session required", correlationId: (req as any).correlationId })
+        );
+      }
+      const svc = await domainStore.getService(session.tenantId, req.params.id);
+      if (!svc) {
+        return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Service not found", correlationId: (req as any).correlationId }));
+      }
+      const yaml = typeof req.body?.yaml === "string" ? req.body.yaml : "";
+      if (!yaml.trim()) {
+        return reply.status(400).send(
+          apiErrorSchema.parse({ code: "INVALID_REQUEST", message: "Body.yaml (non-empty string) required; use DELETE to clear", correlationId: (req as any).correlationId })
+        );
+      }
+      // Validate before persisting: must parse AND the service's bound
+      // pipelineName must resolve, so a bad override can't brick builds.
+      const parsed = parsePipelineYaml(yaml);
+      if (!parsed.ok) {
+        return reply.status(422).send(
+          apiErrorSchema.parse({ code: "INVALID_PIPELINE", message: parsed.reason, correlationId: (req as any).correlationId })
+        );
+      }
+      const picked = selectPipeline(parsed, svc.pipelineName ?? null);
+      if (!picked.ok) {
+        return reply.status(422).send(
+          apiErrorSchema.parse({ code: "INVALID_PIPELINE", message: picked.reason, correlationId: (req as any).correlationId })
+        );
+      }
+      const q = await getBuildsQuery();
+      if (!q) {
+        return reply.status(503).send(apiErrorSchema.parse({ code: "DB_UNAVAILABLE", message: "Persistence unavailable", correlationId: (req as any).correlationId }));
+      }
+      const ok = await setServicePipelineOverride(q, session.tenantId, req.params.id, yaml);
+      if (!ok) {
+        return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Service not found", correlationId: (req as any).correlationId }));
+      }
+      return { ok: true, override: yaml };
+    }
+  );
+
+  app.delete<{ Params: { id: string } }>(
+    "/api/v1/services/:id/pipeline-override",
+    async (req, reply) => {
+      const session = await resolveSession(authStore, req.headers.authorization);
+      if (!session) {
+        return reply.status(401).send(
+          apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId })
+        );
+      }
+      if (session.kind === "apiCredential" || (session.role !== "owner" && session.role !== "admin")) {
+        return reply.status(403).send(
+          apiErrorSchema.parse({ code: "FORBIDDEN", message: "Owner or admin session required", correlationId: (req as any).correlationId })
+        );
+      }
+      const q = await getBuildsQuery();
+      if (!q) {
+        return reply.status(503).send(apiErrorSchema.parse({ code: "DB_UNAVAILABLE", message: "Persistence unavailable", correlationId: (req as any).correlationId }));
+      }
+      const ok = await setServicePipelineOverride(q, session.tenantId, req.params.id, null);
+      if (!ok) {
+        return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Service not found", correlationId: (req as any).correlationId }));
+      }
+      return { ok: true, override: null };
+    }
+  );
+
   // Manual build trigger. Inserts a queued row with empty git_sha; the
   // worker resolves HEAD via git ls-remote on claim. After success, the
   // worker dispatches a redeploy_service command to every bound agent.
@@ -2968,7 +3070,8 @@ export function buildServer(opts: BuildServerOptions = {}) {
           loadBalancer: resolved.loadBalancer,
           namespace: resolved.namespace,
           env: resolved.env,
-          volumes: resolved.volumes
+          volumes: resolved.volumes,
+          secretEnv: resolved.secretEnv
         }
       };
       try {
@@ -3052,7 +3155,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
     for (const t of targets) {
       const resolved = pickedPipeline
         ? resolveEnvironment(pickedPipeline, t.environment)
-        : { instances: 1, domains: [], loadBalancer: { type: "none" }, namespace: "", env: {}, volumes: [] };
+        : { instances: 1, domains: [], loadBalancer: { type: "none" }, namespace: "", env: {}, volumes: [], secretEnv: [] };
       const commandId = crypto.randomUUID();
       const command = {
         type: "redeploy_service",
@@ -3067,7 +3170,8 @@ export function buildServer(opts: BuildServerOptions = {}) {
         loadBalancer: resolved.loadBalancer,
         namespace: resolved.namespace,
         env: resolved.env,
-        volumes: resolved.volumes
+        volumes: resolved.volumes,
+        secretEnv: resolved.secretEnv
       };
       try {
         const r = await realtimeManager.sendCommand(t.agentId, JSON.stringify(command));
@@ -3316,7 +3420,8 @@ export function buildServer(opts: BuildServerOptions = {}) {
           loadBalancer: newR.loadBalancer,
           namespace: newR.namespace,
           env: newR.env,
-          volumes: newR.volumes
+          volumes: newR.volumes,
+          secretEnv: newR.secretEnv
         }
       };
       try {
@@ -3623,7 +3728,8 @@ export function buildServer(opts: BuildServerOptions = {}) {
           loadBalancer: desired.loadBalancer,
           namespace: desired.namespace,
           env: desired.env,
-          volumes: desired.volumes
+          volumes: desired.volumes,
+          secretEnv: desired.secretEnv
         }
       };
       try {

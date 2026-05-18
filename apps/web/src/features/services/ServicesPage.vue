@@ -4,6 +4,7 @@ import { Box } from "lucide-vue-next";
 import { api, type Agent, type MonitoredService, type SshKey } from "../../lib/api.js";
 import { useAuth } from "../../lib/useAuth.js";
 import BuildsForServiceSection from "./BuildsForServiceSection.vue";
+import PipelineOverrideEditor from "./PipelineOverrideEditor.vue";
 
 type ServiceForm = {
   name: string;
@@ -175,6 +176,14 @@ function toggleBuilds(id: string) {
   if (next.has(id)) next.delete(id);
   else next.add(id);
   buildsOpen.value = next;
+}
+
+const pipelineOpen = ref<Set<string>>(new Set());
+function togglePipeline(id: string) {
+  const next = new Set(pipelineOpen.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  pipelineOpen.value = next;
 }
 </script>
 
@@ -360,6 +369,18 @@ function toggleBuilds(id: string) {
                 }"
                 @click="toggleBuilds(svc.id)"
               >{{ buildsOpen.has(svc.id) ? 'Hide builds' : 'Builds' }}</button>
+              <button
+                :style="{
+                  background: pipelineOpen.has(svc.id) ? 'var(--color-bg)' : 'var(--color-surface)',
+                  border: '1px solid var(--color-border)',
+                  padding: '0.2rem 0.5rem',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: '0.8rem',
+                  color: 'var(--color-text-primary)'
+                }"
+                @click="togglePipeline(svc.id)"
+              >{{ pipelineOpen.has(svc.id) ? 'Hide pipeline' : 'Pipeline' }}</button>
               <template v-if="canManage">
                 <button
                   :style="{
@@ -392,6 +413,11 @@ function toggleBuilds(id: string) {
         <tr v-if="buildsOpen.has(svc.id)">
           <td colspan="6" :style="{ padding: '0 0.5rem 0.5rem' }">
             <BuildsForServiceSection :service-id="svc.id" :service-name="svc.name" />
+          </td>
+        </tr>
+        <tr v-if="pipelineOpen.has(svc.id)">
+          <td colspan="6" :style="{ padding: '0 0.5rem 0.5rem' }">
+            <PipelineOverrideEditor :service-id="svc.id" :service-name="svc.name" />
           </td>
         </tr>
         </template>

@@ -423,6 +423,34 @@ environments:
       expect(resolveEnvironment(r.pipeline, "production").volumes).toHaveLength(1);
     });
 
+    it("parses runtime.secretEnv and resolveEnvironment carries it (per-env replaces)", () => {
+      const r = parsePipelineYaml(`version: 1
+runtime:
+  image: php:fpm
+  command: ["php-fpm"]
+  secretEnv:
+    - name: DB_PASSWORD
+      secret: mcbans-db
+      key: password
+ports:
+  - port: 9000
+    name: fpm
+environments:
+  production:
+    namespace: mcbans-prod
+    secretEnv:
+      - name: DB_PASSWORD
+        secret: mcbans-db-prod
+        key: password
+`);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const dev = resolveEnvironment(r.pipeline, "development");
+      expect(dev.secretEnv).toEqual([{ name: "DB_PASSWORD", secret: "mcbans-db", key: "password" }]);
+      const prod = resolveEnvironment(r.pipeline, "production");
+      expect(prod.secretEnv[0]?.secret).toBe("mcbans-db-prod");
+    });
+
     it("rejects a volume with no source or multiple sources", () => {
       const bad = parsePipelineYaml(`version: 1
 runtime:

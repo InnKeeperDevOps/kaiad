@@ -122,6 +122,12 @@ alter table monitored_services add column if not exists kind text not null defau
 alter table monitored_services add column if not exists depends_on text[] not null default ARRAY[]::text[];
 create index if not exists monitored_services_depends_on_gin on monitored_services using gin (depends_on);
 
+-- Panel-stored kaiad.yaml override. When non-null, the build worker
+-- uses this verbatim INSTEAD of the repo's kaiad.yaml (full replace),
+-- and it becomes the build's captured pipeline_yaml so reconcile/deploy
+-- use it too. Edited via the panel pipeline editor.
+alter table monitored_services add column if not exists pipeline_override text;
+
 -- agent ↔ service binding is many-to-many. The join table is the single
 -- source of truth. The legacy monitored_services.agent_id column
 -- (non-null for any service that was bound under the old single-FK model)

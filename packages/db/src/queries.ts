@@ -354,6 +354,8 @@ export interface ServiceRow {
   dockerImage?: string | null;
   composePath?: string | null;
   pipelineName?: string | null;
+  /** Panel-stored kaiad.yaml override; null = use the repo file. */
+  pipelineOverride?: string | null;
 }
 
 function mapService(r: Record<string, unknown>): ServiceRow {
@@ -367,7 +369,36 @@ function mapService(r: Record<string, unknown>): ServiceRow {
     dockerImage: r.docker_image == null ? null : String(r.docker_image),
     composePath: r.compose_path == null ? null : String(r.compose_path),
     pipelineName: r.pipeline_name == null ? null : String(r.pipeline_name),
+    pipelineOverride: r.pipeline_override == null ? null : String(r.pipeline_override),
   };
+}
+
+/** Read just the pipeline override (or null) for a service. */
+export async function getServicePipelineOverride(
+  query: QueryFn,
+  tenantId: string,
+  id: string
+): Promise<string | null | undefined> {
+  const { rows } = await query(
+    `SELECT pipeline_override FROM monitored_services WHERE tenant_id = $1 AND id = $2`,
+    [tenantId, id]
+  );
+  if (rows.length === 0) return undefined; // service not found
+  return rows[0].pipeline_override == null ? null : String(rows[0].pipeline_override);
+}
+
+/** Set (string) or clear (null) the pipeline override. Returns false if no such service. */
+export async function setServicePipelineOverride(
+  query: QueryFn,
+  tenantId: string,
+  id: string,
+  override: string | null
+): Promise<boolean> {
+  const { rows } = await query(
+    `UPDATE monitored_services SET pipeline_override = $3 WHERE tenant_id = $1 AND id = $2 RETURNING id`,
+    [tenantId, id, override]
+  );
+  return rows.length > 0;
 }
 
 export async function listServices(
@@ -839,10 +870,11 @@ export async function listAllServicesForPoller(
     pipelineName: string | null;
     kind: string;
     dependsOn: string[];
+    pipelineOverride: string | null;
   }>
 > {
   const { rows } = await query(
-    `SELECT id, tenant_id, name, git_repo_url, ssh_key_id, branch, pipeline_name, kind, depends_on
+    `SELECT id, tenant_id, name, git_repo_url, ssh_key_id, branch, pipeline_name, kind, depends_on, pipeline_override
        FROM monitored_services`,
     []
   );
@@ -855,7 +887,8 @@ export async function listAllServicesForPoller(
     branch: String(r.branch),
     pipelineName: r.pipeline_name == null ? null : String(r.pipeline_name),
     kind: r.kind == null ? "deployable" : String(r.kind),
-    dependsOn: Array.isArray(r.depends_on) ? (r.depends_on as unknown[]).map((v) => String(v)) : []
+    dependsOn: Array.isArray(r.depends_on) ? (r.depends_on as unknown[]).map((v) => String(v)) : [],
+    pipelineOverride: r.pipeline_override == null ? null : String(r.pipeline_override)
   }));
 }
 

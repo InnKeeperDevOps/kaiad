@@ -497,7 +497,22 @@ const redeployServiceCommandSchema = z.object({
    * mount into the deployed container. Declared here for the same
    * no-strip reason as `env`.
    */
-  volumes: z.array(redeployVolumeSchema).default([])
+  volumes: z.array(redeployVolumeSchema).default([]),
+  /**
+   * Resolved secret-sourced env (runtime.secretEnv or per-env
+   * override): container env via valueFrom.secretKeyRef. Declared here
+   * for the same no-strip reason as `env`.
+   */
+  secretEnv: z
+    .array(
+      z.object({
+        name: z.string(),
+        secret: z.string(),
+        key: z.string(),
+        optional: z.boolean().optional()
+      })
+    )
+    .default([])
 });
 
 /**

@@ -70,6 +70,9 @@ type redeployInput struct {
 	// volumes are the resolved runtime.volumes (or per-env override)
 	// rendered as pod.spec.volumes + container.volumeMounts.
 	volumes []volumeSpec
+	// secretEnv are env vars sourced from existing k8s Secrets,
+	// rendered as container env valueFrom.secretKeyRef.
+	secretEnv []secretEnvSpec
 }
 
 type domainSpec struct {
@@ -78,6 +81,12 @@ type domainSpec struct {
 	protocol string // "http" | "https"
 }
 
+type secretEnvSpec struct {
+	name     string
+	secret   string
+	key      string
+	optional bool
+}
 type volumeMountSpec struct {
 	path     string
 	subPath  string
@@ -189,6 +198,22 @@ func parseRedeployPayload(payload map[string]interface{}) (redeployInput, error)
 			}
 			if v.name != "" && len(v.mounts) > 0 {
 				in.volumes = append(in.volumes, v)
+			}
+		}
+	}
+	if raw, ok := payload["secretEnv"].([]interface{}); ok {
+		for _, item := range raw {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			se := secretEnvSpec{}
+			se.name, _ = m["name"].(string)
+			se.secret, _ = m["secret"].(string)
+			se.key, _ = m["key"].(string)
+			se.optional, _ = m["optional"].(bool)
+			if se.name != "" && se.secret != "" && se.key != "" {
+				in.secretEnv = append(in.secretEnv, se)
 			}
 		}
 	}
@@ -1071,10 +1096,17 @@ func renderK8sManifests(in redeployInput, namespace string) string {
 	}
 	b.WriteString("      containers:\n        - name: app\n")
 	fmt.Fprintf(&b, "          image: %s\n", in.imageRef)
-	if len(in.env) > 0 {
+	if len(in.env) > 0 || len(in.secretEnv) > 0 {
 		b.WriteString("          env:\n")
 		for _, k := range sortedKeys(in.env) {
 			fmt.Fprintf(&b, "            - name: %q\n              value: %q\n", k, in.env[k])
+		}
+		for _, se := range in.secretEnv {
+			fmt.Fprintf(&b, "            - name: %q\n              valueFrom:\n                secretKeyRef:\n                  name: %q\n                  key: %q\n",
+				se.name, se.secret, se.key)
+			if se.optional {
+				b.WriteString("                  optional: true\n")
+			}
 		}
 	}
 	if len(ports) > 0 {

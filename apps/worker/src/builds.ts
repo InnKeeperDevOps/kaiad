@@ -489,15 +489,28 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
     // 1) Clone at the exact SHA.
     await cloneAtSha(query, svc, build, ws);
 
-    // 2) Read kaiad.yaml. Missing file → no_pipeline (not red).
-    const yamlPath = path.join(ws, "kaiad.yaml");
+    // 2) Resolve the pipeline definition. A panel-stored override
+    // (services.pipeline_override) fully REPLACES the repo's kaiad.yaml
+    // when set — the editor's "override" model. Otherwise read the repo
+    // file; missing → no_pipeline (not red).
+    const override = svc.pipelineOverride?.trim();
     let yamlText: string;
-    try {
-      yamlText = await fs.readFile(yamlPath, "utf8");
-    } catch {
-      await appendBuildLog(query, build.id, "kaiad.yaml not found at repo root — skipping build\n");
-      await finishBuild(query, build.id, { status: "no_pipeline" });
-      return;
+    if (override) {
+      yamlText = svc.pipelineOverride as string;
+      await appendBuildLog(
+        query,
+        build.id,
+        "using panel pipeline override (repo kaiad.yaml ignored)\n"
+      );
+    } else {
+      const yamlPath = path.join(ws, "kaiad.yaml");
+      try {
+        yamlText = await fs.readFile(yamlPath, "utf8");
+      } catch {
+        await appendBuildLog(query, build.id, "kaiad.yaml not found at repo root — skipping build\n");
+        await finishBuild(query, build.id, { status: "no_pipeline" });
+        return;
+      }
     }
     await setBuildPipelineYaml(query, build.id, yamlText);
 
@@ -1617,7 +1630,8 @@ async function dispatchRedeployToBoundAgents(
         loadBalancer: resolved.loadBalancer,
         namespace: resolved.namespace,
         env: resolved.env,
-        volumes: resolved.volumes
+        volumes: resolved.volumes,
+        secretEnv: resolved.secretEnv
       }
     };
     try {

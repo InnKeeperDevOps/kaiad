@@ -463,6 +463,22 @@ export const api = {
       `/api/v1/services/${encodeURIComponent(serviceId)}/builds/${encodeURIComponent(buildId)}`
     ),
 
+  /** Panel-stored kaiad.yaml override (null = use the repo file). */
+  getPipelineOverride: (serviceId: string) =>
+    apiFetch<{ override: string | null; pipelineName: string | null }>(
+      `/api/v1/services/${encodeURIComponent(serviceId)}/pipeline-override`
+    ),
+  savePipelineOverride: (serviceId: string, yaml: string) =>
+    apiFetch<{ ok: true; override: string }>(
+      `/api/v1/services/${encodeURIComponent(serviceId)}/pipeline-override`,
+      { method: "PUT", body: JSON.stringify({ yaml }) }
+    ),
+  clearPipelineOverride: (serviceId: string) =>
+    apiFetch<{ ok: true; override: null }>(
+      `/api/v1/services/${encodeURIComponent(serviceId)}/pipeline-override`,
+      { method: "DELETE" }
+    ),
+
   /** Deploy a specific build (version) of a service to ALL its bound agents. */
   deployServiceVersion: (serviceId: string, buildId: string) =>
     apiFetch<DeployResult & { boundAgents: number }>(

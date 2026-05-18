@@ -3067,6 +3067,150 @@ export function buildServer(opts: BuildServerOptions = {}) {
     }
   );
 
+  // Rich per-agent detail for the Agents page expandable panel: every
+  // service this agent has reported running, joined with live per-app
+  // telemetry (running instance count + summed CPU/mem/net), the
+  // deployed version (imageRef + build sha/status), plus the agent's
+  // queued (not-yet-ack'd) actions and connection state.
+  app.get<{ Params: { agentId: string } }>(
+    "/api/v1/agents/:agentId/detail",
+    async (req, reply) => {
+      const session = await resolveSession(authStore, req.headers.authorization);
+      if (!session) {
+        return reply.status(401).send(
+          apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId })
+        );
+      }
+      const agent = await domainStore.getAgent(session.tenantId, req.params.agentId);
+      if (!agent) {
+        return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Agent not found", correlationId: (req as any).correlationId }));
+      }
+      const connected = realtimeManager.getConnectedAgentIds().includes(req.params.agentId);
+      const queuedActions = await realtimeManager.pendingCommands(req.params.agentId);
+
+      // Live per-container telemetry → aggregate by serviceId.
+      type Agg = { instances: number; cpu: number; mem: number; memPct: number; rx: number; tx: number };
+      const byService = new Map<string, Agg>();
+      for (const raw of realtimeManager.getAppStats(req.params.agentId)) {
+        const p = appStatsSchema.safeParse(raw);
+        if (!p.success) continue;
+        const s = p.data;
+        const sid = s.serviceId;
+        if (!sid) continue;
+        const a = byService.get(sid) ?? { instances: 0, cpu: 0, mem: 0, memPct: 0, rx: 0, tx: 0 };
+        a.instances += 1;
+        a.cpu += s.cpuPercent ?? 0;
+        a.mem += s.memUsedBytes ?? 0;
+        a.memPct = Math.max(a.memPct, s.memPercent ?? 0);
+        a.rx += s.netRxBytesPerSec ?? 0;
+        a.tx += s.netTxBytesPerSec ?? 0;
+        byService.set(sid, a);
+      }
+
+      const q = await getBuildsQuery();
+      const svcList = await domainStore.listServices(session.tenantId);
+      const svcMeta = new Map(svcList.map((s) => [s.id, s]));
+      const rows = q ? await listRunningServicesForAgent(q, session.tenantId, req.params.agentId) : [];
+      const buildCache = new Map<string, { gitSha: string; status: string } | null>();
+      const services = [];
+      for (const r of rows) {
+        let build: { gitSha: string; status: string } | null = null;
+        if (q && r.buildId) {
+          if (buildCache.has(r.buildId)) build = buildCache.get(r.buildId) ?? null;
+          else {
+            const b = await getBuild(q, session.tenantId, r.buildId);
+            build = b ? { gitSha: b.gitSha, status: b.status } : null;
+            buildCache.set(r.buildId, build);
+          }
+        }
+        const agg = byService.get(r.serviceId);
+        const meta = svcMeta.get(r.serviceId);
+        services.push({
+          serviceId: r.serviceId,
+          name: meta?.name ?? r.serviceId,
+          environment: r.environment,
+          namespace: r.namespace,
+          lbType: r.lbType,
+          externalIp: r.externalIp ?? r.externalHostname ?? null,
+          imageRef: r.imageRef,
+          buildId: r.buildId,
+          gitSha: build?.gitSha || null,
+          buildStatus: build?.status || null,
+          observedAt: r.observedAt,
+          runningInstances: agg?.instances ?? 0,
+          cpuPercent: agg ? Math.round(agg.cpu * 10) / 10 : null,
+          memUsedBytes: agg?.mem ?? null,
+          memPercent: agg ? Math.round(agg.memPct * 10) / 10 : null,
+          netRxBytesPerSec: agg?.rx ?? null,
+          netTxBytesPerSec: agg?.tx ?? null
+        });
+      }
+      services.sort((a, b) => a.name.localeCompare(b.name));
+      return { connected, queuedActions, services };
+    }
+  );
+
+  // Read recent logs for a service running on this agent. Dispatches a
+  // run_step (kubectl logs by the kaiad.dev/service-id label in k8s
+  // mode; docker logs by the same container label otherwise) and waits
+  // for the command_ack. Admin/owner only — log output can be sensitive.
+  app.post<{ Params: { agentId: string; serviceId: string }; Querystring: { tail?: string } }>(
+    "/api/v1/agents/:agentId/services/:serviceId/logs",
+    async (req, reply) => {
+      const session = await resolveSession(authStore, req.headers.authorization);
+      if (!session) {
+        return reply.status(401).send(
+          apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId })
+        );
+      }
+      if (session.kind === "apiCredential" || (session.role !== "owner" && session.role !== "admin")) {
+        return reply.status(403).send(
+          apiErrorSchema.parse({ code: "FORBIDDEN", message: "Owner or admin session required to read logs", correlationId: (req as any).correlationId })
+        );
+      }
+      if (!realtimeManager.getConnectedAgentIds().includes(req.params.agentId)) {
+        return reply.status(409).send(
+          apiErrorSchema.parse({ code: "AGENT_OFFLINE", message: "Agent is not connected", correlationId: (req as any).correlationId })
+        );
+      }
+      const q = await getBuildsQuery();
+      const rows = q ? await listRunningServicesForAgent(q, session.tenantId, req.params.agentId) : [];
+      const row = rows.find((r) => r.serviceId === req.params.serviceId);
+      const ns = (row?.namespace || "default").replace(/[^a-zA-Z0-9_.-]/g, "");
+      const sid = req.params.serviceId.replace(/[^a-zA-Z0-9_.-]/g, "");
+      const tailNum = Math.min(Math.max(parseInt(req.query.tail ?? "200", 10) || 200, 1), 2000);
+      const shell =
+        `if command -v kubectl >/dev/null 2>&1 && ` +
+        `kubectl -n '${ns}' get deploy -l kaiad.dev/service-id='${sid}' >/dev/null 2>&1; then ` +
+        `kubectl -n '${ns}' logs -l kaiad.dev/service-id='${sid}' --tail=${tailNum} --prefix --max-log-requests=20 --since=2h 2>&1; ` +
+        `else for c in $(docker ps -q --filter label=kaiad.dev/service-id=${sid}); do ` +
+        `echo "=== container $c ==="; docker logs --tail ${tailNum} "$c" 2>&1; done; fi`;
+      const commandId = crypto.randomUUID();
+      const command = platformToAgentMessageSchema.parse({
+        type: "run_step",
+        commandId,
+        shell,
+        env: {}
+      });
+      const ackPromise = realtimeManager.awaitCommandResult(commandId, 25_000);
+      try {
+        await realtimeManager.sendCommand(req.params.agentId, JSON.stringify(command));
+      } catch (err) {
+        return reply.status(502).send(
+          apiErrorSchema.parse({ code: "DISPATCH_FAILED", message: (err as Error).message, correlationId: (req as any).correlationId })
+        );
+      }
+      try {
+        const ack = await ackPromise;
+        return { status: ack.status, output: ack.output ?? "" };
+      } catch (err) {
+        return reply.status(504).send(
+          apiErrorSchema.parse({ code: "LOGS_TIMEOUT", message: (err as Error).message, correlationId: (req as any).correlationId })
+        );
+      }
+    }
+  );
+
   /**
    * Reconcile pass — for every service this agent is bound to, if no
    * lb_status_report row exists yet, dispatch a redeploy_service for

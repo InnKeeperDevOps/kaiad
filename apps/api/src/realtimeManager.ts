@@ -96,6 +96,30 @@ export class RealtimeManager {
     return [...inner.values()];
   }
 
+  /**
+   * The agent's durable pending-command queue (queued actions not yet
+   * ack'd). Returns the parsed command types in FIFO order; empty when
+   * no redis queue is configured or the queue is empty.
+   */
+  async pendingCommands(agentId: string): Promise<{ type: string; commandId: string }[]> {
+    if (!this.redis) return [];
+    const key = pendingCommandsKey(agentId);
+    const raw = await this.redis.lrange(key, 0, -1);
+    const out: { type: string; commandId: string }[] = [];
+    for (const entry of raw) {
+      try {
+        const o = JSON.parse(entry) as { type?: unknown; commandId?: unknown };
+        out.push({
+          type: typeof o.type === "string" ? o.type : "unknown",
+          commandId: typeof o.commandId === "string" ? o.commandId : ""
+        });
+      } catch {
+        out.push({ type: "unknown", commandId: "" });
+      }
+    }
+    return out;
+  }
+
   /** Remove an app's telemetry (e.g. on app_gone / container stopped). */
   deleteAppStats(agentId: string, containerId: string): void {
     const inner = this.appStatsByAgent.get(agentId);

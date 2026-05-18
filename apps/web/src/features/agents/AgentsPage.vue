@@ -115,6 +115,61 @@ function toggleDeploy(agentId: string) {
   deployErr.value = null;
 }
 
+const detailFor = ref<string | null>(null);
+const detailData = ref<Awaited<ReturnType<typeof api.getAgentDetail>> | null>(null);
+const detailLoading = ref(false);
+const detailErr = ref<string | null>(null);
+const logsForSvc = ref<string | null>(null);
+const logsText = ref("");
+const logsLoading = ref(false);
+
+async function toggleDetail(agentId: string) {
+  if (detailFor.value === agentId) {
+    detailFor.value = null;
+    return;
+  }
+  detailFor.value = agentId;
+  detailData.value = null;
+  detailErr.value = null;
+  logsForSvc.value = null;
+  logsText.value = "";
+  detailLoading.value = true;
+  try {
+    detailData.value = await api.getAgentDetail(agentId);
+  } catch (e) {
+    detailErr.value = (e as Error).message;
+  } finally {
+    detailLoading.value = false;
+  }
+}
+async function openLogs(agentId: string, serviceId: string) {
+  logsForSvc.value = serviceId;
+  logsText.value = "";
+  logsLoading.value = true;
+  try {
+    const r = await api.fetchServiceLogs(agentId, serviceId, 300);
+    logsText.value = r.output || "(no output)";
+  } catch (e) {
+    logsText.value = `Error: ${(e as Error).message}`;
+  } finally {
+    logsLoading.value = false;
+  }
+}
+function fmtBytes(n: number | null): string {
+  if (n == null) return "—";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < u.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
+}
+function fmtRate(n: number | null): string {
+  return n == null ? "—" : `${fmtBytes(n)}/s`;
+}
+
 async function onDeployServiceChange() {
   deployBuilds.value = [];
   deployBuildId.value = "";
@@ -317,7 +372,26 @@ const summary = computed(() => {
               </span>
             </td>
             <td :style="{ ...tdStyle, fontSize: '0.85rem' }">
-              {{ serviceCountByAgent.get(a.id) ?? 0 }}
+              <button
+                type="button"
+                :title="'Show services, instances, usage, version, queued actions & logs'"
+                :style="{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.3rem',
+                  padding: '0.15rem 0.5rem',
+                  background: detailFor === a.id ? 'var(--color-surface)' : 'transparent',
+                  color: 'var(--color-text)',
+                  border: '1px solid var(--color-border)',
+                  borderRadius: '4px',
+                  fontSize: '0.78rem',
+                  cursor: 'pointer'
+                }"
+                @click="toggleDetail(a.id)"
+              >
+                {{ serviceCountByAgent.get(a.id) ?? 0 }}
+                <span :style="{ color: 'var(--color-text-secondary)' }">{{ detailFor === a.id ? '▾' : '▸' }}</span>
+              </button>
             </td>
             <td v-if="canDeploy" :style="tdStyle">
               <button
@@ -427,6 +501,108 @@ const summary = computed(() => {
                   {{ deployErr }}
                 </span>
               </div>
+            </td>
+          </tr>
+          <tr v-if="detailFor === a.id">
+            <td :colspan="canDeploy ? 8 : 7" :style="{ ...tdStyle, background: 'var(--color-bg)' }">
+              <div v-if="detailLoading" :style="{ fontSize: '0.8rem', color: 'var(--color-text-secondary)' }">Loading…</div>
+              <div v-else-if="detailErr" :style="{ fontSize: '0.8rem', color: 'var(--color-danger)' }">{{ detailErr }}</div>
+              <template v-else-if="detailData">
+                <div :style="{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '0.5rem', fontSize: '0.78rem' }">
+                  <Badge :variant="detailData.connected ? 'success' : 'muted'">
+                    {{ detailData.connected ? 'connected' : 'offline' }}
+                  </Badge>
+                  <span :style="{ color: 'var(--color-text-secondary)' }">Queued actions:</span>
+                  <template v-if="detailData.queuedActions.length">
+                    <Badge v-for="(qa, i) in detailData.queuedActions" :key="i" variant="warning">{{ qa.type }}</Badge>
+                  </template>
+                  <Badge v-else variant="muted">none</Badge>
+                </div>
+                <p v-if="detailData.services.length === 0" :style="{ fontSize: '0.8rem', color: 'var(--color-text-secondary)', margin: 0 }">
+                  No services reported running on this agent yet.
+                </p>
+                <table v-else :style="{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem' }">
+                  <thead>
+                    <tr>
+                      <th :style="thStyle">Service</th>
+                      <th :style="thStyle">Env / ns</th>
+                      <th :style="thStyle">Instances</th>
+                      <th :style="thStyle">CPU</th>
+                      <th :style="thStyle">Memory</th>
+                      <th :style="thStyle">Net (rx/tx)</th>
+                      <th :style="thStyle">Version</th>
+                      <th :style="thStyle">LB</th>
+                      <th :style="thStyle">Logs</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template v-for="s in detailData.services" :key="s.serviceId">
+                      <tr :style="{ borderTop: '1px solid var(--color-border)' }">
+                        <td :style="tdStyle">{{ s.name }}</td>
+                        <td :style="tdStyle">{{ s.environment }} / {{ s.namespace || '—' }}</td>
+                        <td :style="tdStyle">{{ s.runningInstances }}</td>
+                        <td :style="tdStyle">{{ s.cpuPercent == null ? '—' : s.cpuPercent + '%' }}</td>
+                        <td :style="tdStyle">
+                          {{ fmtBytes(s.memUsedBytes) }}<span v-if="s.memPercent != null"> ({{ s.memPercent }}%)</span>
+                        </td>
+                        <td :style="tdStyle">{{ fmtRate(s.netRxBytesPerSec) }} / {{ fmtRate(s.netTxBytesPerSec) }}</td>
+                        <td :style="tdStyle">
+                          <span v-if="s.gitSha" :style="{ fontFamily: 'ui-monospace, monospace' }">{{ s.gitSha.slice(0, 8) }}</span>
+                          <span v-else :style="{ color: 'var(--color-text-secondary)' }">—</span>
+                          <span v-if="s.buildStatus" :style="{ color: 'var(--color-text-secondary)' }"> · {{ s.buildStatus }}</span>
+                          <div v-if="s.imageRef" :style="{ fontSize: '0.7rem', color: 'var(--color-text-secondary)', fontFamily: 'ui-monospace, monospace' }">{{ s.imageRef }}</div>
+                        </td>
+                        <td :style="tdStyle">
+                          {{ s.lbType }}<span v-if="s.externalIp"> · {{ s.externalIp }}</span>
+                        </td>
+                        <td :style="tdStyle">
+                          <button
+                            type="button"
+                            :disabled="!canDeploy || logsLoading"
+                            :title="canDeploy ? 'Fetch recent logs' : 'Admin/owner only'"
+                            :style="{
+                              padding: '0.15rem 0.5rem',
+                              background: 'transparent',
+                              color: 'var(--color-text)',
+                              border: '1px solid var(--color-border)',
+                              borderRadius: '4px',
+                              fontSize: '0.75rem',
+                              cursor: canDeploy ? 'pointer' : 'not-allowed',
+                              opacity: canDeploy ? 1 : 0.5
+                            }"
+                            @click="openLogs(a.id, s.serviceId)"
+                          >Logs</button>
+                        </td>
+                      </tr>
+                      <tr v-if="logsForSvc === s.serviceId">
+                        <td :colspan="9" :style="{ ...tdStyle, background: 'var(--color-surface)' }">
+                          <div v-if="logsLoading" :style="{ fontSize: '0.78rem', color: 'var(--color-text-secondary)' }">Fetching logs…</div>
+                          <pre
+                            v-else
+                            :style="{
+                              margin: 0,
+                              maxHeight: '20rem',
+                              overflow: 'auto',
+                              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                              fontSize: '0.72rem',
+                              lineHeight: 1.45,
+                              whiteSpace: 'pre-wrap',
+                              wordBreak: 'break-all',
+                              color: 'var(--color-text)'
+                            }"
+                          >{{ logsText }}</pre>
+                          <button
+                            v-if="!logsLoading"
+                            type="button"
+                            :style="{ marginTop: '0.4rem', padding: '0.15rem 0.5rem', background: 'transparent', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)', borderRadius: '4px', fontSize: '0.72rem', cursor: 'pointer' }"
+                            @click="logsForSvc = null"
+                          >Close logs</button>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </template>
             </td>
           </tr>
           </template>

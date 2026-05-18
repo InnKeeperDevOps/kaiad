@@ -348,6 +348,39 @@ export const api = {
   listAgents: () => apiFetch<{ agents: Agent[] }>("/api/v1/agents"),
   getAgent: (id: string) =>
     apiFetch<Agent>(`/api/v1/agents/${encodeURIComponent(id)}`),
+
+  /** Rich per-agent detail: per-service instances/cpu/mem/net + deployed version + queued actions. */
+  getAgentDetail: (agentId: string) =>
+    apiFetch<{
+      connected: boolean;
+      queuedActions: { type: string; commandId: string }[];
+      services: {
+        serviceId: string;
+        name: string;
+        environment: string;
+        namespace: string;
+        lbType: string;
+        externalIp: string | null;
+        imageRef: string | null;
+        buildId: string | null;
+        gitSha: string | null;
+        buildStatus: string | null;
+        observedAt: string;
+        runningInstances: number;
+        cpuPercent: number | null;
+        memUsedBytes: number | null;
+        memPercent: number | null;
+        netRxBytesPerSec: number | null;
+        netTxBytesPerSec: number | null;
+      }[];
+    }>(`/api/v1/agents/${encodeURIComponent(agentId)}/detail`),
+
+  /** Fetch recent logs for a service running on an agent (admin/owner). */
+  fetchServiceLogs: (agentId: string, serviceId: string, tail = 200) =>
+    apiFetch<{ status: string; output: string }>(
+      `/api/v1/agents/${encodeURIComponent(agentId)}/services/${encodeURIComponent(serviceId)}/logs?tail=${tail}`,
+      { method: "POST" }
+    ),
   updateAgent: (
     id: string,
     data: { name?: string | null; allowedCapabilities?: string[]; environment?: string }

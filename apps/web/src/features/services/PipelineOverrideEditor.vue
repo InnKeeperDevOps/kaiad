@@ -17,7 +17,7 @@ const props = defineProps<{ serviceId: string; serviceName: string }>();
 
 const loading = ref(true);
 const saving = ref(false);
-const tab = ref<"raw" | "form">("raw");
+const tab = ref<"raw" | "form">("form");
 const yamlText = ref("");
 const hadOverride = ref(false);
 const loadedFrom = ref<"service" | "repo" | "repofile" | "template">("template");
@@ -90,6 +90,9 @@ onMounted(async () => {
       loadedFrom.value = "template";
       scope.value = "repo";
     }
+    // Form is the default tab — populate the parsed model now (the
+    // tab watcher won't fire since tab doesn't change on load).
+    loadFormFromYaml();
   } catch (e) {
     message.value = (e as Error).message;
   } finally {
@@ -339,15 +342,15 @@ async function clearOverride() {
         <button
           type="button"
           class="pl-tab"
-          :class="{ 'pl-tab--active': tab === 'raw' }"
-          @click="tab = 'raw'"
-        >Raw YAML</button>
-        <button
-          type="button"
-          class="pl-tab"
           :class="{ 'pl-tab--active': tab === 'form' }"
           @click="tab = 'form'"
         >Form</button>
+        <button
+          type="button"
+          class="pl-tab"
+          :class="{ 'pl-tab--active': tab === 'raw' }"
+          @click="tab = 'raw'"
+        >Raw YAML</button>
       </div>
 
       <!-- RAW -->

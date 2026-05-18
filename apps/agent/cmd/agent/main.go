@@ -385,11 +385,19 @@ func main() {
 			GetBackend: getBackend,
 			Inventory:  inventory,
 		})
+		// k8s-mode agents have no docker socket on containerd nodes;
+		// this sampler enumerates kaiad-deployed pods via kubectl.
+		// Mutually exclusive with `as` by backend (each returns no
+		// frames for the other's runtime).
+		k8sAs := appstats.NewK8sSampler(getBackend)
 		ps := processstats.NewSampler(inventory)
 		combined := func(agentID string) ([][]byte, error) {
 			frames, err := as.Build(agentID)
 			if err != nil {
 				return nil, err
+			}
+			if kf, kerr := k8sAs.Build(agentID); kerr == nil && len(kf) > 0 {
+				frames = append(frames, kf...)
 			}
 			procFrames, _ := ps.Build(agentID)
 			if len(procFrames) > 0 {

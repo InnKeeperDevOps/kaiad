@@ -204,6 +204,29 @@ async function save() {
     saving.value = false;
   }
 }
+async function saveAndDeploy() {
+  if (!validation.value.ok) {
+    messageOk.value = false;
+    message.value = `Fix errors first: ${validation.value.reason}`;
+    return;
+  }
+  saving.value = true;
+  message.value = null;
+  try {
+    await api.savePipelineOverride(props.serviceId, yamlText.value);
+    hadOverride.value = true;
+    loadedFrom.value = "override";
+    const r = await api.triggerServiceBuild(props.serviceId);
+    messageOk.value = true;
+    message.value = `Override saved. Build ${r.build.id.slice(0, 8)} queued — it builds the new config and auto-deploys to bound agents.`;
+  } catch (e) {
+    messageOk.value = false;
+    message.value = (e as Error).message;
+  } finally {
+    saving.value = false;
+  }
+}
+
 async function clearOverride() {
   if (!window.confirm("Remove the panel override? Builds will use the repo's kaiad.yaml again.")) return;
   saving.value = true;
@@ -406,10 +429,13 @@ async function clearOverride() {
           {{ validation.ok ? '✓' : '✗' }} {{ validation.reason }}
         </span>
         <div class="pl-actions__btns">
-          <Button variant="primary" size="md" :loading="saving" :disabled="!validation.ok" @click="save">
-            Save override
+          <Button variant="primary" size="md" :loading="saving" :disabled="!validation.ok" @click="saveAndDeploy">
+            Save &amp; deploy
           </Button>
-          <Button variant="secondary" size="md" :disabled="saving || !hadOverride" @click="clearOverride">
+          <Button variant="secondary" size="md" :loading="saving" :disabled="!validation.ok" @click="save">
+            Save only
+          </Button>
+          <Button variant="ghost" size="md" :disabled="saving || !hadOverride" @click="clearOverride">
             Clear (use repo file)
           </Button>
         </div>

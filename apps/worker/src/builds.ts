@@ -1615,7 +1615,8 @@ async function dispatchRedeployToBoundAgents(
         instances: resolved.instances,
         domains: resolved.domains,
         loadBalancer: resolved.loadBalancer,
-        namespace: resolved.namespace
+        namespace: resolved.namespace,
+        env: resolved.env
       }
     };
     try {

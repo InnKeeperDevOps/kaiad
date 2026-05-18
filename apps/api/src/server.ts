@@ -3312,7 +3312,8 @@ export function buildServer(opts: BuildServerOptions = {}) {
           instances: newR.instances,
           domains: newR.domains,
           loadBalancer: newR.loadBalancer,
-          namespace: newR.namespace
+          namespace: newR.namespace,
+          env: newR.env
         }
       };
       try {
@@ -3617,7 +3618,8 @@ export function buildServer(opts: BuildServerOptions = {}) {
           instances: desired.instances,
           domains: desired.domains,
           loadBalancer: desired.loadBalancer,
-          namespace: desired.namespace
+          namespace: desired.namespace,
+          env: desired.env
         }
       };
       try {

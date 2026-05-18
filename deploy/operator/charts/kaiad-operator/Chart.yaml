@@ -4,8 +4,8 @@ description: |
   Kubernetes operator for the Kaiad agent. Reconciles KaiadAgent custom
   resources into agent Deployments, ServiceAccounts, and scoped RBAC.
 type: application
-version: 0.1.5
-appVersion: "0.1.5"
+version: 0.1.6
+appVersion: "0.1.6"
 keywords:
   - kaiad
   - operator

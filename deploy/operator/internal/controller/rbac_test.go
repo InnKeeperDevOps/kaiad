@@ -46,6 +46,13 @@ func TestValidateManages_AllowList(t *testing.T) {
 			wantErrIn: "",
 		},
 		{
+			name: "allowed: metrics.k8s.io/pods read",
+			rules: []kaiadv1alpha1.ManagesRule{
+				{APIGroups: []string{"metrics.k8s.io"}, Resources: []string{"pods"}, Verbs: []string{"get", "list"}},
+			},
+			wantErrIn: "",
+		},
+		{
 			name: "blocked: pods create (read-only resource)",
 			rules: []kaiadv1alpha1.ManagesRule{
 				{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"create"}},

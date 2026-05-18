@@ -75,6 +75,15 @@ var allowedRBAC = map[string]map[string]map[string]struct{}{
 			"get": {}, "list": {}, "watch": {}, "create": {}, "update": {}, "patch": {}, "delete": {},
 		},
 	},
+	// Read-only pod metrics for the agent's kubernetes app_stats sampler
+	// (`kubectl top pods`). Requires metrics-server in the cluster; the
+	// agent treats missing metrics as best-effort (instances/state still
+	// reported). get/list only — no mutation possible on this API.
+	"metrics.k8s.io": {
+		"pods": {
+			"get": {}, "list": {},
+		},
+	},
 	"batch": {
 		"jobs": {
 			"get": {}, "list": {}, "watch": {}, "create": {}, "delete": {},

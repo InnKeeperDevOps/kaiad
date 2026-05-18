@@ -184,6 +184,11 @@ function buildKaiadAgentManifest(opts: {
     "    - apiGroups: [\"\"]",
     "      resources: [\"pods\", \"pods/log\"]",
     "      verbs: [\"get\", \"list\", \"watch\"]",
+    // read-only pod metrics for the agent's k8s app_stats sampler
+    // (kubectl top pods); needs metrics-server in the cluster.
+    "    - apiGroups: [\"metrics.k8s.io\"]",
+    "      resources: [\"pods\"]",
+    "      verbs: [\"get\", \"list\"]",
     "    - apiGroups: [\"\"]",
     "      resources: [\"namespaces\"]",
     "      verbs: [\"get\", \"list\", \"watch\", \"create\"]",

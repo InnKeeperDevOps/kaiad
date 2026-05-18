@@ -5,6 +5,7 @@ import { api, type Agent, type MonitoredService, type SshKey } from "../../lib/a
 import { useAuth } from "../../lib/useAuth.js";
 import BuildsForServiceSection from "./BuildsForServiceSection.vue";
 import PipelineOverrideEditor from "./PipelineOverrideEditor.vue";
+import ServiceWizard from "./ServiceWizard.vue";
 
 type ServiceForm = {
   name: string;
@@ -33,7 +34,13 @@ const sshKeys = ref<SshKey[]>([]);
 const agents = ref<Agent[]>([]);
 const error = ref<string | null>(null);
 const showForm = ref(false);
+const showWizard = ref(false);
 const editingId = ref<string | null>(null);
+
+function onWizardCreated(svc: MonitoredService) {
+  services.value = [...services.value, svc];
+  showWizard.value = false;
+}
 const form = reactive<ServiceForm>(emptyForm());
 
 const auth = useAuth();
@@ -122,6 +129,7 @@ function handleEdit(svc: MonitoredService) {
   form.pipelineName = svc.pipelineName || "";
   form.agentIds = (svc.agents ?? []).map((b) => b.agentId);
   editingId.value = svc.id;
+  showWizard.value = false;
   showForm.value = true;
 }
 
@@ -195,12 +203,13 @@ function togglePipeline(id: string) {
         v-if="canManage"
         :style="primaryBtn"
         @click="
-          showForm = !showForm;
+          showWizard = !showWizard;
+          showForm = false;
           editingId = null;
           resetForm();
         "
       >
-        {{ showForm ? "Cancel" : "Add Service" }}
+        {{ showWizard ? "Cancel" : "Add Service" }}
       </button>
     </div>
 
@@ -224,8 +233,16 @@ function togglePipeline(id: string) {
       automated error → fix loop.
     </div>
 
+    <ServiceWizard
+      v-if="canManage && showWizard"
+      :agents="agents"
+      :ssh-keys="sshKeys"
+      @created="onWizardCreated"
+      @cancel="showWizard = false"
+    />
+
     <form
-      v-if="canManage && showForm"
+      v-if="canManage && showForm && editingId"
       :style="{
         background: 'var(--color-surface)',
         border: '1px solid var(--color-border)',
@@ -317,7 +334,7 @@ function togglePipeline(id: string) {
       <button type="submit" :style="primaryBtn">{{ editingId ? "Save Changes" : "Create" }}</button>
     </form>
 
-    <p v-if="services.length === 0 && !showForm" :style="{ color: 'var(--color-text-secondary)' }">
+    <p v-if="services.length === 0 && !showForm && !showWizard" :style="{ color: 'var(--color-text-secondary)' }">
       No services configured yet.
     </p>
 

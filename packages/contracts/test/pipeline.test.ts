@@ -359,6 +359,35 @@ environments:
       expect(unknown.instances).toBe(1);
       expect(unknown.domains[0]?.host).toBe("default.example.com");
     });
+
+    it("resolveEnvironment merges runtime.env with per-env env (per-env wins per key)", () => {
+      const r = parsePipelineYaml(`version: 1
+runtime:
+  image: nginx:alpine
+  command: ["/start.sh"]
+  env:
+    PHPHOST: php:9000
+    MCBANS_ENV: dev
+ports:
+  - port: 80
+    name: http
+environments:
+  production:
+    namespace: mcbans-prod
+    env:
+      MCBANS_ENV: prod
+`);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+
+      const dev = resolveEnvironment(r.pipeline, "development");
+      expect(dev.env).toEqual({ PHPHOST: "php:9000", MCBANS_ENV: "dev" });
+
+      // production overrides MCBANS_ENV but inherits PHPHOST
+      const prod = resolveEnvironment(r.pipeline, "production");
+      expect(prod.env).toEqual({ PHPHOST: "php:9000", MCBANS_ENV: "prod" });
+      expect(prod.namespace).toBe("mcbans-prod");
+    });
   });
 
   describe("multi-service kaiad.yaml", () => {

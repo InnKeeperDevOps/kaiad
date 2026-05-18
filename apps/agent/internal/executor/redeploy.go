@@ -64,6 +64,9 @@ type redeployInput struct {
 	instances    int
 	domains      []domainSpec
 	loadBalancer loadBalancerSpec
+	// env is the resolved plain env-var map (runtime.env merged with the
+	// per-environment override) injected into the deployed container.
+	env map[string]string
 }
 
 type domainSpec struct {
@@ -116,6 +119,14 @@ func parseRedeployPayload(payload map[string]interface{}) (redeployInput, error)
 	}
 	if n, ok := payload["instances"].(float64); ok && n >= 0 {
 		in.instances = int(n)
+	}
+	if raw, ok := payload["env"].(map[string]interface{}); ok {
+		in.env = make(map[string]string, len(raw))
+		for k, v := range raw {
+			if s, ok := v.(string); ok {
+				in.env[k] = s
+			}
+		}
 	}
 	if raw, ok := payload["domains"].([]interface{}); ok {
 		for _, item := range raw {
@@ -996,6 +1007,12 @@ func renderK8sManifests(in redeployInput, namespace string) string {
 	}
 	b.WriteString("      containers:\n        - name: app\n")
 	fmt.Fprintf(&b, "          image: %s\n", in.imageRef)
+	if len(in.env) > 0 {
+		b.WriteString("          env:\n")
+		for _, k := range sortedKeys(in.env) {
+			fmt.Fprintf(&b, "            - name: %q\n              value: %q\n", k, in.env[k])
+		}
+	}
 	if len(ports) > 0 {
 		b.WriteString("          ports:\n")
 		for _, p := range ports {

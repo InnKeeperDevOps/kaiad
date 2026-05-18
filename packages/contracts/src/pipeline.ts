@@ -100,7 +100,15 @@ export const pipelineRuntimeSchema = z.object({
    */
   layers: z.array(safeRelativePath).default([]),
   /** Container entrypoint as an exec-form argv array. */
-  command: z.array(z.string().min(1)).min(1)
+  command: z.array(z.string().min(1)).min(1),
+  /**
+   * Plain environment variables injected into the deployed container
+   * (rendered into the k8s Deployment / docker run). Per-environment
+   * `environments.<env>.env` entries merge over these. For secret
+   * values, reference a pre-provisioned Secret out-of-band — Kaiad does
+   * not template secret material through kaiad.yaml.
+   */
+  env: z.record(z.string()).default({})
 });
 
 // Domains route an external host to a port already declared in `ports[]`.
@@ -198,7 +206,12 @@ export const pipelineEnvironmentSchema = z.object({
    * "project name" — the agent uses it to scope container names and
    * labels). Overrides the top-level default.
    */
-  namespace: namespaceSchema.optional()
+  namespace: namespaceSchema.optional(),
+  /**
+   * Per-environment env vars. Merged over (and overriding) the
+   * top-level `runtime.env` at deploy time.
+   */
+  env: z.record(z.string()).optional()
 });
 
 // Environment names: lowercase alphanum + hyphen, max 63 chars (matches
@@ -389,13 +402,19 @@ export function resolveEnvironment(
    * default in that case (k8s: agent's pod ns; docker: "kaiad").
    */
   namespace: string;
+  /**
+   * Resolved env vars: top-level runtime.env with the per-environment
+   * `environments.<env>.env` merged over it (per-env wins per key).
+   */
+  env: Record<string, string>;
 } {
   const env = def.environments[envName];
   return {
     instances: env?.instances ?? def.instances,
     domains: env?.domains.length ? env.domains : def.domains,
     loadBalancer: env?.loadBalancer ?? def.loadBalancer,
-    namespace: env?.namespace ?? def.namespace ?? ""
+    namespace: env?.namespace ?? def.namespace ?? "",
+    env: { ...(def.runtime?.env ?? {}), ...(env?.env ?? {}) }
   };
 }
 

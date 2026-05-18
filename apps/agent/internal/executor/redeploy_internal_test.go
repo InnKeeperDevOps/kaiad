@@ -144,6 +144,36 @@ func TestRenderK8sManifestsImagePullSecret(t *testing.T) {
 	}
 }
 
+func TestParseAndRenderEnv(t *testing.T) {
+	p := richPayload("none")
+	p["env"] = map[string]interface{}{"PHPHOST": "mcbans-php:9000", "MCBANS_ENV": "prod"}
+	in, err := parseRedeployPayload(p)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if in.env["PHPHOST"] != "mcbans-php:9000" || in.env["MCBANS_ENV"] != "prod" {
+		t.Fatalf("env not parsed: %+v", in.env)
+	}
+	yaml := renderK8sManifests(in, "mcbans-prod")
+	for _, want := range []string{
+		"env:",
+		`- name: "MCBANS_ENV"`,
+		`value: "prod"`,
+		`- name: "PHPHOST"`,
+		`value: "mcbans-php:9000"`,
+	} {
+		if !strings.Contains(yaml, want) {
+			t.Fatalf("rendered Deployment missing %q in:\n%s", want, yaml)
+		}
+	}
+
+	// No env -> no env: stanza.
+	in2, _ := parseRedeployPayload(richPayload("none"))
+	if strings.Contains(renderK8sManifests(in2, "prod"), "          env:\n") {
+		t.Fatal("env: stanza emitted when no env vars set")
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

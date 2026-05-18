@@ -464,7 +464,14 @@ const redeployServiceCommandSchema = z.object({
    * mode). Empty string means "fall back to runtime default":
    * k8s mode → agent pod's own namespace; docker mode → "kaiad".
    */
-  namespace: z.string().default("")
+  namespace: z.string().default(""),
+  /**
+   * Resolved plain env vars (runtime.env merged with the
+   * per-environment override) to inject into the deployed container.
+   * MUST be declared here or platformToAgentMessageSchema.parse()
+   * strips it from the command before it reaches the agent.
+   */
+  env: z.record(z.string()).default({})
 });
 
 /**

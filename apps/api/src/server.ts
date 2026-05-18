@@ -2966,7 +2966,8 @@ export function buildServer(opts: BuildServerOptions = {}) {
           instances: resolved.instances,
           domains: resolved.domains,
           loadBalancer: resolved.loadBalancer,
-          namespace: resolved.namespace
+          namespace: resolved.namespace,
+          env: resolved.env
         }
       };
       try {
@@ -3050,7 +3051,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
     for (const t of targets) {
       const resolved = pickedPipeline
         ? resolveEnvironment(pickedPipeline, t.environment)
-        : { instances: 1, domains: [], loadBalancer: { type: "none" }, namespace: "" };
+        : { instances: 1, domains: [], loadBalancer: { type: "none" }, namespace: "", env: {} };
       const commandId = crypto.randomUUID();
       const command = {
         type: "redeploy_service",
@@ -3063,7 +3064,8 @@ export function buildServer(opts: BuildServerOptions = {}) {
         instances: resolved.instances,
         domains: resolved.domains,
         loadBalancer: resolved.loadBalancer,
-        namespace: resolved.namespace
+        namespace: resolved.namespace,
+        env: resolved.env
       };
       try {
         const r = await realtimeManager.sendCommand(t.agentId, JSON.stringify(command));

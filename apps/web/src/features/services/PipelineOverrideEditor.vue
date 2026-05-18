@@ -31,6 +31,12 @@ const gitRepoUrl = ref("");
 const branch = ref("");
 const repoServices = ref<{ id: string; name: string; pipelineName: string | null; hasServiceOverride: boolean }[]>([]);
 
+const repoScopeHint = computed(() => {
+  const n = repoServices.value.length;
+  const repo = gitRepoUrl.value ? ` from ${gitRepoUrl.value}@${branch.value}` : "";
+  return `default — ${n} service${n === 1 ? "" : "s"}${repo}`;
+});
+
 const STARTER = `version: 1
 runtime:
   image: nginx:alpine
@@ -305,17 +311,14 @@ async function clearOverride() {
         <legend class="pl-scope__legend">Apply to</legend>
         <label class="pl-scope__opt">
           <input type="radio" value="repo" v-model="scope" />
-          <span>
+          <span class="pl-scope__text">
             <strong>All services in this repo</strong>
-            <span class="pl-hint">
-              default — {{ repoServices.length }} service<span v-if="repoServices.length !== 1">s</span>
-              from {{ gitRepoUrl }}@{{ branch }}
-            </span>
+            <span class="pl-hint">{{ repoScopeHint }}</span>
           </span>
         </label>
         <label class="pl-scope__opt">
           <input type="radio" value="service" v-model="scope" />
-          <span>
+          <span class="pl-scope__text">
             <strong>This service only</strong>
             <span class="pl-hint">explicit per-service override — takes precedence over the repo one</span>
           </span>
@@ -549,7 +552,7 @@ async function clearOverride() {
   font-size: 0.875rem;
   cursor: pointer;
 }
-.pl-scope__opt span {
+.pl-scope__text {
   display: flex;
   flex-direction: column;
   gap: 0.1rem;

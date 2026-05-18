@@ -388,6 +388,53 @@ environments:
       expect(prod.env).toEqual({ PHPHOST: "php:9000", MCBANS_ENV: "prod" });
       expect(prod.namespace).toBe("mcbans-prod");
     });
+
+    it("parses runtime.volumes (nfs) and resolveEnvironment carries them; per-env replaces", () => {
+      const r = parsePipelineYaml(`version: 1
+runtime:
+  image: php:fpm
+  command: ["php-fpm"]
+  volumes:
+    - name: cache
+      nfs:
+        server: 192.168.1.147
+        path: /data
+      mounts:
+        - path: /cache/www/
+        - path: /cache/admin/
+          readOnly: true
+ports:
+  - port: 9000
+    name: fpm
+environments:
+  production:
+    namespace: mcbans-prod
+`);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const dev = resolveEnvironment(r.pipeline, "development");
+      expect(dev.volumes).toHaveLength(1);
+      expect(dev.volumes[0]?.nfs).toEqual({ server: "192.168.1.147", path: "/data" });
+      expect(dev.volumes[0]?.mounts).toEqual([
+        { path: "/cache/www/" },
+        { path: "/cache/admin/", readOnly: true }
+      ]);
+      // production has no volumes override -> inherits top-level
+      expect(resolveEnvironment(r.pipeline, "production").volumes).toHaveLength(1);
+    });
+
+    it("rejects a volume with no source or multiple sources", () => {
+      const bad = parsePipelineYaml(`version: 1
+runtime:
+  image: x
+  command: ["x"]
+  volumes:
+    - name: v
+      mounts:
+        - path: /m
+`);
+      expect(bad.ok).toBe(false);
+    });
   });
 
   describe("multi-service kaiad.yaml", () => {

@@ -174,6 +174,48 @@ func TestParseAndRenderEnv(t *testing.T) {
 	}
 }
 
+func TestParseAndRenderVolumes(t *testing.T) {
+	p := richPayload("none")
+	p["volumes"] = []interface{}{
+		map[string]interface{}{
+			"name": "cache",
+			"nfs":  map[string]interface{}{"server": "192.168.1.147", "path": "/data"},
+			"mounts": []interface{}{
+				map[string]interface{}{"path": "/cache/www/"},
+				map[string]interface{}{"path": "/cache/admin/", "readOnly": true},
+			},
+		},
+	}
+	in, err := parseRedeployPayload(p)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(in.volumes) != 1 || in.volumes[0].nfsServer != "192.168.1.147" || len(in.volumes[0].mounts) != 2 {
+		t.Fatalf("volumes not parsed: %+v", in.volumes)
+	}
+	yaml := renderK8sManifests(in, "mcbans-prod")
+	for _, want := range []string{
+		"volumeMounts:",
+		`- name: "cache"`,
+		`mountPath: "/cache/www/"`,
+		`mountPath: "/cache/admin/"`,
+		"readOnly: true",
+		"volumes:",
+		"nfs:",
+		`server: "192.168.1.147"`,
+		`path: "/data"`,
+	} {
+		if !strings.Contains(yaml, want) {
+			t.Fatalf("rendered manifest missing %q in:\n%s", want, yaml)
+		}
+	}
+
+	in2, _ := parseRedeployPayload(richPayload("none"))
+	if strings.Contains(renderK8sManifests(in2, "prod"), "volumeMounts:") {
+		t.Fatal("volumeMounts emitted with no volumes")
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

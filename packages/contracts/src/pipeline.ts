@@ -82,6 +82,61 @@ export const pipelineDockerfileSchema = z.object({
   target: z.string().min(1).optional()
 });
 
+// A mount point inside the container for a named volume.
+export const pipelineVolumeMountSchema = z.object({
+  /** Absolute path inside the container. */
+  path: z.string().min(1).startsWith("/", "volume mount path must be absolute"),
+  /** Optional sub-path within the volume to mount at `path`. */
+  subPath: z.string().min(1).optional(),
+  /** Mount read-only. */
+  readOnly: z.boolean().optional()
+});
+
+// A volume + the paths it's mounted at. Exactly one source
+// (nfs/hostPath/emptyDir/persistentVolumeClaim) must be set — Kaiad
+// deliberately omits secret/configMap volume sources (use runtime.env
+// for config; the agent never templates secret material).
+export const pipelineVolumeSchema = z
+  .object({
+    /** DNS-1123 label; unique within the runtime. */
+    name: z
+      .string()
+      .regex(/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/, "volume name must be a DNS-1123 label"),
+    nfs: z
+      .object({
+        server: z.string().min(1),
+        path: z.string().min(1).startsWith("/", "nfs.path must be absolute"),
+        readOnly: z.boolean().optional()
+      })
+      .optional(),
+    hostPath: z
+      .object({
+        path: z.string().min(1).startsWith("/", "hostPath.path must be absolute"),
+        /** k8s HostPathType, e.g. "Directory", "DirectoryOrCreate". */
+        type: z.string().min(1).optional()
+      })
+      .optional(),
+    emptyDir: z.boolean().optional(),
+    persistentVolumeClaim: z.object({ claimName: z.string().min(1) }).optional(),
+    /** One or more container mount points for this volume. */
+    mounts: z.array(pipelineVolumeMountSchema).min(1)
+  })
+  .superRefine((v, ctx) => {
+    const sources = [
+      v.nfs !== undefined,
+      v.hostPath !== undefined,
+      v.emptyDir === true,
+      v.persistentVolumeClaim !== undefined
+    ].filter(Boolean).length;
+    if (sources !== 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "volume must set exactly one source: nfs | hostPath | emptyDir | persistentVolumeClaim"
+      });
+    }
+  });
+
 export const pipelineRuntimeSchema = z.object({
   /**
    * Base image for the pushed runtime image. Defaults to "scratch" so
@@ -108,7 +163,13 @@ export const pipelineRuntimeSchema = z.object({
    * values, reference a pre-provisioned Secret out-of-band — Kaiad does
    * not template secret material through kaiad.yaml.
    */
-  env: z.record(z.string()).default({})
+  env: z.record(z.string()).default({}),
+  /**
+   * Volumes mounted into the deployed container (rendered as k8s
+   * pod.spec.volumes + container.volumeMounts). Per-environment
+   * `environments.<env>.volumes` replaces this list when present.
+   */
+  volumes: z.array(pipelineVolumeSchema).default([])
 });
 
 // Domains route an external host to a port already declared in `ports[]`.
@@ -211,7 +272,12 @@ export const pipelineEnvironmentSchema = z.object({
    * Per-environment env vars. Merged over (and overriding) the
    * top-level `runtime.env` at deploy time.
    */
-  env: z.record(z.string()).optional()
+  env: z.record(z.string()).optional(),
+  /**
+   * Per-environment volumes. Replaces the top-level `runtime.volumes`
+   * list when present (e.g. a different NFS server per environment).
+   */
+  volumes: z.array(pipelineVolumeSchema).optional()
 });
 
 // Environment names: lowercase alphanum + hyphen, max 63 chars (matches
@@ -379,6 +445,7 @@ export type PipelinePort = z.infer<typeof pipelinePortSchema>;
 export type PipelineBuild = z.infer<typeof pipelineBuildSchema>;
 export type PipelineRuntime = z.infer<typeof pipelineRuntimeSchema>;
 export type PipelineDockerfile = z.infer<typeof pipelineDockerfileSchema>;
+export type PipelineVolume = z.infer<typeof pipelineVolumeSchema>;
 export type PipelineDomain = z.infer<typeof pipelineDomainSchema>;
 export type PipelineLoadBalancer = z.infer<typeof pipelineLoadBalancerSchema>;
 export type PipelineEnvironment = z.infer<typeof pipelineEnvironmentSchema>;
@@ -407,6 +474,11 @@ export function resolveEnvironment(
    * `environments.<env>.env` merged over it (per-env wins per key).
    */
   env: Record<string, string>;
+  /**
+   * Resolved volumes: the per-environment `environments.<env>.volumes`
+   * list when non-empty, else the top-level `runtime.volumes`.
+   */
+  volumes: PipelineVolume[];
 } {
   const env = def.environments[envName];
   return {
@@ -414,7 +486,8 @@ export function resolveEnvironment(
     domains: env?.domains.length ? env.domains : def.domains,
     loadBalancer: env?.loadBalancer ?? def.loadBalancer,
     namespace: env?.namespace ?? def.namespace ?? "",
-    env: { ...(def.runtime?.env ?? {}), ...(env?.env ?? {}) }
+    env: { ...(def.runtime?.env ?? {}), ...(env?.env ?? {}) },
+    volumes: env?.volumes?.length ? env.volumes : (def.runtime?.volumes ?? [])
   };
 }
 

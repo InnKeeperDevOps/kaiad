@@ -411,6 +411,26 @@ const redeployDomainSchema = z.object({
   protocol: z.enum(["http", "https"])
 });
 
+// Mirrors packages/contracts pipeline pipelineVolumeSchema (resolved
+// form). Declared explicitly so platformToAgentMessageSchema.parse()
+// carries it through to the agent instead of stripping it.
+const redeployVolumeSchema = z.object({
+  name: z.string(),
+  nfs: z.object({ server: z.string(), path: z.string(), readOnly: z.boolean().optional() }).optional(),
+  hostPath: z.object({ path: z.string(), type: z.string().optional() }).optional(),
+  emptyDir: z.boolean().optional(),
+  persistentVolumeClaim: z.object({ claimName: z.string() }).optional(),
+  mounts: z
+    .array(
+      z.object({
+        path: z.string(),
+        subPath: z.string().optional(),
+        readOnly: z.boolean().optional()
+      })
+    )
+    .default([])
+});
+
 const redeployLoadBalancerSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("none") }),
   z.object({ type: z.literal("k8s"), annotations: z.record(z.string()).default({}) }),
@@ -471,7 +491,13 @@ const redeployServiceCommandSchema = z.object({
    * MUST be declared here or platformToAgentMessageSchema.parse()
    * strips it from the command before it reaches the agent.
    */
-  env: z.record(z.string()).default({})
+  env: z.record(z.string()).default({}),
+  /**
+   * Resolved volumes (runtime.volumes or the per-env override) to
+   * mount into the deployed container. Declared here for the same
+   * no-strip reason as `env`.
+   */
+  volumes: z.array(redeployVolumeSchema).default([])
 });
 
 /**

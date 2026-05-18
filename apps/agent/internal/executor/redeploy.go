@@ -67,6 +67,9 @@ type redeployInput struct {
 	// env is the resolved plain env-var map (runtime.env merged with the
 	// per-environment override) injected into the deployed container.
 	env map[string]string
+	// volumes are the resolved runtime.volumes (or per-env override)
+	// rendered as pod.spec.volumes + container.volumeMounts.
+	volumes []volumeSpec
 }
 
 type domainSpec struct {
@@ -75,6 +78,22 @@ type domainSpec struct {
 	protocol string // "http" | "https"
 }
 
+type volumeMountSpec struct {
+	path     string
+	subPath  string
+	readOnly bool
+}
+type volumeSpec struct {
+	name        string
+	nfsServer   string
+	nfsPath     string
+	nfsReadOnly bool
+	hostPath    string
+	hostPathTyp string
+	emptyDir    bool
+	pvcClaim    string
+	mounts      []volumeMountSpec
+}
 type loadBalancerSpec struct {
 	typ             string            // "none" | "k8s" | "metallb" | "nginx"
 	annotations     map[string]string // type=k8s
@@ -125,6 +144,51 @@ func parseRedeployPayload(payload map[string]interface{}) (redeployInput, error)
 		for k, v := range raw {
 			if s, ok := v.(string); ok {
 				in.env[k] = s
+			}
+		}
+	}
+	if raw, ok := payload["volumes"].([]interface{}); ok {
+		for _, item := range raw {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			v := volumeSpec{}
+			if s, ok := m["name"].(string); ok {
+				v.name = s
+			}
+			if nfs, ok := m["nfs"].(map[string]interface{}); ok {
+				v.nfsServer, _ = nfs["server"].(string)
+				v.nfsPath, _ = nfs["path"].(string)
+				v.nfsReadOnly, _ = nfs["readOnly"].(bool)
+			}
+			if hp, ok := m["hostPath"].(map[string]interface{}); ok {
+				v.hostPath, _ = hp["path"].(string)
+				v.hostPathTyp, _ = hp["type"].(string)
+			}
+			if b, ok := m["emptyDir"].(bool); ok {
+				v.emptyDir = b
+			}
+			if pvc, ok := m["persistentVolumeClaim"].(map[string]interface{}); ok {
+				v.pvcClaim, _ = pvc["claimName"].(string)
+			}
+			if mts, ok := m["mounts"].([]interface{}); ok {
+				for _, mi := range mts {
+					mm, ok := mi.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					vm := volumeMountSpec{}
+					vm.path, _ = mm["path"].(string)
+					vm.subPath, _ = mm["subPath"].(string)
+					vm.readOnly, _ = mm["readOnly"].(bool)
+					if vm.path != "" {
+						v.mounts = append(v.mounts, vm)
+					}
+				}
+			}
+			if v.name != "" && len(v.mounts) > 0 {
+				in.volumes = append(in.volumes, v)
 			}
 		}
 	}
@@ -1017,6 +1081,42 @@ func renderK8sManifests(in redeployInput, namespace string) string {
 		b.WriteString("          ports:\n")
 		for _, p := range ports {
 			fmt.Fprintf(&b, "            - containerPort: %d\n", p)
+		}
+	}
+	if len(in.volumes) > 0 {
+		b.WriteString("          volumeMounts:\n")
+		for _, v := range in.volumes {
+			for _, m := range v.mounts {
+				fmt.Fprintf(&b, "            - name: %q\n              mountPath: %q\n", v.name, m.path)
+				if m.subPath != "" {
+					fmt.Fprintf(&b, "              subPath: %q\n", m.subPath)
+				}
+				if m.readOnly {
+					b.WriteString("              readOnly: true\n")
+				}
+			}
+		}
+	}
+	if len(in.volumes) > 0 {
+		b.WriteString("      volumes:\n")
+		for _, v := range in.volumes {
+			fmt.Fprintf(&b, "        - name: %q\n", v.name)
+			switch {
+			case v.nfsServer != "":
+				fmt.Fprintf(&b, "          nfs:\n            server: %q\n            path: %q\n", v.nfsServer, v.nfsPath)
+				if v.nfsReadOnly {
+					b.WriteString("            readOnly: true\n")
+				}
+			case v.hostPath != "":
+				fmt.Fprintf(&b, "          hostPath:\n            path: %q\n", v.hostPath)
+				if v.hostPathTyp != "" {
+					fmt.Fprintf(&b, "            type: %q\n", v.hostPathTyp)
+				}
+			case v.pvcClaim != "":
+				fmt.Fprintf(&b, "          persistentVolumeClaim:\n            claimName: %q\n", v.pvcClaim)
+			default:
+				b.WriteString("          emptyDir: {}\n")
+			}
 		}
 	}
 	b.WriteString("---\n")

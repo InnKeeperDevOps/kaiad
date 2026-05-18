@@ -143,6 +143,7 @@ import {
   listMissingDeploysForAgent,
   getServicePipelineOverride,
   setServicePipelineOverride,
+  getLatestBuildPipelineYaml,
   listRunningServicesForAgent,
   popLoadBalancerStatusForAgentService,
   upsertLoadBalancerStatus,
@@ -2768,9 +2769,20 @@ export function buildServer(opts: BuildServerOptions = {}) {
         return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Service not found", correlationId: (req as any).correlationId }));
       }
       const q = await getBuildsQuery();
-      if (!q) return { override: null, pipelineName: svc.pipelineName ?? null };
+      if (!q) return { override: null, repoYaml: null, pipelineName: svc.pipelineName ?? null };
       const override = await getServicePipelineOverride(q, session.tenantId, req.params.id);
-      return { override: override ?? null, pipelineName: svc.pipelineName ?? null };
+      // With no override the latest build's captured pipeline_yaml is
+      // the repo's kaiad.yaml at that commit — preload it so the editor
+      // shows the real current config, not a placeholder.
+      const repoYaml =
+        override == null
+          ? await getLatestBuildPipelineYaml(q, session.tenantId, req.params.id)
+          : null;
+      return {
+        override: override ?? null,
+        repoYaml: repoYaml ?? null,
+        pipelineName: svc.pipelineName ?? null
+      };
     }
   );
 

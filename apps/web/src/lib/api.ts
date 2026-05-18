@@ -465,7 +465,7 @@ export const api = {
 
   /** Panel-stored kaiad.yaml override (null = use the repo file). */
   getPipelineOverride: (serviceId: string) =>
-    apiFetch<{ override: string | null; pipelineName: string | null }>(
+    apiFetch<{ override: string | null; repoYaml: string | null; pipelineName: string | null }>(
       `/api/v1/services/${encodeURIComponent(serviceId)}/pipeline-override`
     ),
   savePipelineOverride: (serviceId: string, yaml: string) =>

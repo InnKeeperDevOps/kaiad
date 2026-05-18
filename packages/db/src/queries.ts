@@ -790,6 +790,29 @@ export async function setBuildPipelineYaml(
   await query(`UPDATE service_builds SET pipeline_yaml = $2 WHERE id = $1`, [buildId, yamlText]);
 }
 
+/**
+ * The most recent build's captured pipeline_yaml for a service. With no
+ * panel override this IS the repo's kaiad.yaml at that commit (the build
+ * worker stores exactly what it read), so the editor can preload the
+ * real config instead of a generic template. Returns null when the
+ * service has never produced a build with a pipeline.
+ */
+export async function getLatestBuildPipelineYaml(
+  query: QueryFn,
+  tenantId: string,
+  serviceId: string
+): Promise<string | null> {
+  const { rows } = await query(
+    `SELECT pipeline_yaml FROM service_builds
+      WHERE tenant_id = $1 AND service_id = $2 AND pipeline_yaml IS NOT NULL
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [tenantId, serviceId]
+  );
+  if (rows.length === 0) return null;
+  return rows[0].pipeline_yaml == null ? null : String(rows[0].pipeline_yaml);
+}
+
 export async function finishBuild(
   query: QueryFn,
   buildId: string,

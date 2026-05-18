@@ -20,6 +20,7 @@ const saving = ref(false);
 const tab = ref<"raw" | "form">("raw");
 const yamlText = ref("");
 const hadOverride = ref(false);
+const loadedFrom = ref<"override" | "repo" | "template">("template");
 const message = ref<string | null>(null);
 const messageOk = ref(false);
 
@@ -53,7 +54,19 @@ onMounted(async () => {
   try {
     const r = await api.getPipelineOverride(props.serviceId);
     hadOverride.value = r.override != null;
-    yamlText.value = r.override ?? STARTER;
+    if (r.override != null) {
+      yamlText.value = r.override;
+      loadedFrom.value = "override";
+    } else if (r.repoYaml != null && r.repoYaml.trim()) {
+      // No override yet — preload the repo's kaiad.yaml (the latest
+      // build's captured pipeline_yaml) so the user edits the real
+      // current config rather than a blank template.
+      yamlText.value = r.repoYaml;
+      loadedFrom.value = "repo";
+    } else {
+      yamlText.value = STARTER;
+      loadedFrom.value = "template";
+    }
   } catch (e) {
     message.value = (e as Error).message;
   } finally {
@@ -212,8 +225,14 @@ async function clearOverride() {
 <template>
   <Card title="Pipeline override — kaiad.yaml" :style="{ margin: '0.25rem 0' }">
     <template #actions>
-      <span class="sm-badge" :class="hadOverride ? 'sm-badge--info' : 'sm-badge--muted'">
-        {{ hadOverride ? 'Override active — repo file ignored' : 'No override — repo kaiad.yaml in use' }}
+      <span class="sm-badge" :class="loadedFrom === 'override' ? 'sm-badge--info' : 'sm-badge--muted'">
+        {{
+          loadedFrom === 'override'
+            ? 'Override active — repo file ignored'
+            : loadedFrom === 'repo'
+              ? 'No override — loaded from repo kaiad.yaml'
+              : 'No override — starter template (service has no builds yet)'
+        }}
       </span>
     </template>
 

@@ -20,9 +20,16 @@ const saving = ref(false);
 const tab = ref<"raw" | "form">("raw");
 const yamlText = ref("");
 const hadOverride = ref(false);
-const loadedFrom = ref<"override" | "repo" | "template">("template");
+const loadedFrom = ref<"service" | "repo" | "repofile" | "template">("template");
 const message = ref<string | null>(null);
 const messageOk = ref(false);
+
+// kaiad.yaml is a repo file → default scope is the whole repo. 'service'
+// is the explicit per-service opt-out.
+const scope = ref<"repo" | "service">("repo");
+const gitRepoUrl = ref("");
+const branch = ref("");
+const repoServices = ref<{ id: string; name: string; pipelineName: string | null; hasServiceOverride: boolean }[]>([]);
 
 const STARTER = `version: 1
 runtime:
@@ -53,19 +60,29 @@ const validation = computed(() => {
 onMounted(async () => {
   try {
     const r = await api.getPipelineOverride(props.serviceId);
-    hadOverride.value = r.override != null;
-    if (r.override != null) {
-      yamlText.value = r.override;
-      loadedFrom.value = "override";
+    gitRepoUrl.value = r.gitRepoUrl;
+    branch.value = r.branch;
+    repoServices.value = r.repoServices;
+    hadOverride.value = r.serviceOverride != null || r.repoOverride != null;
+    if (r.serviceOverride != null) {
+      yamlText.value = r.serviceOverride;
+      loadedFrom.value = "service";
+      scope.value = "service";
+    } else if (r.repoOverride != null) {
+      yamlText.value = r.repoOverride;
+      loadedFrom.value = "repo";
+      scope.value = "repo";
     } else if (r.repoYaml != null && r.repoYaml.trim()) {
-      // No override yet — preload the repo's kaiad.yaml (the latest
+      // No override anywhere — preload the repo's kaiad.yaml (the latest
       // build's captured pipeline_yaml) so the user edits the real
       // current config rather than a blank template.
       yamlText.value = r.repoYaml;
-      loadedFrom.value = "repo";
+      loadedFrom.value = "repofile";
+      scope.value = "repo";
     } else {
       yamlText.value = STARTER;
       loadedFrom.value = "template";
+      scope.value = "repo";
     }
   } catch (e) {
     message.value = (e as Error).message;
@@ -193,10 +210,14 @@ async function save() {
   saving.value = true;
   message.value = null;
   try {
-    await api.savePipelineOverride(props.serviceId, yamlText.value);
+    const r = await api.savePipelineOverride(props.serviceId, yamlText.value, scope.value);
     hadOverride.value = true;
+    loadedFrom.value = scope.value === "service" ? "service" : "repo";
     messageOk.value = true;
-    message.value = "Override saved. It applies on the next build.";
+    message.value =
+      scope.value === "service"
+        ? "Saved for this service only. Applies on its next build."
+        : `Saved for the repo — ${r.affectedServices.length} service(s) will use it. Applies on their next build.`;
   } catch (e) {
     messageOk.value = false;
     message.value = (e as Error).message;
@@ -213,12 +234,19 @@ async function saveAndDeploy() {
   saving.value = true;
   message.value = null;
   try {
-    await api.savePipelineOverride(props.serviceId, yamlText.value);
+    const r = await api.savePipelineOverride(props.serviceId, yamlText.value, scope.value);
     hadOverride.value = true;
-    loadedFrom.value = "override";
-    const r = await api.triggerServiceBuild(props.serviceId);
+    loadedFrom.value = scope.value === "service" ? "service" : "repo";
+    // Queue a build for every service the override actually affects so
+    // the new config builds + auto-deploys now, not on the next poll.
+    const targets = r.affectedServices.length ? r.affectedServices : [{ id: props.serviceId, name: props.serviceName }];
+    const results = await Promise.allSettled(targets.map((t) => api.triggerServiceBuild(t.id)));
+    const ok = results.filter((x) => x.status === "fulfilled").length;
     messageOk.value = true;
-    message.value = `Override saved. Build ${r.build.id.slice(0, 8)} queued — it builds the new config and auto-deploys to bound agents.`;
+    message.value =
+      scope.value === "service"
+        ? `Saved (this service only) — build queued; it auto-deploys to bound agents.`
+        : `Saved for the repo — ${ok}/${targets.length} service build(s) queued; each auto-deploys to its bound agents.`;
   } catch (e) {
     messageOk.value = false;
     message.value = (e as Error).message;
@@ -228,14 +256,20 @@ async function saveAndDeploy() {
 }
 
 async function clearOverride() {
-  if (!window.confirm("Remove the panel override? Builds will use the repo's kaiad.yaml again.")) return;
+  const what =
+    scope.value === "service"
+      ? "Remove this service's per-service override? It will fall back to the repo override (or repo kaiad.yaml)."
+      : "Remove the repo-wide override? All services from this repo revert to the repo kaiad.yaml.";
+  if (!window.confirm(what)) return;
   saving.value = true;
   try {
-    await api.clearPipelineOverride(props.serviceId);
+    await api.clearPipelineOverride(props.serviceId, scope.value);
     hadOverride.value = false;
-    yamlText.value = STARTER;
     messageOk.value = true;
-    message.value = "Override cleared — reverting to the repo kaiad.yaml.";
+    message.value =
+      scope.value === "service"
+        ? "Per-service override cleared."
+        : "Repo override cleared — reverting to the repo kaiad.yaml.";
   } catch (e) {
     messageOk.value = false;
     message.value = (e as Error).message;
@@ -248,19 +282,56 @@ async function clearOverride() {
 <template>
   <Card title="Pipeline override — kaiad.yaml" :style="{ margin: '0.25rem 0' }">
     <template #actions>
-      <span class="sm-badge" :class="loadedFrom === 'override' ? 'sm-badge--info' : 'sm-badge--muted'">
+      <span
+        class="sm-badge"
+        :class="loadedFrom === 'service' ? 'sm-badge--info' : loadedFrom === 'repo' ? 'sm-badge--info' : 'sm-badge--muted'"
+      >
         {{
-          loadedFrom === 'override'
-            ? 'Override active — repo file ignored'
+          loadedFrom === 'service'
+            ? 'Per-service override active'
             : loadedFrom === 'repo'
-              ? 'No override — loaded from repo kaiad.yaml'
-              : 'No override — starter template (service has no builds yet)'
+              ? 'Repo override active'
+              : loadedFrom === 'repofile'
+                ? 'No override — loaded from repo kaiad.yaml'
+                : 'No override — starter template (repo has no builds yet)'
         }}
       </span>
     </template>
 
     <p v-if="loading" class="pl-muted">Loading…</p>
     <template v-else>
+      <!-- Scope: kaiad.yaml is a repo file → default is repo-wide -->
+      <fieldset class="pl-scope">
+        <legend class="pl-scope__legend">Apply to</legend>
+        <label class="pl-scope__opt">
+          <input type="radio" value="repo" v-model="scope" />
+          <span>
+            <strong>All services in this repo</strong>
+            <span class="pl-hint">
+              default — {{ repoServices.length }} service<span v-if="repoServices.length !== 1">s</span>
+              from {{ gitRepoUrl }}@{{ branch }}
+            </span>
+          </span>
+        </label>
+        <label class="pl-scope__opt">
+          <input type="radio" value="service" v-model="scope" />
+          <span>
+            <strong>This service only</strong>
+            <span class="pl-hint">explicit per-service override — takes precedence over the repo one</span>
+          </span>
+        </label>
+        <div v-if="scope === 'repo' && repoServices.length" class="pl-scope__svcs">
+          <span
+            v-for="s in repoServices"
+            :key="s.id"
+            class="sm-badge"
+            :class="s.hasServiceOverride ? 'sm-badge--warning' : 'sm-badge--muted'"
+            :title="s.hasServiceOverride ? 'has its own per-service override — shadows the repo one' : ''"
+          >
+            {{ s.name }}{{ s.hasServiceOverride ? ' (own override)' : '' }}
+          </span>
+        </div>
+      </fieldset>
       <div class="pl-tabs" role="tablist">
         <button
           type="button"
@@ -436,7 +507,7 @@ async function clearOverride() {
             Save only
           </Button>
           <Button variant="ghost" size="md" :disabled="saving || !hadOverride" @click="clearOverride">
-            Clear (use repo file)
+            {{ scope === 'service' ? 'Clear (this service)' : 'Clear (repo override)' }}
           </Button>
         </div>
       </div>
@@ -453,6 +524,42 @@ async function clearOverride() {
 .pl-muted {
   color: var(--color-text-secondary);
   font-size: 0.875rem;
+}
+.pl-scope {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 0.6rem 0.85rem;
+  margin: 0 0 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.pl-scope__legend {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-secondary);
+  padding: 0 0.35rem;
+}
+.pl-scope__opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+.pl-scope__opt span {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.pl-scope__svcs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding-top: 0.35rem;
+  border-top: 1px dashed var(--color-border);
 }
 .pl-foot {
   margin: 0.75rem 0 0;

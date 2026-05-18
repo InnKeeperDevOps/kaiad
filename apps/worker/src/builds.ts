@@ -66,6 +66,7 @@ import {
   enqueueManualBuild,
   finishBuild,
   getLatestBuildSha,
+  getRepoPipelineOverride,
   listAllServicesForPoller,
   listServicesDependingOn,
   recordBuildArtifact,
@@ -489,18 +490,31 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
     // 1) Clone at the exact SHA.
     await cloneAtSha(query, svc, build, ws);
 
-    // 2) Resolve the pipeline definition. A panel-stored override
-    // (services.pipeline_override) fully REPLACES the repo's kaiad.yaml
-    // when set — the editor's "override" model. Otherwise read the repo
-    // file; missing → no_pipeline (not red).
-    const override = svc.pipelineOverride?.trim();
+    // 2) Resolve the pipeline definition. Precedence (each fully
+    // REPLACES the repo kaiad.yaml — the editor's "override" model):
+    //   (a) this service's explicit per-service override (opt-out), then
+    //   (b) the repo-scoped override (default scope — shared by every
+    //       service built from the same git_repo_url+branch), then
+    //   (c) the repo's kaiad.yaml. Missing (c) → no_pipeline (not red).
+    const serviceOverride = svc.pipelineOverride?.trim();
+    const repoOverride = serviceOverride
+      ? undefined
+      : (await getRepoPipelineOverride(query, svc.tenantId, svc.gitRepoUrl, svc.branch))?.trim() ||
+        undefined;
     let yamlText: string;
-    if (override) {
+    if (serviceOverride) {
       yamlText = svc.pipelineOverride as string;
       await appendBuildLog(
         query,
         build.id,
-        "using panel pipeline override (repo kaiad.yaml ignored)\n"
+        "using per-service pipeline override (repo kaiad.yaml ignored)\n"
+      );
+    } else if (repoOverride) {
+      yamlText = repoOverride;
+      await appendBuildLog(
+        query,
+        build.id,
+        "using repo-scoped pipeline override (repo kaiad.yaml ignored)\n"
       );
     } else {
       const yamlPath = path.join(ws, "kaiad.yaml");

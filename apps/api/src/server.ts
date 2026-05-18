@@ -143,6 +143,9 @@ import {
   listMissingDeploysForAgent,
   getServicePipelineOverride,
   setServicePipelineOverride,
+  getRepoPipelineOverride,
+  setRepoPipelineOverride,
+  listServicesForRepo,
   getLatestBuildPipelineYaml,
   listRunningServicesForAgent,
   popLoadBalancerStatusForAgentService,
@@ -2753,8 +2756,11 @@ export function buildServer(opts: BuildServerOptions = {}) {
 
   // --- Pipeline override (panel-stored kaiad.yaml) ---
   //
-  // When set, the build worker uses this verbatim instead of the repo's
-  // kaiad.yaml (full replace) and it becomes the build's pipeline_yaml.
+  // kaiad.yaml is a REPO file, so the default scope is the repo: every
+  // service built from the same git_repo_url+branch shares the override.
+  // A per-service override is the explicit opt-out and takes precedence
+  // for that one service. Either way the worker uses it verbatim instead
+  // of the repo file and it becomes the build's captured pipeline_yaml.
   app.get<{ Params: { id: string } }>(
     "/api/v1/services/:id/pipeline-override",
     async (req, reply) => {
@@ -2769,24 +2775,43 @@ export function buildServer(opts: BuildServerOptions = {}) {
         return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Service not found", correlationId: (req as any).correlationId }));
       }
       const q = await getBuildsQuery();
-      if (!q) return { override: null, repoYaml: null, pipelineName: svc.pipelineName ?? null };
-      const override = await getServicePipelineOverride(q, session.tenantId, req.params.id);
-      // With no override the latest build's captured pipeline_yaml is
-      // the repo's kaiad.yaml at that commit — preload it so the editor
+      if (!q) {
+        return {
+          scope: "repo" as const,
+          serviceOverride: null,
+          repoOverride: null,
+          repoYaml: null,
+          pipelineName: svc.pipelineName ?? null,
+          gitRepoUrl: svc.gitRepoUrl,
+          branch: svc.branch,
+          repoServices: []
+        };
+      }
+      const serviceOverride = await getServicePipelineOverride(q, session.tenantId, req.params.id);
+      const repoOverride = await getRepoPipelineOverride(q, session.tenantId, svc.gitRepoUrl, svc.branch);
+      // No override anywhere → the latest build's captured pipeline_yaml
+      // is the repo's kaiad.yaml at that commit; preload it so the editor
       // shows the real current config, not a placeholder.
       const repoYaml =
-        override == null
+        serviceOverride == null && repoOverride == null
           ? await getLatestBuildPipelineYaml(q, session.tenantId, req.params.id)
           : null;
+      const repoServices = await listServicesForRepo(q, session.tenantId, svc.gitRepoUrl, svc.branch);
       return {
-        override: override ?? null,
+        // current effective scope for THIS service
+        scope: serviceOverride != null ? ("service" as const) : ("repo" as const),
+        serviceOverride: serviceOverride ?? null,
+        repoOverride: repoOverride ?? null,
         repoYaml: repoYaml ?? null,
-        pipelineName: svc.pipelineName ?? null
+        pipelineName: svc.pipelineName ?? null,
+        gitRepoUrl: svc.gitRepoUrl,
+        branch: svc.branch,
+        repoServices
       };
     }
   );
 
-  app.put<{ Params: { id: string }; Body: { yaml?: unknown } }>(
+  app.put<{ Params: { id: string }; Body: { yaml?: unknown; scope?: unknown } }>(
     "/api/v1/services/:id/pipeline-override",
     async (req, reply) => {
       const session = await resolveSession(authStore, req.headers.authorization);
@@ -2805,13 +2830,15 @@ export function buildServer(opts: BuildServerOptions = {}) {
         return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Service not found", correlationId: (req as any).correlationId }));
       }
       const yaml = typeof req.body?.yaml === "string" ? req.body.yaml : "";
+      // Default scope is the repo (kaiad.yaml is a repo file); 'service'
+      // is the explicit per-service opt-out.
+      const scope = req.body?.scope === "service" ? "service" : "repo";
       if (!yaml.trim()) {
         return reply.status(400).send(
           apiErrorSchema.parse({ code: "INVALID_REQUEST", message: "Body.yaml (non-empty string) required; use DELETE to clear", correlationId: (req as any).correlationId })
         );
       }
-      // Validate before persisting: must parse AND the service's bound
-      // pipelineName must resolve, so a bad override can't brick builds.
+      // Validate before persisting so a bad override can't brick builds.
       const parsed = parsePipelineYaml(yaml);
       if (!parsed.ok) {
         return reply.status(422).send(
@@ -2828,15 +2855,25 @@ export function buildServer(opts: BuildServerOptions = {}) {
       if (!q) {
         return reply.status(503).send(apiErrorSchema.parse({ code: "DB_UNAVAILABLE", message: "Persistence unavailable", correlationId: (req as any).correlationId }));
       }
-      const ok = await setServicePipelineOverride(q, session.tenantId, req.params.id, yaml);
-      if (!ok) {
-        return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Service not found", correlationId: (req as any).correlationId }));
+      if (scope === "service") {
+        const ok = await setServicePipelineOverride(q, session.tenantId, req.params.id, yaml);
+        if (!ok) {
+          return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Service not found", correlationId: (req as any).correlationId }));
+        }
+        return { ok: true, scope, affectedServices: [{ id: svc.id, name: svc.name }] };
       }
-      return { ok: true, override: yaml };
+      await setRepoPipelineOverride(q, session.tenantId, svc.gitRepoUrl, svc.branch, yaml);
+      const repoServices = await listServicesForRepo(q, session.tenantId, svc.gitRepoUrl, svc.branch);
+      // Repo scope is shadowed for any service with its own explicit
+      // override; report which actually take effect.
+      const affectedServices = repoServices
+        .filter((s) => !s.hasServiceOverride)
+        .map((s) => ({ id: s.id, name: s.name }));
+      return { ok: true, scope, affectedServices };
     }
   );
 
-  app.delete<{ Params: { id: string } }>(
+  app.delete<{ Params: { id: string }; Querystring: { scope?: string } }>(
     "/api/v1/services/:id/pipeline-override",
     async (req, reply) => {
       const session = await resolveSession(authStore, req.headers.authorization);
@@ -2850,15 +2887,25 @@ export function buildServer(opts: BuildServerOptions = {}) {
           apiErrorSchema.parse({ code: "FORBIDDEN", message: "Owner or admin session required", correlationId: (req as any).correlationId })
         );
       }
+      const svc = await domainStore.getService(session.tenantId, req.params.id);
+      if (!svc) {
+        return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Service not found", correlationId: (req as any).correlationId }));
+      }
       const q = await getBuildsQuery();
       if (!q) {
         return reply.status(503).send(apiErrorSchema.parse({ code: "DB_UNAVAILABLE", message: "Persistence unavailable", correlationId: (req as any).correlationId }));
       }
-      const ok = await setServicePipelineOverride(q, session.tenantId, req.params.id, null);
-      if (!ok) {
-        return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Service not found", correlationId: (req as any).correlationId }));
+      // scope: 'service' clears just this service's opt-out; 'repo'
+      // clears the shared repo override; default 'all' clears both for
+      // this service+repo (full revert to the repo file).
+      const scope = req.query.scope === "service" || req.query.scope === "repo" ? req.query.scope : "all";
+      if (scope === "service" || scope === "all") {
+        await setServicePipelineOverride(q, session.tenantId, req.params.id, null);
       }
-      return { ok: true, override: null };
+      if (scope === "repo" || scope === "all") {
+        await setRepoPipelineOverride(q, session.tenantId, svc.gitRepoUrl, svc.branch, null);
+      }
+      return { ok: true, scope };
     }
   );
 

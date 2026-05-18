@@ -122,11 +122,27 @@ alter table monitored_services add column if not exists kind text not null defau
 alter table monitored_services add column if not exists depends_on text[] not null default ARRAY[]::text[];
 create index if not exists monitored_services_depends_on_gin on monitored_services using gin (depends_on);
 
--- Panel-stored kaiad.yaml override. When non-null, the build worker
--- uses this verbatim INSTEAD of the repo's kaiad.yaml (full replace),
--- and it becomes the build's captured pipeline_yaml so reconcile/deploy
--- use it too. Edited via the panel pipeline editor.
+-- Panel-stored kaiad.yaml override. The kaiad.yaml is a REPO file, so
+-- the default scope is the repo (repo_pipeline_overrides below): every
+-- service built from the same git_repo_url+branch shares it. The
+-- per-service column here is the explicit opt-out — when non-null it
+-- takes precedence over the repo-level override for that one service.
+-- Either way the build worker uses it verbatim instead of the repo's
+-- kaiad.yaml (full replace) and it becomes the build's captured
+-- pipeline_yaml so reconcile/deploy use it too.
 alter table monitored_services add column if not exists pipeline_override text;
+
+-- Repo-scoped kaiad.yaml override (the default scope). Keyed by
+-- (tenant, git_repo_url, branch) so all services from that repo+branch
+-- pick it up. A service's own pipeline_override (above) overrides this.
+create table if not exists repo_pipeline_overrides (
+  tenant_id text not null,
+  git_repo_url text not null,
+  branch text not null,
+  pipeline_override text not null,
+  updated_at timestamptz not null default now(),
+  primary key (tenant_id, git_repo_url, branch)
+);
 
 -- agent ↔ service binding is many-to-many. The join table is the single
 -- source of truth. The legacy monitored_services.agent_id column

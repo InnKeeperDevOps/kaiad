@@ -387,7 +387,7 @@ export async function getServicePipelineOverride(
   return rows[0].pipeline_override == null ? null : String(rows[0].pipeline_override);
 }
 
-/** Set (string) or clear (null) the pipeline override. Returns false if no such service. */
+/** Set (string) or clear (null) the per-service explicit override. Returns false if no such service. */
 export async function setServicePipelineOverride(
   query: QueryFn,
   tenantId: string,
@@ -399,6 +399,68 @@ export async function setServicePipelineOverride(
     [tenantId, id, override]
   );
   return rows.length > 0;
+}
+
+/** Repo-scoped override (default scope): shared by every service built from this git_repo_url+branch. */
+export async function getRepoPipelineOverride(
+  query: QueryFn,
+  tenantId: string,
+  gitRepoUrl: string,
+  branch: string
+): Promise<string | null> {
+  const { rows } = await query(
+    `SELECT pipeline_override FROM repo_pipeline_overrides
+      WHERE tenant_id = $1 AND git_repo_url = $2 AND branch = $3`,
+    [tenantId, gitRepoUrl, branch]
+  );
+  if (rows.length === 0) return null;
+  return rows[0].pipeline_override == null ? null : String(rows[0].pipeline_override);
+}
+
+/** Upsert (string) or clear (null) the repo-scoped override. */
+export async function setRepoPipelineOverride(
+  query: QueryFn,
+  tenantId: string,
+  gitRepoUrl: string,
+  branch: string,
+  override: string | null
+): Promise<void> {
+  if (override == null) {
+    await query(
+      `DELETE FROM repo_pipeline_overrides WHERE tenant_id = $1 AND git_repo_url = $2 AND branch = $3`,
+      [tenantId, gitRepoUrl, branch]
+    );
+    return;
+  }
+  await query(
+    `INSERT INTO repo_pipeline_overrides (tenant_id, git_repo_url, branch, pipeline_override, updated_at)
+     VALUES ($1, $2, $3, $4, now())
+     ON CONFLICT (tenant_id, git_repo_url, branch)
+       DO UPDATE SET pipeline_override = EXCLUDED.pipeline_override, updated_at = now()`,
+    [tenantId, gitRepoUrl, branch, override]
+  );
+}
+
+/** Services in this tenant built from the same git_repo_url + branch. */
+export async function listServicesForRepo(
+  query: QueryFn,
+  tenantId: string,
+  gitRepoUrl: string,
+  branch: string
+): Promise<Array<{ id: string; name: string; pipelineName: string | null; hasServiceOverride: boolean }>> {
+  const { rows } = await query(
+    `SELECT id, name, pipeline_name, pipeline_override
+       FROM monitored_services
+      WHERE tenant_id = $1 AND git_repo_url = $2 AND branch = $3
+      ORDER BY name`,
+    [tenantId, gitRepoUrl, branch]
+  );
+  return rows.map((r) => ({
+    id: String(r.id),
+    name: String(r.name),
+    pipelineName: r.pipeline_name == null ? null : String(r.pipeline_name),
+    hasServiceOverride: r.pipeline_override != null
+  }));
 }
 
 export async function listServices(

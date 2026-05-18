@@ -465,17 +465,24 @@ export const api = {
 
   /** Panel-stored kaiad.yaml override (null = use the repo file). */
   getPipelineOverride: (serviceId: string) =>
-    apiFetch<{ override: string | null; repoYaml: string | null; pipelineName: string | null }>(
-      `/api/v1/services/${encodeURIComponent(serviceId)}/pipeline-override`
-    ),
-  savePipelineOverride: (serviceId: string, yaml: string) =>
-    apiFetch<{ ok: true; override: string }>(
+    apiFetch<{
+      scope: "repo" | "service";
+      serviceOverride: string | null;
+      repoOverride: string | null;
+      repoYaml: string | null;
+      pipelineName: string | null;
+      gitRepoUrl: string;
+      branch: string;
+      repoServices: { id: string; name: string; pipelineName: string | null; hasServiceOverride: boolean }[];
+    }>(`/api/v1/services/${encodeURIComponent(serviceId)}/pipeline-override`),
+  savePipelineOverride: (serviceId: string, yaml: string, scope: "repo" | "service") =>
+    apiFetch<{ ok: true; scope: "repo" | "service"; affectedServices: { id: string; name: string }[] }>(
       `/api/v1/services/${encodeURIComponent(serviceId)}/pipeline-override`,
-      { method: "PUT", body: JSON.stringify({ yaml }) }
+      { method: "PUT", body: JSON.stringify({ yaml, scope }) }
     ),
-  clearPipelineOverride: (serviceId: string) =>
-    apiFetch<{ ok: true; override: null }>(
-      `/api/v1/services/${encodeURIComponent(serviceId)}/pipeline-override`,
+  clearPipelineOverride: (serviceId: string, scope: "repo" | "service" | "all" = "all") =>
+    apiFetch<{ ok: true; scope: string }>(
+      `/api/v1/services/${encodeURIComponent(serviceId)}/pipeline-override?scope=${scope}`,
       { method: "DELETE" }
     ),
 

@@ -4,12 +4,14 @@
 //    Kaiad contracts schema (parsePipelineYaml).
 //  - Form: guided controls for the common deploy knobs (load balancer +
 //    pinned IPs, domains, env, secret-ref env, volumes, per-environment
-//    namespace/IP overrides, multi-service add/remove). The form edits
-//    the parsed object and re-serialises to the YAML text, which stays
-//    the single source of truth that gets saved.
+//    namespace, multi-service add/remove). The form edits the parsed
+//    object and re-serialises to the YAML text, which stays the single
+//    source of truth that gets saved.
 import { ref, computed, watch, onMounted } from "vue";
 import { api } from "../../lib/api.js";
 import { parsePipelineYaml, yamlParse, yamlStringify } from "@sm/contracts";
+import Card from "../../components/Card.vue";
+import Button from "../../components/Button.vue";
 
 const props = defineProps<{ serviceId: string; serviceName: string }>();
 
@@ -38,11 +40,13 @@ const validation = computed(() => {
   if (!text) return { ok: false, reason: "empty — nothing to save" };
   const r = parsePipelineYaml(text);
   if (!r.ok) return { ok: false, reason: r.reason };
-  const summary =
-    r.kind === "multi"
-      ? `valid — multi-service (${Object.keys(r.pipelines).join(", ")})`
-      : "valid — single pipeline";
-  return { ok: true, reason: summary };
+  return {
+    ok: true,
+    reason:
+      r.kind === "multi"
+        ? `valid — multi-service (${Object.keys(r.pipelines).join(", ")})`
+        : "valid — single pipeline"
+  };
 });
 
 onMounted(async () => {
@@ -82,9 +86,8 @@ watch(tab, (t) => {
   if (t === "form") loadFormFromYaml();
 });
 
-// A multi-service doc has `services: {name: {...}}`; a single doc is the
-// pipeline itself. We normalise to a list of {name, pipeline} the form
-// edits in place; name === "" means the single (top-level) pipeline.
+// Multi-service doc has `services: {name:{...}}`; single doc is the
+// pipeline itself. Normalise to a list the form edits in place.
 const pipelines = computed<{ name: string; p: AnyObj }[]>(() => {
   const d = doc.value;
   if (d && d.services && typeof d.services === "object") {
@@ -97,16 +100,6 @@ function ensure(p: AnyObj, key: string, init: any) {
   if (p[key] == null) p[key] = init;
   return p[key];
 }
-function envRows(p: AnyObj) {
-  const e = ensure(ensure(p, "runtime", {}), "env", {});
-  return Object.keys(e).map((k) => ({ k, v: e[k] }));
-}
-function setEnv(p: AnyObj, rows: { k: string; v: string }[]) {
-  const e: AnyObj = {};
-  for (const r of rows) if (r.k.trim()) e[r.k.trim()] = r.v;
-  ensure(p, "runtime", {}).env = e;
-  syncYamlFromForm();
-}
 function lb(p: AnyObj) {
   return ensure(p, "loadBalancer", { type: "none" });
 }
@@ -115,10 +108,49 @@ function arr(p: AnyObj, parentKey: string | null, key: string): AnyObj[] {
   if (!Array.isArray(parent[key])) parent[key] = [];
   return parent[key];
 }
+function envObj(p: AnyObj): AnyObj {
+  return ensure(ensure(p, "runtime", {}), "env", {});
+}
+function envKeys(p: AnyObj): string[] {
+  return Object.keys(envObj(p));
+}
+function addEnvKey(p: AnyObj, ev: Event) {
+  const el = ev.target as HTMLInputElement;
+  const k = el.value.trim();
+  if (k) {
+    envObj(p)[k] = "";
+    el.value = "";
+    syncYamlFromForm();
+  }
+}
+function removeEnvKey(p: AnyObj, k: string) {
+  delete envObj(p)[k];
+  syncYamlFromForm();
+}
+function addEnvName(p: AnyObj, name: string) {
+  const n = name.trim();
+  if (n) {
+    ensure(p, "environments", {})[n] = { namespace: "" };
+    syncYamlFromForm();
+  }
+}
+function volKind(v: AnyObj): string {
+  return v.nfs ? "nfs" : v.hostPath ? "hostPath" : v.persistentVolumeClaim ? "pvc" : "emptyDir";
+}
+function setVolKind(v: AnyObj, kind: string) {
+  delete v.nfs;
+  delete v.hostPath;
+  delete v.persistentVolumeClaim;
+  delete v.emptyDir;
+  if (kind === "nfs") v.nfs = { server: "", path: "/" };
+  else if (kind === "hostPath") v.hostPath = { path: "/" };
+  else if (kind === "pvc") v.persistentVolumeClaim = { claimName: "" };
+  else v.emptyDir = true;
+  syncYamlFromForm();
+}
 
 function addMulti() {
   if (!doc.value.services) {
-    // Convert the current single pipeline into the first service.
     const single = { ...doc.value };
     const ver = single.version ?? 1;
     delete single.version;
@@ -141,8 +173,8 @@ function removeService(name: string) {
 
 async function save() {
   if (!validation.value.ok) {
-    message.value = `Fix errors first: ${validation.value.reason}`;
     messageOk.value = false;
+    message.value = `Fix errors first: ${validation.value.reason}`;
     return;
   }
   saving.value = true;
@@ -175,34 +207,31 @@ async function clearOverride() {
     saving.value = false;
   }
 }
-
-const box = { fontFamily: "monospace", fontSize: "0.8rem" } as const;
-const tabBtn = (active: boolean) => ({
-  padding: "0.3rem 0.8rem",
-  cursor: "pointer",
-  border: "1px solid var(--color-border)",
-  borderBottom: active ? "2px solid var(--color-accent, #4c8)" : "1px solid var(--color-border)",
-  background: active ? "var(--color-bg-elev, #1b1b1b)" : "transparent",
-  fontWeight: active ? 600 : 400
-});
-const fieldRow = { display: "flex", gap: "0.4rem", margin: "0.25rem 0", alignItems: "center", flexWrap: "wrap" as const };
-const inp = { ...box, padding: "0.25rem 0.4rem", minWidth: "8rem" } as const;
 </script>
 
 <template>
-  <div :style="{ padding: '0.5rem', border: '1px solid var(--color-border)', borderRadius: '4px' }">
-    <div :style="{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }">
-      <strong>Pipeline override — <code>kaiad.yaml</code></strong>
-      <span :style="{ fontSize: '0.75rem', color: 'var(--color-text-secondary)' }">
-        {{ hadOverride ? 'override active (repo file ignored)' : 'no override — repo kaiad.yaml in use' }}
+  <Card title="Pipeline override — kaiad.yaml" :style="{ margin: '0.25rem 0' }">
+    <template #actions>
+      <span class="sm-badge" :class="hadOverride ? 'sm-badge--info' : 'sm-badge--muted'">
+        {{ hadOverride ? 'Override active — repo file ignored' : 'No override — repo kaiad.yaml in use' }}
       </span>
-    </div>
+    </template>
 
-    <div v-if="loading">Loading…</div>
+    <p v-if="loading" class="pl-muted">Loading…</p>
     <template v-else>
-      <div :style="{ display: 'flex', gap: '0.25rem', marginBottom: '0.5rem' }">
-        <button type="button" :style="tabBtn(tab === 'raw')" @click="tab = 'raw'">Raw YAML</button>
-        <button type="button" :style="tabBtn(tab === 'form')" @click="tab = 'form'">Form</button>
+      <div class="pl-tabs" role="tablist">
+        <button
+          type="button"
+          class="pl-tab"
+          :class="{ 'pl-tab--active': tab === 'raw' }"
+          @click="tab = 'raw'"
+        >Raw YAML</button>
+        <button
+          type="button"
+          class="pl-tab"
+          :class="{ 'pl-tab--active': tab === 'form' }"
+          @click="tab = 'form'"
+        >Form</button>
       </div>
 
       <!-- RAW -->
@@ -210,170 +239,354 @@ const inp = { ...box, padding: "0.25rem 0.4rem", minWidth: "8rem" } as const;
         <textarea
           v-model="yamlText"
           spellcheck="false"
-          :style="{ ...box, width: '100%', minHeight: '20rem', padding: '0.5rem', whiteSpace: 'pre' }"
+          class="pl-yaml"
+          aria-label="kaiad.yaml override"
         ></textarea>
       </div>
 
       <!-- FORM -->
-      <div v-show="tab === 'form'">
-        <p v-if="formError" :style="{ color: 'var(--color-danger)', fontSize: '0.8rem' }">{{ formError }}</p>
-        <div :style="{ display: 'flex', justifyContent: 'flex-end', marginBottom: '0.4rem' }">
-          <button type="button" :style="inp" @click="addMulti">+ Add service (multi)</button>
+      <div v-show="tab === 'form'" class="pl-form">
+        <p v-if="formError" class="sm-input-error">{{ formError }}</p>
+
+        <div class="pl-form__bar">
+          <Button variant="secondary" size="sm" @click="addMulti">+ Add service (multi)</Button>
         </div>
-        <div
-          v-for="entry in pipelines"
-          :key="entry.name || '<single>'"
-          :style="{ border: '1px dashed var(--color-border)', borderRadius: '4px', padding: '0.5rem', margin: '0.5rem 0' }"
-        >
-          <div :style="{ display: 'flex', justifyContent: 'space-between' }">
-            <strong>{{ entry.name || '(single pipeline)' }}</strong>
-            <button v-if="entry.name" type="button" :style="inp" @click="removeService(entry.name)">remove</button>
+
+        <div v-for="entry in pipelines" :key="entry.name || '<single>'" class="pl-pipeline">
+          <div class="pl-pipeline__head">
+            <span class="pl-pipeline__name">{{ entry.name || 'single pipeline' }}</span>
+            <Button v-if="entry.name" variant="ghost" size="sm" @click="removeService(entry.name)">Remove</Button>
           </div>
 
           <!-- Load balancer -->
-          <fieldset :style="{ margin: '0.5rem 0', border: '1px solid var(--color-border)', padding: '0.4rem' }">
-            <legend>Load balancer</legend>
-            <div :style="fieldRow">
-              <label>type</label>
-              <select :style="inp" v-model="lb(entry.p).type" @change="syncYamlFromForm">
+          <section class="pl-section">
+            <h4 class="pl-section__title">Load balancer</h4>
+            <div class="pl-row">
+              <label class="pl-label">Type</label>
+              <select class="sm-input pl-in pl-in--sm" v-model="lb(entry.p).type" @change="syncYamlFromForm">
                 <option value="none">none</option>
                 <option value="metallb">metallb</option>
                 <option value="k8s">k8s</option>
                 <option value="nginx">nginx</option>
               </select>
               <template v-if="lb(entry.p).type === 'metallb'">
-                <label>addressPool</label>
-                <input :style="inp" v-model="lb(entry.p).addressPool" @input="syncYamlFromForm" placeholder="first-pool" />
-                <label>loadBalancerIPs</label>
-                <input :style="inp" v-model="lb(entry.p).loadBalancerIPs" @input="syncYamlFromForm" placeholder="192.168.1.230" />
+                <label class="pl-label">Address pool</label>
+                <input class="sm-input pl-in" v-model="lb(entry.p).addressPool" @input="syncYamlFromForm" placeholder="first-pool" />
+                <label class="pl-label">Pinned IP(s)</label>
+                <input class="sm-input pl-in" v-model="lb(entry.p).loadBalancerIPs" @input="syncYamlFromForm" placeholder="192.168.1.230" />
               </template>
               <template v-if="lb(entry.p).type === 'nginx'">
-                <label>ingressClass</label>
-                <input :style="inp" v-model="lb(entry.p).ingressClass" @input="syncYamlFromForm" placeholder="nginx" />
-                <label>tlsSecret</label>
-                <input :style="inp" v-model="lb(entry.p).tlsSecret" @input="syncYamlFromForm" />
+                <label class="pl-label">Ingress class</label>
+                <input class="sm-input pl-in" v-model="lb(entry.p).ingressClass" @input="syncYamlFromForm" placeholder="nginx" />
+                <label class="pl-label">TLS secret</label>
+                <input class="sm-input pl-in" v-model="lb(entry.p).tlsSecret" @input="syncYamlFromForm" />
               </template>
             </div>
-          </fieldset>
+          </section>
 
           <!-- Domains -->
-          <fieldset :style="{ margin: '0.5rem 0', border: '1px solid var(--color-border)', padding: '0.4rem' }">
-            <legend>Domains</legend>
-            <div v-for="(d, i) in arr(entry.p, null, 'domains')" :key="i" :style="fieldRow">
-              <input :style="inp" v-model="d.host" @input="syncYamlFromForm" placeholder="host.example.com" />
-              <input :style="{ ...inp, minWidth: '5rem' }" type="number" v-model.number="d.port" @input="syncYamlFromForm" placeholder="80" />
-              <select :style="inp" v-model="d.protocol" @change="syncYamlFromForm">
+          <section class="pl-section">
+            <h4 class="pl-section__title">Domains</h4>
+            <div v-for="(d, i) in arr(entry.p, null, 'domains')" :key="i" class="pl-row">
+              <input class="sm-input pl-in" v-model="d.host" @input="syncYamlFromForm" placeholder="host.example.com" />
+              <input class="sm-input pl-in pl-in--xs" type="number" v-model.number="d.port" @input="syncYamlFromForm" placeholder="80" />
+              <select class="sm-input pl-in pl-in--sm" v-model="d.protocol" @change="syncYamlFromForm">
                 <option value="http">http</option>
                 <option value="https">https</option>
               </select>
-              <button type="button" :style="inp" @click="arr(entry.p, null, 'domains').splice(i, 1); syncYamlFromForm()">×</button>
+              <Button variant="ghost" size="sm" @click="arr(entry.p, null, 'domains').splice(i, 1); syncYamlFromForm()">✕</Button>
             </div>
-            <button type="button" :style="inp" @click="arr(entry.p, null, 'domains').push({ host: '', port: 80, protocol: 'https' }); syncYamlFromForm()">+ domain</button>
-          </fieldset>
+            <Button variant="secondary" size="sm" @click="arr(entry.p, null, 'domains').push({ host: '', port: 80, protocol: 'https' }); syncYamlFromForm()">+ Domain</Button>
+          </section>
 
           <!-- Env -->
-          <fieldset :style="{ margin: '0.5rem 0', border: '1px solid var(--color-border)', padding: '0.4rem' }">
-            <legend>Env vars</legend>
-            <div
-              v-for="(row, i) in Object.entries(ensure(ensure(entry.p,'runtime',{}),'env',{}))"
-              :key="'e'+i"
-              :style="fieldRow"
-            >
-              <input :style="inp" :value="row[0]" readonly />
-              <span>=</span>
-              <input :style="inp" v-model="ensure(ensure(entry.p,'runtime',{}),'env',{})[row[0]]" @input="syncYamlFromForm" />
-              <button type="button" :style="inp" @click="delete ensure(ensure(entry.p,'runtime',{}),'env',{})[row[0]]; syncYamlFromForm()">×</button>
+          <section class="pl-section">
+            <h4 class="pl-section__title">Environment variables</h4>
+            <div v-for="k in envKeys(entry.p)" :key="'e-' + k" class="pl-row">
+              <input class="sm-input pl-in" :value="k" readonly />
+              <span class="pl-eq">=</span>
+              <input class="sm-input pl-in" v-model="envObj(entry.p)[k]" @input="syncYamlFromForm" />
+              <Button variant="ghost" size="sm" @click="removeEnvKey(entry.p, k)">✕</Button>
             </div>
-            <div :style="fieldRow">
-              <input :style="inp" placeholder="NEW_KEY" @keyup.enter="(ev:any)=>{ const k=ev.target.value.trim(); if(k){ ensure(ensure(entry.p,'runtime',{}),'env',{})[k]=''; ev.target.value=''; syncYamlFromForm(); } }" />
-              <span :style="{ fontSize:'0.72rem', color:'var(--color-text-secondary)' }">type a name, press Enter</span>
+            <div class="pl-row">
+              <input class="sm-input pl-in" placeholder="NEW_KEY — press Enter" @keyup.enter="addEnvKey(entry.p, $event)" />
             </div>
-          </fieldset>
+          </section>
 
           <!-- Secret-ref env -->
-          <fieldset :style="{ margin: '0.5rem 0', border: '1px solid var(--color-border)', padding: '0.4rem' }">
-            <legend>Secret-ref env (existing k8s Secret)</legend>
-            <div v-for="(s, i) in arr(entry.p, 'runtime', 'secretEnv')" :key="'s'+i" :style="fieldRow">
-              <input :style="inp" v-model="s.name" @input="syncYamlFromForm" placeholder="ENV_NAME" />
-              <span>←</span>
-              <input :style="inp" v-model="s.secret" @input="syncYamlFromForm" placeholder="secret-name" />
-              <input :style="inp" v-model="s.key" @input="syncYamlFromForm" placeholder="key" />
-              <button type="button" :style="inp" @click="arr(entry.p,'runtime','secretEnv').splice(i,1); syncYamlFromForm()">×</button>
+          <section class="pl-section">
+            <h4 class="pl-section__title">Secret-ref env <span class="pl-hint">existing k8s Secret</span></h4>
+            <div v-for="(s, i) in arr(entry.p, 'runtime', 'secretEnv')" :key="'s' + i" class="pl-row">
+              <input class="sm-input pl-in" v-model="s.name" @input="syncYamlFromForm" placeholder="ENV_NAME" />
+              <span class="pl-eq">←</span>
+              <input class="sm-input pl-in" v-model="s.secret" @input="syncYamlFromForm" placeholder="secret-name" />
+              <input class="sm-input pl-in pl-in--sm" v-model="s.key" @input="syncYamlFromForm" placeholder="key" />
+              <Button variant="ghost" size="sm" @click="arr(entry.p, 'runtime', 'secretEnv').splice(i, 1); syncYamlFromForm()">✕</Button>
             </div>
-            <button type="button" :style="inp" @click="arr(entry.p,'runtime','secretEnv').push({ name:'', secret:'', key:'' }); syncYamlFromForm()">+ secret env</button>
-          </fieldset>
+            <Button variant="secondary" size="sm" @click="arr(entry.p, 'runtime', 'secretEnv').push({ name: '', secret: '', key: '' }); syncYamlFromForm()">+ Secret env</Button>
+          </section>
 
           <!-- Volumes -->
-          <fieldset :style="{ margin: '0.5rem 0', border: '1px solid var(--color-border)', padding: '0.4rem' }">
-            <legend>Volumes</legend>
-            <div v-for="(v, i) in arr(entry.p, 'runtime', 'volumes')" :key="'v'+i" :style="{ border:'1px solid var(--color-border)', padding:'0.3rem', margin:'0.3rem 0' }">
-              <div :style="fieldRow">
-                <input :style="inp" v-model="v.name" @input="syncYamlFromForm" placeholder="volume-name" />
-                <select :style="inp" :value="v.nfs?'nfs':v.hostPath?'hostPath':v.persistentVolumeClaim?'pvc':'emptyDir'"
-                  @change="(ev:any)=>{ delete v.nfs;delete v.hostPath;delete v.persistentVolumeClaim;delete v.emptyDir; const t=ev.target.value; if(t==='nfs')v.nfs={server:'',path:'/'}; else if(t==='hostPath')v.hostPath={path:'/'}; else if(t==='pvc')v.persistentVolumeClaim={claimName:''}; else v.emptyDir=true; syncYamlFromForm(); }">
+          <section class="pl-section">
+            <h4 class="pl-section__title">Volumes</h4>
+            <div v-for="(v, i) in arr(entry.p, 'runtime', 'volumes')" :key="'v' + i" class="pl-vol">
+              <div class="pl-row">
+                <input class="sm-input pl-in pl-in--sm" v-model="v.name" @input="syncYamlFromForm" placeholder="volume-name" />
+                <select class="sm-input pl-in pl-in--sm" :value="volKind(v)" @change="setVolKind(v, ($event.target as HTMLSelectElement).value)">
                   <option value="nfs">nfs</option>
                   <option value="hostPath">hostPath</option>
                   <option value="pvc">pvc</option>
                   <option value="emptyDir">emptyDir</option>
                 </select>
                 <template v-if="v.nfs">
-                  <input :style="inp" v-model="v.nfs.server" @input="syncYamlFromForm" placeholder="192.168.1.147" />
-                  <input :style="inp" v-model="v.nfs.path" @input="syncYamlFromForm" placeholder="/data" />
+                  <input class="sm-input pl-in" v-model="v.nfs.server" @input="syncYamlFromForm" placeholder="192.168.1.147" />
+                  <input class="sm-input pl-in" v-model="v.nfs.path" @input="syncYamlFromForm" placeholder="/data" />
                 </template>
                 <template v-else-if="v.hostPath">
-                  <input :style="inp" v-model="v.hostPath.path" @input="syncYamlFromForm" placeholder="/host/path" />
+                  <input class="sm-input pl-in" v-model="v.hostPath.path" @input="syncYamlFromForm" placeholder="/host/path" />
                 </template>
                 <template v-else-if="v.persistentVolumeClaim">
-                  <input :style="inp" v-model="v.persistentVolumeClaim.claimName" @input="syncYamlFromForm" placeholder="my-pvc" />
+                  <input class="sm-input pl-in" v-model="v.persistentVolumeClaim.claimName" @input="syncYamlFromForm" placeholder="my-pvc" />
                 </template>
-                <button type="button" :style="inp" @click="arr(entry.p,'runtime','volumes').splice(i,1); syncYamlFromForm()">remove vol</button>
+                <Button variant="ghost" size="sm" @click="arr(entry.p, 'runtime', 'volumes').splice(i, 1); syncYamlFromForm()">Remove volume</Button>
               </div>
-              <div v-for="(m, mi) in (v.mounts || (v.mounts=[]))" :key="'m'+mi" :style="fieldRow">
-                <span :style="{ fontSize:'0.72rem' }">mount</span>
-                <input :style="inp" v-model="m.path" @input="syncYamlFromForm" placeholder="/cache/www/" />
-                <label :style="{ fontSize:'0.72rem' }"><input type="checkbox" v-model="m.readOnly" @change="syncYamlFromForm" /> ro</label>
-                <button type="button" :style="inp" @click="v.mounts.splice(mi,1); syncYamlFromForm()">×</button>
+              <div v-for="(m, mi) in (v.mounts || (v.mounts = []))" :key="'m' + mi" class="pl-row pl-row--indent">
+                <span class="pl-hint">mount</span>
+                <input class="sm-input pl-in" v-model="m.path" @input="syncYamlFromForm" placeholder="/cache/www/" />
+                <label class="pl-check"><input type="checkbox" v-model="m.readOnly" @change="syncYamlFromForm" /> read-only</label>
+                <Button variant="ghost" size="sm" @click="v.mounts.splice(mi, 1); syncYamlFromForm()">✕</Button>
               </div>
-              <button type="button" :style="inp" @click="(v.mounts||(v.mounts=[])).push({ path:'/' }); syncYamlFromForm()">+ mount</button>
+              <Button variant="ghost" size="sm" @click="(v.mounts || (v.mounts = [])).push({ path: '/' }); syncYamlFromForm()">+ Mount</Button>
             </div>
-            <button type="button" :style="inp" @click="arr(entry.p,'runtime','volumes').push({ name:'vol', nfs:{server:'',path:'/'}, mounts:[{path:'/'}] }); syncYamlFromForm()">+ volume</button>
-          </fieldset>
+            <Button variant="secondary" size="sm" @click="arr(entry.p, 'runtime', 'volumes').push({ name: 'vol', nfs: { server: '', path: '/' }, mounts: [{ path: '/' }] }); syncYamlFromForm()">+ Volume</Button>
+          </section>
 
           <!-- Per-environment overrides -->
-          <fieldset :style="{ margin: '0.5rem 0', border: '1px solid var(--color-border)', padding: '0.4rem' }">
-            <legend>Environment overrides</legend>
-            <div v-for="envName in Object.keys(ensure(entry.p,'environments',{}))" :key="'env'+envName" :style="fieldRow">
-              <strong :style="{ minWidth:'6rem' }">{{ envName }}</strong>
-              <label>namespace</label>
-              <input :style="inp" v-model="ensure(entry.p,'environments',{})[envName].namespace" @input="syncYamlFromForm" />
-              <button type="button" :style="inp" @click="delete ensure(entry.p,'environments',{})[envName]; syncYamlFromForm()">×</button>
+          <section class="pl-section">
+            <h4 class="pl-section__title">Environment overrides</h4>
+            <div v-for="envName in Object.keys(ensure(entry.p, 'environments', {}))" :key="'env' + envName" class="pl-row">
+              <span class="pl-tag">{{ envName }}</span>
+              <label class="pl-label">Namespace</label>
+              <input class="sm-input pl-in" v-model="ensure(entry.p, 'environments', {})[envName].namespace" @input="syncYamlFromForm" />
+              <Button variant="ghost" size="sm" @click="delete ensure(entry.p, 'environments', {})[envName]; syncYamlFromForm()">✕</Button>
             </div>
-            <div :style="fieldRow">
-              <input :style="inp" placeholder="production" @keyup.enter="(ev:any)=>{ const n=ev.target.value.trim(); if(n){ ensure(entry.p,'environments',{})[n]={namespace:''}; ev.target.value=''; syncYamlFromForm(); } }" />
-              <span :style="{ fontSize:'0.72rem', color:'var(--color-text-secondary)' }">env name + Enter</span>
+            <div class="pl-row">
+              <input class="sm-input pl-in pl-in--sm" placeholder="production — press Enter" @keyup.enter="addEnvName(entry.p, ($event.target as HTMLInputElement).value); ($event.target as HTMLInputElement).value = ''" />
             </div>
-          </fieldset>
+          </section>
         </div>
-        <p :style="{ fontSize: '0.72rem', color: 'var(--color-text-secondary)' }">
+
+        <p class="pl-muted pl-foot">
           Build steps, command, image &amp; artifacts are edited in the Raw tab.
         </p>
       </div>
 
       <!-- validation + actions -->
-      <div :style="{ marginTop: '0.5rem', fontSize: '0.8rem', color: validation.ok ? 'var(--color-success)' : 'var(--color-danger)' }">
-        {{ validation.ok ? '✓' : '✗' }} {{ validation.reason }}
-      </div>
-      <div :style="{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', alignItems: 'center' }">
-        <button type="button" :disabled="saving || !validation.ok" :style="{ ...inp, fontWeight: 600 }" @click="save">
-          {{ saving ? 'Saving…' : 'Save override' }}
-        </button>
-        <button type="button" :disabled="saving || !hadOverride" :style="inp" @click="clearOverride">
-          Clear (use repo file)
-        </button>
-        <span v-if="message" :style="{ fontSize: '0.8rem', color: messageOk ? 'var(--color-success)' : 'var(--color-danger)' }">
-          {{ message }}
+      <div class="pl-actions">
+        <span class="sm-badge" :class="validation.ok ? 'sm-badge--success' : 'sm-badge--danger'">
+          {{ validation.ok ? '✓' : '✗' }} {{ validation.reason }}
         </span>
+        <div class="pl-actions__btns">
+          <Button variant="primary" size="md" :loading="saving" :disabled="!validation.ok" @click="save">
+            Save override
+          </Button>
+          <Button variant="secondary" size="md" :disabled="saving || !hadOverride" @click="clearOverride">
+            Clear (use repo file)
+          </Button>
+        </div>
       </div>
+      <p
+        v-if="message"
+        class="pl-msg"
+        :class="messageOk ? 'pl-msg--ok' : 'pl-msg--err'"
+      >{{ message }}</p>
     </template>
-  </div>
+  </Card>
 </template>
+
+<style scoped>
+.pl-muted {
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+}
+.pl-foot {
+  margin: 0.75rem 0 0;
+}
+
+/* Tabs — segmented control */
+.pl-tabs {
+  display: inline-flex;
+  gap: 0.25rem;
+  padding: 0.2rem;
+  background: var(--color-surface-muted);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  margin-bottom: 0.85rem;
+}
+.pl-tab {
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.35rem 0.9rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.pl-tab:hover {
+  color: var(--color-text);
+}
+.pl-tab--active {
+  background: var(--color-surface);
+  color: var(--color-primary);
+  box-shadow: 0 1px 2px rgb(15 23 42 / 8%);
+}
+
+.pl-yaml {
+  width: 100%;
+  min-height: 22rem;
+  padding: 0.75rem;
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  white-space: pre;
+  color: var(--color-text);
+  background: var(--color-surface-muted);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 8px;
+  resize: vertical;
+}
+.pl-yaml:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+/* Form */
+.pl-form__bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.5rem;
+}
+.pl-pipeline {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 0.85rem;
+  margin: 0.65rem 0;
+  background: var(--color-surface-muted);
+}
+.pl-pipeline__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.35rem;
+}
+.pl-pipeline__name {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.pl-section {
+  border-top: 1px solid var(--color-border);
+  padding-top: 0.6rem;
+  margin-top: 0.6rem;
+}
+.pl-section__title {
+  margin: 0 0 0.45rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-secondary);
+}
+.pl-hint {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+.pl-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+  margin: 0.3rem 0;
+}
+.pl-row--indent {
+  padding-left: 1.25rem;
+}
+.pl-label {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+.pl-eq {
+  color: var(--color-text-muted);
+}
+.pl-in {
+  width: auto;
+  min-width: 9rem;
+  flex: 1 1 9rem;
+  padding: 0.35rem 0.55rem;
+  font-size: 0.8rem;
+}
+.pl-in--sm {
+  min-width: 6rem;
+  flex: 0 0 auto;
+}
+.pl-in--xs {
+  min-width: 4.5rem;
+  flex: 0 0 4.5rem;
+}
+.pl-vol {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 0.5rem;
+  margin: 0.4rem 0;
+  background: var(--color-surface);
+}
+.pl-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+.pl-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.5rem;
+  border-radius: 6px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  font-size: 0.8rem;
+  font-weight: 600;
+  min-width: 5rem;
+  justify-content: center;
+}
+
+.pl-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 0.9rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-border);
+}
+.pl-actions__btns {
+  display: flex;
+  gap: 0.5rem;
+}
+.pl-msg {
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+}
+.pl-msg--ok {
+  color: var(--color-success);
+}
+.pl-msg--err {
+  color: var(--color-danger);
+}
+</style>

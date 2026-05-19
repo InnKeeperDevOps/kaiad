@@ -1,8 +1,61 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, type Component } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch, type Component } from "vue";
 import { AlertTriangle, CheckCircle, Clock } from "lucide-vue-next";
 import { api, type Incident } from "../../lib/api.js";
 import { useAuth } from "../../lib/useAuth.js";
+
+// Fix-progress step → display label + icon glyph + colour. The glyph is
+// inline text (kept dep-free) so the timeline renders even without a
+// fresh icon import. ok flag flips ✓/✗.
+const fixStepLabel: Record<string, string> = {
+  started: "Started",
+  cloning: "Cloning repo",
+  cli: "Running AI CLI",
+  no_changes: "No changes proposed",
+  committing: "Committing fix",
+  pushing: "Pushing to branch",
+  succeeded: "Fix pushed",
+  failed: "Fix failed"
+};
+const fixStatusLabel: Record<string, string> = {
+  running: "Running",
+  cloning: "Cloning repo…",
+  cli: "Running AI CLI…",
+  committing: "Committing…",
+  pushing: "Pushing…",
+  succeeded: "Pushed ✓",
+  no_changes: "AI made no changes",
+  auth_failed: "Auth failed",
+  clone_failed: "Clone failed",
+  cli_failed: "AI CLI failed",
+  push_failed: "Push failed",
+  failed: "Failed"
+};
+const fixStatusColor: Record<string, string> = {
+  running: "var(--color-info, var(--color-primary))",
+  cloning: "var(--color-info, var(--color-primary))",
+  cli: "var(--color-info, var(--color-primary))",
+  committing: "var(--color-info, var(--color-primary))",
+  pushing: "var(--color-info, var(--color-primary))",
+  succeeded: "var(--color-success)",
+  no_changes: "var(--color-warning)",
+  auth_failed: "var(--color-danger)",
+  clone_failed: "var(--color-danger)",
+  cli_failed: "var(--color-danger)",
+  push_failed: "var(--color-danger)",
+  failed: "var(--color-danger)"
+};
+function fixGlyph(ev: { step: string; ok?: boolean }): string {
+  if (ev.ok === true) return "✓";
+  if (ev.ok === false) return "✗";
+  return "•";
+}
+function fixGlyphColor(ev: { step: string; ok?: boolean }): string {
+  if (ev.ok === true) return "var(--color-success)";
+  if (ev.ok === false) return "var(--color-danger)";
+  return "var(--color-text-secondary)";
+}
+const FIX_RUNNING_STATUSES = new Set(["running", "cloning", "cli", "committing", "pushing"]);
 
 const statusIcon: Record<string, Component> = {
   open: AlertTriangle,
@@ -24,14 +77,37 @@ const expandedId = ref<string | null>(null);
 const auth = useAuth();
 const isViewer = computed(() => auth.value.isViewer);
 
-onMounted(async () => {
+async function refreshIncidents() {
   try {
     const r = await api.listIncidents();
     incidents.value = r.incidents;
   } catch (e: unknown) {
     error.value = (e as Error).message;
   }
+}
+onMounted(refreshIncidents);
+
+// While an expanded incident's fix is in-flight, poll every 3s so the
+// timeline animates without the user clicking refresh. Stops as soon
+// as the fix terminates or the row collapses.
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+function stopPoll() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+watch(expandedId, (id) => {
+  stopPoll();
+  if (!id) return;
+  const tick = () => {
+    const inc = incidents.value.find((i) => i.id === id);
+    if (inc && (!inc.lastFixStatus || !FIX_RUNNING_STATUSES.has(inc.lastFixStatus))) return;
+    void refreshIncidents();
+  };
+  pollTimer = setInterval(tick, 3000);
 });
+onUnmounted(stopPoll);
 
 async function handleStatusChange(id: string, status: string) {
   try {
@@ -168,6 +244,85 @@ const btnStyle = {
                   First seen {{ new Date(inc.firstSeenAt).toLocaleString() }} ·
                   Last seen {{ new Date(inc.lastSeenAt).toLocaleString() }} ·
                   {{ inc.eventCount }} event{{ inc.eventCount !== 1 ? "s" : "" }}
+                </div>
+                <div>
+                  <div :style="{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }">
+                    <strong>Fix progress:</strong>
+                    <span
+                      v-if="inc.lastFixStatus"
+                      :style="{
+                        padding: '0.05rem 0.45rem',
+                        borderRadius: '999px',
+                        fontSize: '0.72rem',
+                        background: fixStatusColor[inc.lastFixStatus] || 'var(--color-text-secondary)',
+                        color: '#fff'
+                      }"
+                    >{{ fixStatusLabel[inc.lastFixStatus] || inc.lastFixStatus }}</span>
+                    <span
+                      v-if="inc.lastFixExecutor"
+                      :style="{ fontSize: '0.78rem', color: 'var(--color-text-secondary)' }"
+                    >via {{ inc.lastFixExecutor }}</span>
+                    <span
+                      v-if="inc.lastFixStartedAt"
+                      :style="{ fontSize: '0.78rem', color: 'var(--color-text-secondary)' }"
+                    >started {{ new Date(inc.lastFixStartedAt).toLocaleTimeString() }}</span>
+                    <span
+                      v-if="inc.lastFixFinishedAt"
+                      :style="{ fontSize: '0.78rem', color: 'var(--color-text-secondary)' }"
+                    >· finished {{ new Date(inc.lastFixFinishedAt).toLocaleTimeString() }}</span>
+                    <button
+                      :style="{ marginLeft: 'auto', background: 'transparent', border: '1px solid var(--color-border)', color: 'var(--color-text-secondary)', borderRadius: '6px', padding: '0.1rem 0.55rem', fontSize: '0.75rem', cursor: 'pointer' }"
+                      @click="refreshIncidents"
+                    >Refresh</button>
+                  </div>
+                  <ol
+                    v-if="inc.lastFixEvents && inc.lastFixEvents.length"
+                    :style="{
+                      marginTop: '0.4rem',
+                      paddingLeft: 0,
+                      listStyle: 'none',
+                      display: 'grid',
+                      gap: '0.15rem',
+                      fontSize: '0.8rem',
+                      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace'
+                    }"
+                  >
+                    <li
+                      v-for="(ev, idx) in inc.lastFixEvents"
+                      :key="idx"
+                      :style="{ display: 'flex', gap: '0.5rem', alignItems: 'baseline' }"
+                    >
+                      <span :style="{ color: fixGlyphColor(ev), width: '1ch', textAlign: 'center' }">{{ fixGlyph(ev) }}</span>
+                      <span :style="{ color: 'var(--color-text-secondary)', minWidth: '8ch' }">{{ new Date(ev.at).toLocaleTimeString() }}</span>
+                      <span :style="{ minWidth: '14ch' }">{{ fixStepLabel[ev.step] || ev.step }}</span>
+                      <span v-if="ev.message" :style="{ color: ev.ok === false ? 'var(--color-danger)' : 'var(--color-text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }">— {{ ev.message }}</span>
+                    </li>
+                  </ol>
+                  <p
+                    v-else
+                    :style="{ color: 'var(--color-text-secondary)', marginTop: '0.3rem', fontSize: '0.8rem' }"
+                  >No autonomous fix attempts yet for this incident.</p>
+                  <p v-if="inc.lastFixCommitSha" :style="{ marginTop: '0.35rem', fontSize: '0.82rem' }">
+                    <strong>Commit:</strong>
+                    <code :style="{ marginLeft: '0.4rem' }">{{ inc.lastFixCommitSha.slice(0, 12) }}</code>
+                  </p>
+                  <details v-if="inc.lastFixOutput" :style="{ marginTop: '0.35rem' }">
+                    <summary :style="{ cursor: 'pointer', fontSize: '0.8rem', color: 'var(--color-text-secondary)' }">CLI output (latest)</summary>
+                    <pre
+                      :style="{
+                        marginTop: '0.3rem',
+                        maxHeight: '14rem',
+                        overflow: 'auto',
+                        background: 'var(--color-bg)',
+                        border: '1px solid var(--color-border)',
+                        borderRadius: '6px',
+                        padding: '0.5rem 0.65rem',
+                        fontSize: '0.75rem',
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word'
+                      }"
+                    >{{ inc.lastFixOutput }}</pre>
+                  </details>
                 </div>
                 <div>
                   <strong>Full log:</strong>

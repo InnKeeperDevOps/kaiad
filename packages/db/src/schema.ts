@@ -272,6 +272,19 @@ create table if not exists incidents (
 -- log" and used to build the AI fix prompt.
 alter table incidents add column if not exists full_log text;
 
+-- Latest autonomous-fix attempt for this incident. status moves through
+-- running → (succeeded | no_changes | auth_failed | clone_failed |
+-- cli_failed | push_failed | failed). last_fix_events is a JSONB array
+-- of {at, step, ok, message} so the Incidents UI can render a timeline
+-- (clone, CLI, commit, push) with per-step success/error detail.
+alter table incidents add column if not exists last_fix_status text;
+alter table incidents add column if not exists last_fix_executor text;
+alter table incidents add column if not exists last_fix_started_at timestamptz;
+alter table incidents add column if not exists last_fix_finished_at timestamptz;
+alter table incidents add column if not exists last_fix_commit_sha text;
+alter table incidents add column if not exists last_fix_output text;
+alter table incidents add column if not exists last_fix_events jsonb not null default '[]'::jsonb;
+
 create table if not exists remediation_jobs (
   id text primary key,
   tenant_id text not null references tenants(id) on delete cascade,

@@ -16,6 +16,24 @@ export type DomainStore = {
   resolveIncidentByFingerprint(tenantId: string, serviceId: string, fingerprint: string): Promise<number>;
   /** Auto-resolve incidents not seen since `cutoff` (presumed healthy). Returns count closed. */
   resolveStaleIncidents(cutoff: Date): Promise<number>;
+  /** Record progress of the latest in-kaiad fix attempt on the matching
+   *  incident (tenant + service + fingerprint). Appends an event and
+   *  optionally updates the running fields. */
+  recordFixProgress(
+    tenantId: string,
+    serviceId: string,
+    fingerprint: string,
+    patch: {
+      status?: string;
+      executor?: string;
+      startedAt?: string;
+      finishedAt?: string;
+      commitSha?: string | null;
+      output?: string | null;
+      event?: { step: string; ok?: boolean; message?: string };
+      resetEvents?: boolean;
+    }
+  ): Promise<void>;
 
   listAgents(tenantId: string): Promise<Agent[]>;
   getAgent(tenantId: string, id: string): Promise<Agent | undefined>;
@@ -167,7 +185,8 @@ export function createMemoryDomainStore(): DomainStore {
         fullLog: data.fullLog,
         firstSeenAt: now,
         lastSeenAt: now,
-        eventCount: 1
+        eventCount: 1,
+        lastFixEvents: []
       };
       incidents.set(inc.id, inc);
       return inc;
@@ -193,6 +212,46 @@ export function createMemoryDomainStore(): DomainStore {
         }
       }
       return n;
+    },
+    async recordFixProgress(tenantId, serviceId, fingerprint, patch) {
+      const inc = [...incidents.values()].find(
+        (i) =>
+          i.tenantId === tenantId &&
+          i.serviceId === serviceId &&
+          i.fingerprint === fingerprint &&
+          (i.status === "open" || i.status === "acknowledged")
+      );
+      if (!inc) return;
+      const allowedStatuses = [
+        "running",
+        "cloning",
+        "cli",
+        "committing",
+        "pushing",
+        "succeeded",
+        "no_changes",
+        "auth_failed",
+        "clone_failed",
+        "cli_failed",
+        "push_failed",
+        "failed"
+      ] as const;
+      const ix = inc as unknown as Record<string, unknown>;
+      if (patch.status !== undefined) {
+        ix.lastFixStatus = allowedStatuses.includes(patch.status as (typeof allowedStatuses)[number])
+          ? patch.status
+          : undefined;
+      }
+      if (patch.executor !== undefined) ix.lastFixExecutor = patch.executor;
+      if (patch.startedAt !== undefined) ix.lastFixStartedAt = patch.startedAt;
+      if (patch.finishedAt !== undefined) ix.lastFixFinishedAt = patch.finishedAt;
+      if (patch.commitSha !== undefined) ix.lastFixCommitSha = patch.commitSha ?? undefined;
+      if (patch.output !== undefined) ix.lastFixOutput = patch.output ?? undefined;
+      if (patch.resetEvents) ix.lastFixEvents = [];
+      if (patch.event) {
+        const cur = Array.isArray(ix.lastFixEvents) ? (ix.lastFixEvents as unknown[]) : [];
+        ix.lastFixEvents = [...cur, { at: new Date().toISOString(), ...patch.event }];
+      }
     },
     async resolveStaleIncidents(cutoff) {
       const cut = cutoff.getTime();

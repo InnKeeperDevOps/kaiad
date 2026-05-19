@@ -105,6 +105,14 @@ export interface IncidentRow {
   eventCount: number;
   firstSeenAt: string;
   lastSeenAt: string;
+  lastFixStatus?: string;
+  lastFixExecutor?: string;
+  lastFixStartedAt?: string;
+  lastFixFinishedAt?: string;
+  lastFixCommitSha?: string;
+  lastFixOutput?: string;
+  /** Step events of the latest fix attempt (oldest first). */
+  lastFixEvents: { at: string; step: string; ok?: boolean; message?: string }[];
 }
 
 function mapIncident(r: Record<string, unknown>): IncidentRow {
@@ -125,6 +133,21 @@ function mapIncident(r: Record<string, unknown>): IncidentRow {
       r.last_seen_at instanceof Date
         ? r.last_seen_at.toISOString()
         : String(r.last_seen_at),
+    lastFixStatus: (r.last_fix_status as string | null) ?? undefined,
+    lastFixExecutor: (r.last_fix_executor as string | null) ?? undefined,
+    lastFixStartedAt:
+      r.last_fix_started_at instanceof Date
+        ? r.last_fix_started_at.toISOString()
+        : (r.last_fix_started_at as string | null) ?? undefined,
+    lastFixFinishedAt:
+      r.last_fix_finished_at instanceof Date
+        ? r.last_fix_finished_at.toISOString()
+        : (r.last_fix_finished_at as string | null) ?? undefined,
+    lastFixCommitSha: (r.last_fix_commit_sha as string | null) ?? undefined,
+    lastFixOutput: (r.last_fix_output as string | null) ?? undefined,
+    lastFixEvents: Array.isArray(r.last_fix_events)
+      ? (r.last_fix_events as { at: string; step: string; ok?: boolean; message?: string }[])
+      : [],
   };
 }
 
@@ -187,6 +210,62 @@ export async function upsertIncident(
     [id, tenantId, data.serviceId, data.fingerprint, data.message ?? null, data.fullLog ?? null],
   );
   return mapIncident(rows[0]);
+}
+
+/** Record one step of an in-kaiad fix attempt on the matching incident.
+ *  Patch fields are partial: any provided field is overwritten; an
+ *  `event` is appended to last_fix_events. `resetEvents` clears the
+ *  array first (used when starting a fresh attempt). Matches on the
+ *  most recent open/acknowledged incident for (tenant, service,
+ *  fingerprint). Idempotent if no incident matches. */
+export async function recordFixProgress(
+  query: QueryFn,
+  tenantId: string,
+  serviceId: string,
+  fingerprint: string,
+  patch: {
+    status?: string;
+    executor?: string;
+    startedAt?: string;
+    finishedAt?: string;
+    commitSha?: string | null;
+    output?: string | null;
+    event?: { step: string; ok?: boolean; message?: string };
+    resetEvents?: boolean;
+  },
+): Promise<void> {
+  const sets: string[] = [];
+  const values: unknown[] = [tenantId, serviceId, fingerprint];
+  const push = (col: string, v: unknown) => {
+    values.push(v);
+    sets.push(`${col} = $${values.length}`);
+  };
+  if (patch.status !== undefined) push("last_fix_status", patch.status);
+  if (patch.executor !== undefined) push("last_fix_executor", patch.executor);
+  if (patch.startedAt !== undefined) push("last_fix_started_at", patch.startedAt);
+  if (patch.finishedAt !== undefined) push("last_fix_finished_at", patch.finishedAt);
+  if (patch.commitSha !== undefined) push("last_fix_commit_sha", patch.commitSha);
+  if (patch.output !== undefined) push("last_fix_output", patch.output);
+
+  // Events: optionally reset first, then append the new event.
+  if (patch.resetEvents) sets.push(`last_fix_events = '[]'::jsonb`);
+  if (patch.event) {
+    const ev = { at: new Date().toISOString(), ...patch.event };
+    values.push(JSON.stringify(ev));
+    sets.push(`last_fix_events = COALESCE(last_fix_events, '[]'::jsonb) || $${values.length}::jsonb`);
+  }
+  if (sets.length === 0) return;
+  await query(
+    `UPDATE incidents SET ${sets.join(", ")}
+       WHERE tenant_id = $1 AND service_id = $2 AND fingerprint = $3
+         AND id = (
+           SELECT id FROM incidents
+           WHERE tenant_id = $1 AND service_id = $2 AND fingerprint = $3
+             AND status IN ('open','acknowledged')
+           ORDER BY last_seen_at DESC LIMIT 1
+         )`,
+    values,
+  );
 }
 
 /** Resolve any open/acknowledged incident for this service+fingerprint

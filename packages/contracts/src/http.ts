@@ -108,6 +108,38 @@ export const incidentSchema = z.object({
   message: z.string().optional(),
   /** Full captured log / stack trace for the incident. */
   fullLog: z.string().optional(),
+  /** Live progress of the latest in-kaiad autonomous fix attempt. */
+  lastFixStatus: z
+    .enum([
+      "running",
+      "cloning",
+      "cli",
+      "committing",
+      "pushing",
+      "succeeded",
+      "no_changes",
+      "auth_failed",
+      "clone_failed",
+      "cli_failed",
+      "push_failed",
+      "failed"
+    ])
+    .optional(),
+  lastFixExecutor: z.enum(["claude", "cursor"]).optional(),
+  lastFixStartedAt: z.string().datetime().optional(),
+  lastFixFinishedAt: z.string().datetime().optional(),
+  lastFixCommitSha: z.string().optional(),
+  lastFixOutput: z.string().optional(),
+  lastFixEvents: z
+    .array(
+      z.object({
+        at: z.string().datetime(),
+        step: z.string(),
+        ok: z.boolean().optional(),
+        message: z.string().optional()
+      })
+    )
+    .default([]),
   firstSeenAt: z.string().datetime(),
   lastSeenAt: z.string().datetime(),
   eventCount: z.number().int().nonnegative().default(1)

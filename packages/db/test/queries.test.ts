@@ -178,6 +178,7 @@ describe("listIncidents", () => {
         eventCount: 3,
         firstSeenAt: "2025-01-01T00:00:00.000Z",
         lastSeenAt: "2025-01-02T00:00:00.000Z",
+        lastFixEvents: [],
       },
     ]);
     expect(query).toHaveBeenCalledWith(

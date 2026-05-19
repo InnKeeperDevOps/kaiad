@@ -359,6 +359,8 @@ function createLazyDomainStore(resolve: () => Promise<DomainStore>): DomainStore
     resolveIncidentByFingerprint: (tenantId, serviceId, fingerprint) =>
       get().then((s) => s.resolveIncidentByFingerprint(tenantId, serviceId, fingerprint)),
     resolveStaleIncidents: (cutoff) => get().then((s) => s.resolveStaleIncidents(cutoff)),
+    recordFixProgress: (tenantId, serviceId, fingerprint, patch) =>
+      get().then((s) => s.recordFixProgress(tenantId, serviceId, fingerprint, patch)),
     listAgents: (tenantId) => get().then((s) => s.listAgents(tenantId)),
     getAgent: (tenantId, id) => get().then((s) => s.getAgent(tenantId, id)),
     recordAgentHeartbeat: (tenantId, data) =>
@@ -539,22 +541,51 @@ export function buildServer(opts: BuildServerOptions = {}) {
   // logAuthStep — otherwise the whole flow is undebuggable in prod.
   const fixLog = (o: Record<string, unknown>) =>
     console.log("[kaiad_fix]", JSON.stringify(o));
+  // Map fix runner step → persistent incident status. "running" is the
+  // umbrella state while a step is in-flight; each ok-step transitions
+  // to the next; the terminal states (succeeded / failed / no_changes /
+  // *_failed) freeze the timeline for the Incidents UI.
+  const stepToStatus: Record<string, string> = {
+    started: "running",
+    cloning: "cloning",
+    cli: "cli",
+    no_changes: "no_changes",
+    committing: "committing",
+    pushing: "pushing",
+    succeeded: "succeeded",
+    failed: "failed"
+  };
   const startKaiadFix = (a: KaiadFixStart): void => {
     void (async () => {
       const lockKey = fixServiceKey(a.tenantId, a.service.id);
+      const branch = a.service.branch || "main";
       fixLog({
         event: "kaiad_fix.start",
         groupId: a.group.id,
         serviceId: a.service.id,
         repo: a.service.gitRepoUrl,
-        branch: a.service.branch || "main",
+        branch,
         executor: a.executor
       });
+      // Seed the fix-progress timeline on the incident.
+      try {
+        await domainStore.recordFixProgress(a.tenantId, a.service.id, a.group.fingerprint, {
+          status: "running",
+          executor: a.executor,
+          startedAt: new Date().toISOString(),
+          finishedAt: undefined,
+          commitSha: null,
+          output: null,
+          resetEvents: true
+        });
+      } catch (e) {
+        fixLog({ event: "fix_progress.seed_failed", err: String(e) });
+      }
       let result: Awaited<ReturnType<typeof runKaiadFix>>;
       try {
         result = await resolvedRunFix({
           repoUrl: a.service.gitRepoUrl,
-          branch: a.service.branch || "main",
+          branch,
           sshKeyType: a.sshKeyType,
           sshKeyValue: a.sshKeyValue,
           executor: a.executor,
@@ -563,11 +594,39 @@ export function buildServer(opts: BuildServerOptions = {}) {
           logger: {
             info: (...m: unknown[]) => fixLog({ event: "kaiad_fix.info", m }),
             warn: (...m: unknown[]) => fixLog({ event: "kaiad_fix.warn", m })
+          },
+          // Each step appends an event AND advances incident.last_fix_status.
+          onProgress: (ev) => {
+            const nextStatus = stepToStatus[ev.step];
+            const patch: Parameters<typeof domainStore.recordFixProgress>[3] = { event: ev };
+            // Move the umbrella status forward when a step *starts*
+            // (ev.ok undefined). When ev.ok === false, the timeline
+            // freezes at that step until the final result is recorded
+            // below; ev.ok === true keeps the previous "running" -ish
+            // status (next emit will overwrite).
+            if (ev.ok === undefined && nextStatus) patch.status = nextStatus;
+            void domainStore
+              .recordFixProgress(a.tenantId, a.service.id, a.group.fingerprint, patch)
+              .catch((e) => fixLog({ event: "fix_progress.update_failed", err: String(e) }));
           }
         });
       } catch (err) {
         result = { ok: false, reason: "error", output: String((err as Error)?.message ?? err) };
       }
+      // Resolve to a terminal status for the incident.
+      const finalStatus = result.ok
+        ? "succeeded"
+        : result.reason === "auth"
+        ? "auth_failed"
+        : result.reason === "no_changes"
+        ? "no_changes"
+        : result.reason === "clone_failed"
+        ? "clone_failed"
+        : result.reason === "cli_failed"
+        ? "cli_failed"
+        : result.reason === "push_failed"
+        ? "push_failed"
+        : "failed";
       try {
         if (result.ok) {
           errorGroups.setStatus(a.group.id, "fixed", result.commitSha ?? undefined);
@@ -579,9 +638,19 @@ export function buildServer(opts: BuildServerOptions = {}) {
         } else if (result.reason === "auth") {
           errorGroups.setStatus(a.group.id, "missing_auth");
         } else {
-          // no_changes / cli_failed / push_failed / error → back to
-          // open so a later occurrence can retry.
           errorGroups.setStatus(a.group.id, "open");
+        }
+        // Persist the final fix progress (status, finishedAt, output,
+        // commit sha) so the UI shows the result + last CLI output.
+        try {
+          await domainStore.recordFixProgress(a.tenantId, a.service.id, a.group.fingerprint, {
+            status: finalStatus,
+            finishedAt: new Date().toISOString(),
+            commitSha: result.commitSha ?? null,
+            output: result.output?.slice(0, 4000) ?? null
+          });
+        } catch (e) {
+          fixLog({ event: "fix_progress.finalize_failed", err: String(e) });
         }
         fixLog({
           event: "kaiad_fix.done",

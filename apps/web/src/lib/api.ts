@@ -106,6 +106,25 @@ export type Incident = {
   message?: string;
   /** Full captured log / stack trace for the incident. */
   fullLog?: string;
+  lastFixStatus?:
+    | "running"
+    | "cloning"
+    | "cli"
+    | "committing"
+    | "pushing"
+    | "succeeded"
+    | "no_changes"
+    | "auth_failed"
+    | "clone_failed"
+    | "cli_failed"
+    | "push_failed"
+    | "failed";
+  lastFixExecutor?: "claude" | "cursor";
+  lastFixStartedAt?: string;
+  lastFixFinishedAt?: string;
+  lastFixCommitSha?: string;
+  lastFixOutput?: string;
+  lastFixEvents?: { at: string; step: string; ok?: boolean; message?: string }[];
   firstSeenAt: string;
   lastSeenAt: string;
   eventCount: number;

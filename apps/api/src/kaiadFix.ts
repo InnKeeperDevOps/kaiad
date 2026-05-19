@@ -24,7 +24,24 @@ export interface KaiadFixParams {
   contextLines: string[];
   timeoutMs?: number;
   logger?: { info?: (...a: unknown[]) => void; warn?: (...a: unknown[]) => void };
+  /** Called at each phase boundary so the Incidents UI can render the
+   *  live fix timeline (clone → CLI → commit → push, with errors). */
+  onProgress?: (event: FixProgressEvent) => void;
 }
+
+export type FixProgressEvent = {
+  step:
+    | "started"
+    | "cloning"
+    | "cli"
+    | "no_changes"
+    | "committing"
+    | "pushing"
+    | "succeeded"
+    | "failed";
+  ok?: boolean;
+  message?: string;
+};
 
 export type KaiadFixReason =
   | "no_changes"
@@ -173,7 +190,17 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
   let keyPath: string | null = null;
   const env: NodeJS.ProcessEnv = { ...process.env };
 
+  const emit = (e: FixProgressEvent) => {
+    try {
+      p.onProgress?.(e);
+    } catch {
+      // Progress is best-effort; never let it crash the fix.
+    }
+  };
+  const snippet = (s: string, n = 400) => s.replace(/\s+$/, "").slice(0, n);
+
   try {
+    emit({ step: "started", ok: true });
     await mkdir(repoDir, { recursive: true });
     if (p.sshKeyType === "uploaded" && p.sshKeyValue) {
       keyPath = join(scratch, ".sshkey");
@@ -184,6 +211,7 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       env.GIT_SSH_COMMAND = `ssh -i ${p.sshKeyValue} -o StrictHostKeyChecking=no -o BatchMode=yes`;
     }
 
+    emit({ step: "cloning" });
     const clone = await run(
       "git",
       ["clone", "--branch", branch, "--single-branch", p.repoUrl, "."],
@@ -191,12 +219,11 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
     );
     if (clone.code !== 0) {
       const out = clone.stdout + clone.stderr;
-      return {
-        ok: false,
-        reason: looksLikeAuthFailure(out) ? "auth" : "clone_failed",
-        output: `git clone failed:\n${out}`
-      };
+      const reason = looksLikeAuthFailure(out) ? "auth" : "clone_failed";
+      emit({ step: "cloning", ok: false, message: snippet(out) });
+      return { ok: false, reason, output: `git clone failed:\n${out}` };
     }
+    emit({ step: "cloning", ok: true });
 
     for (const [k, v] of [
       ["user.email", "kaiad-bot@kaiad.dev"],
@@ -226,6 +253,7 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       cliUid = FIX_UID;
       cliGid = FIX_GID;
     }
+    emit({ step: "cli", message: p.executor });
     const cli = await runCli(bin, args, {
       cwd: repoDir,
       env: cliEnv,
@@ -249,8 +277,10 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       cliOutHead: cliOut.slice(0, 2500)
     });
     if (cli.code !== 0) {
+      emit({ step: "cli", ok: false, message: snippet(cliOut) || `${p.executor} exited ${cli.code}` });
       return { ok: false, reason: "cli_failed", output: `${p.executor} failed:\n${cliOut}` };
     }
+    emit({ step: "cli", ok: true });
 
     const status = await run("git", ["status", "--porcelain"], {
       cwd: repoDir,
@@ -258,9 +288,15 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       timeoutMs: 15000
     });
     if (status.stdout.trim() === "") {
+      emit({
+        step: "no_changes",
+        ok: false,
+        message: `${p.executor} produced no diff${cliOut ? " — see CLI output" : " (and no output)"}.`
+      });
       return { ok: false, reason: "no_changes", output: `${p.executor} made no changes.\n${cliOut}` };
     }
 
+    emit({ step: "committing" });
     await run("git", ["add", "-A"], { cwd: repoDir, env, timeoutMs: 30000 });
     const commitMsg = `fix(auto): ${p.errorMessage.split("\n")[0].slice(0, 72)}`;
     const commit = await run("git", ["commit", "-m", commitMsg], {
@@ -269,9 +305,13 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       timeoutMs: 30000
     });
     if (commit.code !== 0) {
-      return { ok: false, reason: "error", output: `git commit failed:\n${commit.stdout}${commit.stderr}` };
+      const out = commit.stdout + commit.stderr;
+      emit({ step: "committing", ok: false, message: snippet(out) });
+      return { ok: false, reason: "error", output: `git commit failed:\n${out}` };
     }
+    emit({ step: "committing", ok: true });
 
+    emit({ step: "pushing", message: branch });
     const push = await run("git", ["push", "origin", branch], {
       cwd: repoDir,
       env,
@@ -279,6 +319,11 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
     });
     if (push.code !== 0) {
       const out = push.stdout + push.stderr;
+      emit({
+        step: "pushing",
+        ok: false,
+        message: snippet(out)
+      });
       return {
         ok: false,
         reason: looksLikeAuthFailure(out) ? "auth" : "push_failed",
@@ -292,6 +337,8 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       timeoutMs: 15000
     });
     const commitSha = rev.stdout.trim();
+    emit({ step: "pushing", ok: true, message: commitSha.slice(0, 12) });
+    emit({ step: "succeeded", ok: true, message: `pushed ${commitSha.slice(0, 12)} to ${branch}` });
     p.logger?.info?.({ event: "kaiad_fix.pushed", commitSha, branch });
     return { ok: true, commitSha, output: `pushed ${commitSha} to ${branch}\n${cliOut}` };
   } catch (err) {

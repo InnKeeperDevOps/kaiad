@@ -403,6 +403,21 @@ async function clearOverride() {
             </div>
           </section>
 
+          <!-- Ports -->
+          <section class="pl-section">
+            <h4 class="pl-section__title">Ports <span class="pl-hint">container ports — the source of truth</span></h4>
+            <div v-for="(pt, i) in arr(entry.p, null, 'ports')" :key="i" class="pl-row">
+              <input class="sm-input pl-in pl-in--xs" type="number" v-model.number="pt.port" @input="syncYamlFromForm" placeholder="8080" />
+              <input class="sm-input pl-in pl-in--sm" v-model="pt.name" @input="syncYamlFromForm" placeholder="name (http)" />
+              <select class="sm-input pl-in pl-in--sm" v-model="pt.protocol" @change="syncYamlFromForm">
+                <option value="TCP">TCP</option>
+                <option value="UDP">UDP</option>
+              </select>
+              <Button variant="ghost" size="sm" @click="arr(entry.p, null, 'ports').splice(i, 1); syncYamlFromForm()">✕</Button>
+            </div>
+            <Button variant="secondary" size="sm" @click="arr(entry.p, null, 'ports').push({ port: 8080, name: 'http' }); syncYamlFromForm()">+ Port</Button>
+          </section>
+
           <!-- Domains -->
           <section class="pl-section">
             <h4 class="pl-section__title">Domains</h4>

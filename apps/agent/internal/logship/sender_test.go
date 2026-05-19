@@ -3,6 +3,7 @@ package logship
 import (
 	"sync"
 	"testing"
+	"time"
 )
 
 type capturedLog struct {
@@ -138,6 +139,9 @@ func TestSenderCoalescesStackTraceIntoOneIncident(t *testing.T) {
 		{"info", "\tat org.sqlite.core.NativeDB._open_utf8(Native Method)"},
 		{"info", "\t... 24 more"},
 	}
+	clock := time.Unix(1_700_000_000, 0)
+	s.now = func() time.Time { return clock }
+
 	for _, l := range trace {
 		_ = s.SendLogEvent("a", "svc", l.level, l.msg)
 	}
@@ -148,12 +152,22 @@ func TestSenderCoalescesStackTraceIntoOneIncident(t *testing.T) {
 	if errs.errs[0].message != trace[0].msg {
 		t.Fatalf("incident representative = %q, want the first error line", errs.errs[0].message)
 	}
-	// A fresh, unrelated log record ends the burst; a later error is a
-	// genuinely new incident.
-	_ = s.SendLogEvent("a", "svc", "info", "2026-05-19 INFO  Restarting AibeApplication")
+
+	// Crash-loop: the whole trace replays a few seconds later (even
+	// interleaved across replicas) — still the same single incident.
+	clock = clock.Add(7 * time.Second)
+	for _, l := range trace {
+		_ = s.SendLogEvent("a", "svc", l.level, l.msg)
+	}
+	if got := len(errs.errs); got != 1 {
+		t.Fatalf("crash-loop replay within the window must not add incidents; got %d", got)
+	}
+
+	// A genuinely new error well after the window is a new incident.
+	clock = clock.Add(incidentWindow + time.Second)
 	_ = s.SendLogEvent("a", "svc", "error", "2026-05-19 ERROR pool - connection timeout")
 	if got := len(errs.errs); got != 2 {
-		t.Fatalf("post-recovery error should be a new incident; got %d frames, want 2", got)
+		t.Fatalf("error after the window should be a new incident; got %d frames, want 2", got)
 	}
 }
 

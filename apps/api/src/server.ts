@@ -354,6 +354,7 @@ function createLazyDomainStore(resolve: () => Promise<DomainStore>): DomainStore
       get().then((s) => s.updateIncidentStatus(tenantId, id, status)),
     resolveIncidentByFingerprint: (tenantId, serviceId, fingerprint) =>
       get().then((s) => s.resolveIncidentByFingerprint(tenantId, serviceId, fingerprint)),
+    resolveStaleIncidents: (cutoff) => get().then((s) => s.resolveStaleIncidents(cutoff)),
     listAgents: (tenantId) => get().then((s) => s.listAgents(tenantId)),
     getAgent: (tenantId, id) => get().then((s) => s.getAgent(tenantId, id)),
     recordAgentHeartbeat: (tenantId, data) =>
@@ -4259,6 +4260,33 @@ export function buildServer(opts: BuildServerOptions = {}) {
   }
   app.addHook("onClose", async () => {
     if (reconcileTimer) clearInterval(reconcileTimer);
+  });
+
+  // Auto-resolve incidents whose error hasn't recurred for a while: the
+  // service is presumed healthy again (the auto-fix worked, an operator
+  // intervened, or it was transient). Threshold + sweep cadence are env
+  // tunable so this is testable without waiting hours.
+  const incidentStaleMs =
+    Number(process.env.SM_INCIDENT_AUTORESOLVE_MS) ||
+    4 * 60 * 60 * 1000; // 4h default
+  const incidentSweepMs =
+    Number(process.env.SM_INCIDENT_SWEEP_MS) || 15 * 60 * 1000; // every 15m
+  let staleSweepInFlight = false;
+  const staleSweepTimer = setInterval(() => {
+    if (staleSweepInFlight) return;
+    staleSweepInFlight = true;
+    Promise.resolve(domainStore.resolveStaleIncidents(new Date(Date.now() - incidentStaleMs)))
+      .then((n) => {
+        if (n > 0) app.log.info?.({ resolved: n, staleMs: incidentStaleMs }, "auto-resolved stale incidents");
+      })
+      .catch((err) => app.log.warn?.({ err: (err as Error).message }, "stale-incident sweep failed"))
+      .finally(() => {
+        staleSweepInFlight = false;
+      });
+  }, incidentSweepMs);
+  staleSweepTimer.unref?.();
+  app.addHook("onClose", async () => {
+    clearInterval(staleSweepTimer);
   });
 
   app.setNotFoundHandler(async (req, reply) => {

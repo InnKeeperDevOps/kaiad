@@ -201,6 +201,21 @@ export async function resolveIncidentByFingerprint(
   return rows.length;
 }
 
+/** Auto-resolve incidents whose error hasn't been seen since `cutoff`
+ *  (the service is presumed healthy again). Returns the count closed. */
+export async function resolveStaleIncidents(
+  query: QueryFn,
+  cutoff: Date,
+): Promise<number> {
+  const { rows } = await query(
+    `UPDATE incidents SET status = 'resolved'
+     WHERE status IN ('open', 'acknowledged') AND last_seen_at < $1
+     RETURNING id`,
+    [cutoff.toISOString()],
+  );
+  return rows.length;
+}
+
 export async function updateIncidentStatus(
   query: QueryFn,
   tenantId: string,

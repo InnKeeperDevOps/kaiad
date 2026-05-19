@@ -57,6 +57,7 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
       queries.updateIncidentStatus(queryFn, tenantId, id, status),
     resolveIncidentByFingerprint: (tenantId, serviceId, fingerprint) =>
       queries.resolveIncidentByFingerprint(queryFn, tenantId, serviceId, fingerprint),
+    resolveStaleIncidents: (cutoff) => queries.resolveStaleIncidents(queryFn, cutoff),
 
     listSshKeys: async (tenantId) => {
       const rows = await queries.listSshKeys(queryFn, tenantId);

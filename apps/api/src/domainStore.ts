@@ -14,6 +14,8 @@ export type DomainStore = {
   updateIncidentStatus(tenantId: string, id: string, status: IncidentStatus): Promise<Incident | undefined>;
   /** Resolve open incidents for a service+fingerprint after an auto-fix lands. Returns count closed. */
   resolveIncidentByFingerprint(tenantId: string, serviceId: string, fingerprint: string): Promise<number>;
+  /** Auto-resolve incidents not seen since `cutoff` (presumed healthy). Returns count closed. */
+  resolveStaleIncidents(cutoff: Date): Promise<number>;
 
   listAgents(tenantId: string): Promise<Agent[]>;
   getAgent(tenantId: string, id: string): Promise<Agent | undefined>;
@@ -184,6 +186,20 @@ export function createMemoryDomainStore(): DomainStore {
         ) {
           inc.status = "resolved";
           inc.lastSeenAt = new Date().toISOString();
+          n++;
+        }
+      }
+      return n;
+    },
+    async resolveStaleIncidents(cutoff) {
+      const cut = cutoff.getTime();
+      let n = 0;
+      for (const inc of incidents.values()) {
+        if (
+          (inc.status === "open" || inc.status === "acknowledged") &&
+          new Date(inc.lastSeenAt).getTime() < cut
+        ) {
+          inc.status = "resolved";
           n++;
         }
       }

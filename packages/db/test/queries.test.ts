@@ -6,6 +6,7 @@ import {
   getIncident,
   upsertIncident,
   updateIncidentStatus,
+  resolveStaleIncidents,
   listAgents,
   getAgent,
   recordAgentHeartbeat,
@@ -278,6 +279,24 @@ describe("updateIncidentStatus", () => {
   it("returns undefined when not found", async () => {
     const result = await updateIncidentStatus(mockQuery([]), "t1", "nope", "closed");
     expect(result).toBeUndefined();
+  });
+});
+
+describe("resolveStaleIncidents", () => {
+  it("resolves only open/acknowledged incidents older than the cutoff", async () => {
+    const query = mockQuery([{ id: "inc-1" }, { id: "inc-2" }]);
+    const cutoff = new Date("2026-05-19T00:00:00.000Z");
+    const n = await resolveStaleIncidents(query, cutoff);
+    expect(n).toBe(2);
+    const [sql, params] = (query as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(sql).toContain("status = 'resolved'");
+    expect(sql).toContain("status IN ('open', 'acknowledged')");
+    expect(sql).toContain("last_seen_at < $1");
+    expect(params).toEqual([cutoff.toISOString()]);
+  });
+
+  it("returns 0 when nothing is stale", async () => {
+    expect(await resolveStaleIncidents(mockQuery([]), new Date())).toBe(0);
   });
 });
 

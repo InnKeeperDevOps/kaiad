@@ -106,7 +106,7 @@ func executeRunFixPlanInner(e *Executor, ctx context.Context, payload map[string
 		fixExecutor = "claude"
 	}
 
-	prompt := buildFixPrompt(errorMessage, contextLines)
+	prompt := buildFixPrompt(errorMessage, contextLines, gitRepoURL, branch)
 	planBin := planBinary(fixExecutor)
 	planTimeoutDur := planTimeout()
 	runCtx, cancel := context.WithTimeout(ctx, planTimeoutDur)
@@ -255,10 +255,20 @@ func runGit(ctx context.Context, dir string, env map[string]string, args ...stri
 	return string(out), err
 }
 
-func buildFixPrompt(errorMessage string, contextLines []string) string {
+func buildFixPrompt(errorMessage string, contextLines []string, repoURL, branch string) string {
 	var b strings.Builder
 	b.WriteString("You are an automated code-fix agent invoked by Kaiad. ")
 	b.WriteString("A running service has emitted the error below. You are inside a fresh clone of that service's repository at the working directory.\n\n")
+	if strings.TrimSpace(repoURL) != "" {
+		b.WriteString("REPOSITORY: ")
+		b.WriteString(repoURL)
+		if strings.TrimSpace(branch) != "" {
+			b.WriteString(" (branch ")
+			b.WriteString(branch)
+			b.WriteString(")")
+		}
+		b.WriteString("\n\n")
+	}
 	b.WriteString("ERROR:\n")
 	b.WriteString(errorMessage)
 	b.WriteString("\n\nLOG CONTEXT (last lines before the error):\n")

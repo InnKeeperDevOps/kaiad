@@ -44,6 +44,11 @@ services:
       # boot and signs bearer JWTs with it. Persisted so tokens issued
       # before a restart stay valid.
       - ./data/registry-auth:/data/registry-auth
+      # Claude Code CLI login for the autonomous fix. Persisted across
+      # rebuilds so the operator only has to run
+      #   docker compose exec -u node kaiad claude /login
+      # once. (Per the design choice: CLI login, not an API key.)
+      - ./data/claude-home:/home/node/.claude
       # Build pipeline workspace + artifact root (same path as
       # KAIAD_BUILDS_HOST_DIR above).
       - ./data/kaiad-builds:/data/builds

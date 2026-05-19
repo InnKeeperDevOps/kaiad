@@ -30,7 +30,7 @@ export type DomainStore = {
       finishedAt?: string;
       commitSha?: string | null;
       output?: string | null;
-      event?: { step: string; ok?: boolean; message?: string };
+      event?: { step: string; ok?: boolean; message?: string; cmd?: string; output?: string; code?: number };
       resetEvents?: boolean;
     }
   ): Promise<void>;

@@ -111,8 +111,19 @@ export interface IncidentRow {
   lastFixFinishedAt?: string;
   lastFixCommitSha?: string;
   lastFixOutput?: string;
-  /** Step events of the latest fix attempt (oldest first). */
-  lastFixEvents: { at: string; step: string; ok?: boolean; message?: string }[];
+  /** Step events of the latest fix attempt (oldest first). Each event
+   *  can carry the exact `cmd` that was executed plus its truncated
+   *  `output` and exit `code` so the Incidents UI can show "what was
+   *  run" alongside the step name. */
+  lastFixEvents: {
+    at: string;
+    step: string;
+    ok?: boolean;
+    message?: string;
+    cmd?: string;
+    output?: string;
+    code?: number;
+  }[];
 }
 
 function mapIncident(r: Record<string, unknown>): IncidentRow {
@@ -146,7 +157,15 @@ function mapIncident(r: Record<string, unknown>): IncidentRow {
     lastFixCommitSha: (r.last_fix_commit_sha as string | null) ?? undefined,
     lastFixOutput: (r.last_fix_output as string | null) ?? undefined,
     lastFixEvents: Array.isArray(r.last_fix_events)
-      ? (r.last_fix_events as { at: string; step: string; ok?: boolean; message?: string }[])
+      ? (r.last_fix_events as {
+          at: string;
+          step: string;
+          ok?: boolean;
+          message?: string;
+          cmd?: string;
+          output?: string;
+          code?: number;
+        }[])
       : [],
   };
 }
@@ -230,7 +249,7 @@ export async function recordFixProgress(
     finishedAt?: string;
     commitSha?: string | null;
     output?: string | null;
-    event?: { step: string; ok?: boolean; message?: string };
+    event?: { step: string; ok?: boolean; message?: string; cmd?: string; output?: string; code?: number };
     resetEvents?: boolean;
   },
 ): Promise<void> {

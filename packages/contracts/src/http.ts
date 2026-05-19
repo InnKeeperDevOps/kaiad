@@ -136,7 +136,13 @@ export const incidentSchema = z.object({
         at: z.string().datetime(),
         step: z.string(),
         ok: z.boolean().optional(),
-        message: z.string().optional()
+        message: z.string().optional(),
+        /** Exact command line executed (e.g. "git clone …", "claude -p …"). */
+        cmd: z.string().optional(),
+        /** Truncated stdout+stderr from that command. */
+        output: z.string().optional(),
+        /** Process exit code. */
+        code: z.number().int().optional()
       })
     )
     .default([]),

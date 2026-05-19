@@ -124,7 +124,15 @@ export type Incident = {
   lastFixFinishedAt?: string;
   lastFixCommitSha?: string;
   lastFixOutput?: string;
-  lastFixEvents?: { at: string; step: string; ok?: boolean; message?: string }[];
+  lastFixEvents?: {
+    at: string;
+    step: string;
+    ok?: boolean;
+    message?: string;
+    cmd?: string;
+    output?: string;
+    code?: number;
+  }[];
   firstSeenAt: string;
   lastSeenAt: string;
   eventCount: number;

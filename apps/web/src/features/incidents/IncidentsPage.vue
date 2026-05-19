@@ -290,12 +290,45 @@ const btnStyle = {
                     <li
                       v-for="(ev, idx) in inc.lastFixEvents"
                       :key="idx"
-                      :style="{ display: 'flex', gap: '0.5rem', alignItems: 'baseline' }"
+                      :style="{ display: 'grid', gridTemplateColumns: 'auto auto auto 1fr', columnGap: '0.5rem', rowGap: '0.1rem', alignItems: 'baseline' }"
                     >
                       <span :style="{ color: fixGlyphColor(ev), width: '1ch', textAlign: 'center' }">{{ fixGlyph(ev) }}</span>
                       <span :style="{ color: 'var(--color-text-secondary)', minWidth: '8ch' }">{{ new Date(ev.at).toLocaleTimeString() }}</span>
-                      <span :style="{ minWidth: '14ch' }">{{ fixStepLabel[ev.step] || ev.step }}</span>
+                      <span :style="{ minWidth: '14ch' }">
+                        {{ fixStepLabel[ev.step] || ev.step }}
+                        <span
+                          v-if="typeof ev.code === 'number'"
+                          :style="{ marginLeft: '0.35rem', fontSize: '0.7rem', color: ev.ok === false ? 'var(--color-danger)' : 'var(--color-text-secondary)' }"
+                        >exit {{ ev.code }}</span>
+                      </span>
                       <span v-if="ev.message" :style="{ color: ev.ok === false ? 'var(--color-danger)' : 'var(--color-text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }">— {{ ev.message }}</span>
+                      <!-- The actual command + its output, spanning all 4 cols -->
+                      <div
+                        v-if="ev.cmd || ev.output"
+                        :style="{ gridColumn: '2 / span 3', marginTop: '0.05rem' }"
+                      >
+                        <code
+                          v-if="ev.cmd"
+                          :style="{ display: 'block', fontSize: '0.72rem', color: 'var(--color-text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }"
+                        >$ {{ ev.cmd }}</code>
+                        <details v-if="ev.output" :style="{ marginTop: '0.1rem' }">
+                          <summary :style="{ cursor: 'pointer', fontSize: '0.72rem', color: 'var(--color-text-secondary)' }">output ({{ ev.output.length }} chars)</summary>
+                          <pre
+                            :style="{
+                              marginTop: '0.2rem',
+                              maxHeight: '10rem',
+                              overflow: 'auto',
+                              background: 'var(--color-bg)',
+                              border: '1px solid var(--color-border)',
+                              borderRadius: '6px',
+                              padding: '0.4rem 0.55rem',
+                              fontSize: '0.7rem',
+                              whiteSpace: 'pre-wrap',
+                              wordBreak: 'break-word'
+                            }"
+                          >{{ ev.output }}</pre>
+                        </details>
+                      </div>
                     </li>
                   </ol>
                   <p

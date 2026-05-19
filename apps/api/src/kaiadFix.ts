@@ -41,7 +41,16 @@ export type FixProgressEvent = {
     | "failed";
   ok?: boolean;
   message?: string;
+  /** Command line as it was executed (e.g. "git clone --branch main …"). */
+  cmd?: string;
+  /** Truncated stdout+stderr from that command (best diagnostic per step). */
+  output?: string;
+  /** Process exit code. */
+  code?: number;
 };
+
+// Trim noisy command output before persisting / displaying.
+const OUTPUT_HEAD = 1200;
 
 export type KaiadFixReason =
   | "no_changes"
@@ -142,8 +151,11 @@ function runCli(
   });
 }
 
-// buildFixPrompt — the prompt sent to the AI CLI. It carries the repo
-// and the error explicitly (the CLI also operates inside the clone).
+// buildFixPrompt — the prompt sent to the AI CLI. Carries the repo and
+// the error explicitly (the CLI also operates inside the clone) and
+// hard-states that this is an AUTOMATED, non-interactive run so the
+// model commits to a best-effort decision instead of stalling on
+// clarifying questions.
 export function buildFixPrompt(
   repoUrl: string,
   branch: string,
@@ -152,21 +164,25 @@ export function buildFixPrompt(
 ): string {
   const ctx = contextLines.length ? contextLines.join("\n") : "(none)";
   return [
-    "You are an automated code-fix agent invoked by Kaiad. A running service has emitted the error below. You are inside a fresh clone of that service's repository at the working directory.",
+    "AUTOMATED TASK — you are running headless inside Kaiad. There is no human in the loop. NEVER ask questions, NEVER request clarification, NEVER wait for confirmation. If anything is ambiguous, make the best-effort decision and proceed.",
+    "",
+    "A running service has emitted the error below. You are inside a fresh clone of that service's repository at the working directory; edit files directly to fix the bug, then exit.",
     "",
     `REPOSITORY: ${repoUrl} (branch ${branch})`,
     "",
     "ERROR:",
     errorMessage,
     "",
-    "LOG CONTEXT (last lines before the error):",
+    "LOG CONTEXT (the full captured trace; the deepest \"Caused by:\" is usually the actionable root cause):",
     ctx,
     "",
     "INSTRUCTIONS:",
-    "1. Identify the root cause from the error and surrounding code.",
-    "2. Edit only the files necessary to fix the bug. Do not refactor or change unrelated code.",
-    "3. Do NOT run git commands and do NOT commit or push. Kaiad commits and pushes your changes after you exit.",
-    "4. If you cannot find a fix, exit without modifying any files."
+    "1. Identify the root cause from the error/trace and the surrounding code.",
+    "2. Edit ONLY the files needed to fix the bug. Do not refactor or change unrelated code.",
+    "3. Do NOT run git commands. Do NOT commit or push. Kaiad commits and pushes after you exit.",
+    "4. Do not produce conversational prose; just edit files. If you write to stdout, keep it terse.",
+    "5. Do NOT ask questions or request human input — this is automated.",
+    "6. If after analysis you genuinely cannot determine a safe fix, exit WITHOUT modifying any files."
   ].join("\n");
 }
 
@@ -198,6 +214,34 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
     }
   };
   const snippet = (s: string, n = 400) => s.replace(/\s+$/, "").slice(0, n);
+  // Format an argv array as a copy-pasteable command line, redacting
+  // GIT_SSH_COMMAND noise (the key path is per-run garbage).
+  const shellQuote = (s: string) => (/[^\w@%+=:,./-]/.test(s) ? `'${s.replace(/'/g, `'\\''`)}'` : s);
+  const cmdLine = (bin: string, args: string[]) => [bin, ...args].map(shellQuote).join(" ");
+  // tracked runs a step's command, surfaces start/end events with the
+  // exact cmd, exit code, and trimmed output, and returns the result.
+  // step "succeeded"/"failed"/"started"/"no_changes" are status-only —
+  // not used here; "cloning" / "cli" / "committing" / "pushing" map.
+  const tracked = async (
+    step: FixProgressEvent["step"],
+    bin: string,
+    args: string[],
+    opts: Parameters<typeof run>[2]
+  ): Promise<{ code: number; stdout: string; stderr: string; output: string }> => {
+    const cmd = cmdLine(bin, args);
+    emit({ step, cmd });
+    const r = await run(bin, args, opts);
+    const output = (r.stdout + r.stderr).replace(/\s+$/, "");
+    emit({
+      step,
+      ok: r.code === 0,
+      cmd,
+      code: r.code,
+      output: output.slice(0, OUTPUT_HEAD),
+      message: r.code === 0 ? undefined : snippet(output)
+    });
+    return { ...r, output };
+  };
 
   try {
     emit({ step: "started", ok: true });
@@ -211,19 +255,16 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       env.GIT_SSH_COMMAND = `ssh -i ${p.sshKeyValue} -o StrictHostKeyChecking=no -o BatchMode=yes`;
     }
 
-    emit({ step: "cloning" });
-    const clone = await run(
+    const clone = await tracked(
+      "cloning",
       "git",
       ["clone", "--branch", branch, "--single-branch", p.repoUrl, "."],
       { cwd: repoDir, env, timeoutMs }
     );
     if (clone.code !== 0) {
-      const out = clone.stdout + clone.stderr;
-      const reason = looksLikeAuthFailure(out) ? "auth" : "clone_failed";
-      emit({ step: "cloning", ok: false, message: snippet(out) });
-      return { ok: false, reason, output: `git clone failed:\n${out}` };
+      const reason = looksLikeAuthFailure(clone.output) ? "auth" : "clone_failed";
+      return { ok: false, reason, output: `git clone failed:\n${clone.output}` };
     }
-    emit({ step: "cloning", ok: true });
 
     for (const [k, v] of [
       ["user.email", "kaiad-bot@kaiad.dev"],
@@ -253,7 +294,8 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       cliUid = FIX_UID;
       cliGid = FIX_GID;
     }
-    emit({ step: "cli", message: p.executor });
+    const cliCmd = cmdLine(bin, args);
+    emit({ step: "cli", message: p.executor, cmd: cliCmd });
     const cli = await runCli(bin, args, {
       cwd: repoDir,
       env: cliEnv,
@@ -277,10 +319,23 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       cliOutHead: cliOut.slice(0, 2500)
     });
     if (cli.code !== 0) {
-      emit({ step: "cli", ok: false, message: snippet(cliOut) || `${p.executor} exited ${cli.code}` });
+      emit({
+        step: "cli",
+        ok: false,
+        cmd: cliCmd,
+        code: cli.code,
+        output: cliOut.slice(0, OUTPUT_HEAD),
+        message: snippet(cliOut) || `${p.executor} exited ${cli.code}`
+      });
       return { ok: false, reason: "cli_failed", output: `${p.executor} failed:\n${cliOut}` };
     }
-    emit({ step: "cli", ok: true });
+    emit({
+      step: "cli",
+      ok: true,
+      cmd: cliCmd,
+      code: cli.code,
+      output: cliOut.slice(0, OUTPUT_HEAD)
+    });
 
     const status = await run("git", ["status", "--porcelain"], {
       cwd: repoDir,
@@ -296,38 +351,28 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       return { ok: false, reason: "no_changes", output: `${p.executor} made no changes.\n${cliOut}` };
     }
 
-    emit({ step: "committing" });
-    await run("git", ["add", "-A"], { cwd: repoDir, env, timeoutMs: 30000 });
+    // `git add -A` is bundled into the committing step's surface.
+    await tracked("committing", "git", ["add", "-A"], { cwd: repoDir, env, timeoutMs: 30000 });
     const commitMsg = `fix(auto): ${p.errorMessage.split("\n")[0].slice(0, 72)}`;
-    const commit = await run("git", ["commit", "-m", commitMsg], {
+    const commit = await tracked("committing", "git", ["commit", "-m", commitMsg], {
       cwd: repoDir,
       env,
       timeoutMs: 30000
     });
     if (commit.code !== 0) {
-      const out = commit.stdout + commit.stderr;
-      emit({ step: "committing", ok: false, message: snippet(out) });
-      return { ok: false, reason: "error", output: `git commit failed:\n${out}` };
+      return { ok: false, reason: "error", output: `git commit failed:\n${commit.output}` };
     }
-    emit({ step: "committing", ok: true });
 
-    emit({ step: "pushing", message: branch });
-    const push = await run("git", ["push", "origin", branch], {
+    const push = await tracked("pushing", "git", ["push", "origin", branch], {
       cwd: repoDir,
       env,
       timeoutMs
     });
     if (push.code !== 0) {
-      const out = push.stdout + push.stderr;
-      emit({
-        step: "pushing",
-        ok: false,
-        message: snippet(out)
-      });
       return {
         ok: false,
-        reason: looksLikeAuthFailure(out) ? "auth" : "push_failed",
-        output: `git push failed:\n${out}`
+        reason: looksLikeAuthFailure(push.output) ? "auth" : "push_failed",
+        output: `git push failed:\n${push.output}`
       };
     }
 

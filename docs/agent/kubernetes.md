@@ -466,39 +466,48 @@ processing.
 
 ## Troubleshooting
 
-**`error: resource mapping not found for name: "<n>" namespace: "<ns>"`
- / `no matches for kind "KaiadAgent" in version "kaiad.dev/v1alpha1"`
- / `ensure CRDs are installed first`**
-:   The CRD isn't installed in the cluster. Apply it before applying
-    any `KaiadAgent` resource:
+### CRD not installed
 
-    ```bash
-    kubectl apply -f https://raw.githubusercontent.com/InnKeeperDevOps/kaiad/main/deploy/operator/charts/kaiad-operator/crds/kaiadagents.yaml
-    kubectl get crd kaiadagents.kaiad.dev   # should now exist
-    ```
+Symptoms: `error: resource mapping not found …`, `no matches for kind
+"KaiadAgent" in version "kaiad.dev/v1alpha1"`, or `ensure CRDs are
+installed first`.
 
-    Helm's `helm install` applies the chart's `crds/` directory
-    automatically; `helm template | kubectl apply -f -` does NOT —
-    apply the CRD URL above separately if you use the template flow.
+The CRD isn't installed in the cluster. Apply it before any
+`KaiadAgent` resource:
 
-**`Ready=False, Reason=InvalidSpec`**
-:   `spec.manages` contains a rule outside the allow-list. The status
-    `message` names the offending tuple. Adjust the rule or pick a
-    different resource.
+```bash
+kubectl apply -f https://raw.githubusercontent.com/InnKeeperDevOps/kaiad/main/deploy/operator/charts/kaiad-operator/crds/kaiadagents.yaml
+kubectl get crd kaiadagents.kaiad.dev   # should now exist
+```
 
-**`Ready=False, Reason=EnrollmentFailed`**
-:   The operator could not mint a token. Common causes: wrong
-    `kaiad.apiBaseURL`, missing/revoked operator credential, or the Kaiad
-    API is unreachable from the cluster. `kubectl -n kaiad-system logs deploy/kaiad-operator`
-    has the request error.
+`helm install` applies the chart's `crds/` directory automatically;
+`helm template | kubectl apply -f -` does **not** — apply the CRD URL
+above separately if you use the template flow.
 
-**`Ready=False, Reason=AgentNotOnline`**
-:   The pod is running but the control plane has not seen the agent yet.
-    Check egress from the cluster to the realtime URL, and look at the
-    agent pod's stdout for connection errors.
+### `Ready=False, Reason=InvalidSpec`
 
-**`Ready=False, Reason=DeploymentPending`**
-:   Standard k8s scheduling/pull issues. `kubectl -n <agent-ns> describe deployment <agent-name>`.
+`spec.manages` contains a rule outside the allow-list. The status
+`message` names the offending tuple — adjust the rule or pick a
+different resource.
+
+### `Ready=False, Reason=EnrollmentFailed`
+
+The operator could not mint a token. Common causes: wrong
+`kaiad.apiBaseURL`, a missing/revoked operator credential, or the Kaiad
+API unreachable from the cluster.
+`kubectl -n kaiad-system logs deploy/kaiad-operator` has the request
+error.
+
+### `Ready=False, Reason=AgentNotOnline`
+
+The pod is running but the control plane has not seen the agent yet.
+Check egress from the cluster to the realtime URL, and the agent pod's
+stdout for connection errors.
+
+### `Ready=False, Reason=DeploymentPending`
+
+Standard Kubernetes scheduling / image-pull issues. Inspect with
+`kubectl -n AGENT_NAMESPACE describe deployment AGENT_NAME`.
 
 ## See also
 

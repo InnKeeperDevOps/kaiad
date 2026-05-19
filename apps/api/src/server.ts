@@ -53,7 +53,10 @@ import {
   type TenantSettings,
   parsePipelineYaml,
   selectPipeline,
-  resolveEnvironment
+  resolveEnvironment,
+  hasPermission,
+  permissionsForRole,
+  PERMISSIONS
 } from "@sm/contracts";
 import { correlationIdPlugin } from "./correlationId.js";
 import {
@@ -147,6 +150,17 @@ import {
   setRepoPipelineOverride,
   listServicesForRepo,
   getLatestBuildPipelineYaml,
+  getEffectivePermissions,
+  listGroups,
+  getGroup,
+  createGroup,
+  updateGroup,
+  deleteGroup,
+  listTenantMembers,
+  setMemberCustomGroups,
+  setMemberRole,
+  removeTenantMember,
+  addTenantMemberByEmail,
   listRunningServicesForAgent,
   popLoadBalancerStatusForAgentService,
   upsertLoadBalancerStatus,
@@ -156,7 +170,11 @@ import {
 
 const startedAt = Date.now();
 
-async function buildMeResponse(store: AuthStore, session: SessionInfo) {
+async function buildMeResponse(
+  store: AuthStore,
+  session: SessionInfo,
+  permissions: string[] = []
+) {
   let rows = await store.findMembershipsWithTenants(session.id);
   if (rows.length === 0) {
     rows = [
@@ -178,6 +196,7 @@ async function buildMeResponse(store: AuthStore, session: SessionInfo) {
     role: session.role,
     tenantId: session.tenantId,
     memberships,
+    permissions,
   });
 }
 
@@ -863,7 +882,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
       );
       return null;
     }
-    if (session.kind === "apiCredential" || (session.role !== "owner" && session.role !== "admin")) {
+    if (session.kind === "apiCredential" || !hasPermission(await sessionPermissions(session), "registry:admin")) {
       reply.status(403).send(
         apiErrorSchema.parse({
           code: "FORBIDDEN",
@@ -1743,7 +1762,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
         apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token" })
       );
     }
-    if (session.role !== "owner" && session.role !== "admin") {
+    if (!hasPermission(await sessionPermissions(session), "settings:manage")) {
       return reply.status(403).send(
         apiErrorSchema.parse({ code: "FORBIDDEN", message: "Admin access required" })
       );
@@ -1803,7 +1822,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
         apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token" })
       );
     }
-    if (session.role !== "owner" && session.role !== "admin") {
+    if (!hasPermission(await sessionPermissions(session), "settings:manage")) {
       return reply.status(403).send(
         apiErrorSchema.parse({ code: "FORBIDDEN", message: "Admin access required" })
       );
@@ -1882,7 +1901,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
         })
       );
     }
-    return await buildMeResponse(authStore, session);
+    return await buildMeResponse(authStore, session, await sessionPermissions(session));
   });
 
   app.post("/api/v1/session/active-tenant", async (req, reply) => {
@@ -1928,7 +1947,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
         })
       );
     }
-    return await buildMeResponse(authStore, next);
+    return await buildMeResponse(authStore, next, await sessionPermissions(next));
   });
 
   app.post("/api/v1/tenants", async (req, reply) => {
@@ -1983,7 +2002,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
         })
       );
     }
-    return await buildMeResponse(authStore, next);
+    return await buildMeResponse(authStore, next, await sessionPermissions(next));
   });
 
   app.delete<{ Params: { tenantId: string } }>("/api/v1/tenants/:tenantId", async (req, reply) => {
@@ -2062,7 +2081,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
     if (!session) {
       return reply.status(401).send(apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId }));
     }
-    if (session.kind === "apiCredential" || (session.role !== "owner" && session.role !== "admin")) {
+    if (session.kind === "apiCredential" || !hasPermission(await sessionPermissions(session), "apicredentials:manage")) {
       return reply.status(403).send(apiErrorSchema.parse({ code: "FORBIDDEN", message: "Owner or admin session required", correlationId: (req as any).correlationId }));
     }
     const parsed = createApiCredentialRequestSchema.safeParse(req.body);
@@ -2083,7 +2102,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
     if (!session) {
       return reply.status(401).send(apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId }));
     }
-    if (session.kind === "apiCredential" || (session.role !== "owner" && session.role !== "admin")) {
+    if (session.kind === "apiCredential" || !hasPermission(await sessionPermissions(session), "apicredentials:manage")) {
       return reply.status(403).send(apiErrorSchema.parse({ code: "FORBIDDEN", message: "Owner or admin session required", correlationId: (req as any).correlationId }));
     }
     const credentials = await listApiCredentialsForTenant(session.tenantId);
@@ -2097,13 +2116,150 @@ export function buildServer(opts: BuildServerOptions = {}) {
     if (!session) {
       return reply.status(401).send(apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId }));
     }
-    if (session.kind === "apiCredential" || (session.role !== "owner" && session.role !== "admin")) {
+    if (session.kind === "apiCredential" || !hasPermission(await sessionPermissions(session), "apicredentials:manage")) {
       return reply.status(403).send(apiErrorSchema.parse({ code: "FORBIDDEN", message: "Owner or admin session required", correlationId: (req as any).correlationId }));
     }
     const ok = await revokeApiCredentialForTenant(session.tenantId, req.params.id);
     if (!ok) {
       return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Credential not found or already revoked", correlationId: (req as any).correlationId }));
     }
+    return reply.status(204).send();
+  });
+
+  // ── Users, groups & permissions ───────────────────────────────────
+  const VALID_PERMS = new Set<string>([...PERMISSIONS, "*"]);
+
+  app.get("/api/v1/permissions", async (req, reply) => {
+    const s = await authorize(req as any, reply as any, { perm: "users:read" });
+    if (!s) return;
+    return { permissions: [...PERMISSIONS] };
+  });
+
+  app.get("/api/v1/groups", async (req, reply) => {
+    const s = await authorize(req as any, reply as any, { perm: "users:read" });
+    if (!s) return;
+    const q = await getBuildsQuery();
+    if (!q) return { groups: [] };
+    return { groups: await listGroups(q, s.tenantId) };
+  });
+
+  app.post<{ Body: { name?: unknown; description?: unknown; permissions?: unknown } }>(
+    "/api/v1/groups",
+    async (req, reply) => {
+      const s = await authorize(req as any, reply as any, { perm: "users:manage", userOnly: true });
+      if (!s) return;
+      const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+      const perms = Array.isArray(req.body?.permissions) ? (req.body!.permissions as unknown[]).map(String) : [];
+      if (!name) {
+        return reply.status(400).send(apiErrorSchema.parse({ code: "INVALID_REQUEST", message: "name required", correlationId: (req as any).correlationId }));
+      }
+      const bad = perms.filter((p) => !VALID_PERMS.has(p));
+      if (bad.length) {
+        return reply.status(422).send(apiErrorSchema.parse({ code: "INVALID_PERMISSION", message: `Unknown permission(s): ${bad.join(", ")}`, correlationId: (req as any).correlationId }));
+      }
+      const q = await getBuildsQuery();
+      if (!q) return reply.status(503).send(apiErrorSchema.parse({ code: "DB_UNAVAILABLE", message: "Persistence unavailable", correlationId: (req as any).correlationId }));
+      try {
+        return reply.status(201).send(await createGroup(q, s.tenantId, { name, description: typeof req.body?.description === "string" ? req.body.description : "", permissions: perms }));
+      } catch {
+        return reply.status(409).send(apiErrorSchema.parse({ code: "CONFLICT", message: "A group with that name already exists", correlationId: (req as any).correlationId }));
+      }
+    }
+  );
+
+  app.patch<{ Params: { id: string }; Body: { name?: unknown; description?: unknown; permissions?: unknown } }>(
+    "/api/v1/groups/:id",
+    async (req, reply) => {
+      const s = await authorize(req as any, reply as any, { perm: "users:manage", userOnly: true });
+      if (!s) return;
+      const q = await getBuildsQuery();
+      if (!q) return reply.status(503).send(apiErrorSchema.parse({ code: "DB_UNAVAILABLE", message: "Persistence unavailable", correlationId: (req as any).correlationId }));
+      let perms: string[] | undefined;
+      if (Array.isArray(req.body?.permissions)) {
+        perms = (req.body!.permissions as unknown[]).map(String);
+        const bad = perms.filter((p) => !VALID_PERMS.has(p));
+        if (bad.length) {
+          return reply.status(422).send(apiErrorSchema.parse({ code: "INVALID_PERMISSION", message: `Unknown permission(s): ${bad.join(", ")}`, correlationId: (req as any).correlationId }));
+        }
+      }
+      const updated = await updateGroup(q, s.tenantId, req.params.id, {
+        name: typeof req.body?.name === "string" ? req.body.name : undefined,
+        description: typeof req.body?.description === "string" ? req.body.description : undefined,
+        permissions: perms
+      });
+      if (!updated) {
+        return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Group not found or built-in (read-only)", correlationId: (req as any).correlationId }));
+      }
+      return updated;
+    }
+  );
+
+  app.delete<{ Params: { id: string } }>("/api/v1/groups/:id", async (req, reply) => {
+    const s = await authorize(req as any, reply as any, { perm: "users:manage", userOnly: true });
+    if (!s) return;
+    const q = await getBuildsQuery();
+    if (!q) return reply.status(503).send(apiErrorSchema.parse({ code: "DB_UNAVAILABLE", message: "Persistence unavailable", correlationId: (req as any).correlationId }));
+    const ok = await deleteGroup(q, s.tenantId, req.params.id);
+    if (!ok) return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Group not found or built-in (cannot delete)", correlationId: (req as any).correlationId }));
+    return { ok: true };
+  });
+
+  app.get("/api/v1/users", async (req, reply) => {
+    const s = await authorize(req as any, reply as any, { perm: "users:read" });
+    if (!s) return;
+    const q = await getBuildsQuery();
+    if (!q) return { users: [] };
+    return { users: await listTenantMembers(q, s.tenantId) };
+  });
+
+  app.post<{ Body: { email?: unknown; role?: unknown } }>("/api/v1/users", async (req, reply) => {
+    const s = await authorize(req as any, reply as any, { perm: "users:manage", userOnly: true });
+    if (!s) return;
+    const email = typeof req.body?.email === "string" ? req.body.email.trim() : "";
+    const role = typeof req.body?.role === "string" ? req.body.role : "viewer";
+    if (!email || !["owner", "admin", "operator", "viewer"].includes(role)) {
+      return reply.status(400).send(apiErrorSchema.parse({ code: "INVALID_REQUEST", message: "email and a valid role (owner|admin|operator|viewer) required", correlationId: (req as any).correlationId }));
+    }
+    const q = await getBuildsQuery();
+    if (!q) return reply.status(503).send(apiErrorSchema.parse({ code: "DB_UNAVAILABLE", message: "Persistence unavailable", correlationId: (req as any).correlationId }));
+    const r = await addTenantMemberByEmail(q, s.tenantId, email, role);
+    if (!r.ok) {
+      return reply.status(422).send(apiErrorSchema.parse({ code: "USER_NOT_FOUND", message: r.reason, correlationId: (req as any).correlationId }));
+    }
+    return reply.status(201).send({ ok: true, userId: r.userId });
+  });
+
+  app.patch<{ Params: { userId: string }; Body: { role?: unknown; groupIds?: unknown } }>(
+    "/api/v1/users/:userId",
+    async (req, reply) => {
+      const s = await authorize(req as any, reply as any, { perm: "users:manage", userOnly: true });
+      if (!s) return;
+      const q = await getBuildsQuery();
+      if (!q) return reply.status(503).send(apiErrorSchema.parse({ code: "DB_UNAVAILABLE", message: "Persistence unavailable", correlationId: (req as any).correlationId }));
+      if (typeof req.body?.role === "string") {
+        if (!["owner", "admin", "operator", "viewer"].includes(req.body.role)) {
+          return reply.status(400).send(apiErrorSchema.parse({ code: "INVALID_REQUEST", message: "invalid role", correlationId: (req as any).correlationId }));
+        }
+        const ok = await setMemberRole(q, s.tenantId, req.params.userId, req.body.role);
+        if (!ok) return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Member not found", correlationId: (req as any).correlationId }));
+      }
+      if (Array.isArray(req.body?.groupIds)) {
+        await setMemberCustomGroups(q, s.tenantId, req.params.userId, (req.body!.groupIds as unknown[]).map(String));
+      }
+      return { ok: true };
+    }
+  );
+
+  app.delete<{ Params: { userId: string } }>("/api/v1/users/:userId", async (req, reply) => {
+    const s = await authorize(req as any, reply as any, { perm: "users:manage", userOnly: true });
+    if (!s) return;
+    if (s.id === req.params.userId) {
+      return reply.status(400).send(apiErrorSchema.parse({ code: "INVALID_REQUEST", message: "You cannot remove yourself", correlationId: (req as any).correlationId }));
+    }
+    const q = await getBuildsQuery();
+    if (!q) return reply.status(503).send(apiErrorSchema.parse({ code: "DB_UNAVAILABLE", message: "Persistence unavailable", correlationId: (req as any).correlationId }));
+    const ok = await removeTenantMember(q, s.tenantId, req.params.userId);
+    if (!ok) return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Member not found", correlationId: (req as any).correlationId }));
     return reply.status(204).send();
   });
 
@@ -2506,7 +2662,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
     if (!session) {
       return reply.status(401).send(apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId }));
     }
-    if (session.role !== "owner" && session.role !== "admin") {
+    if (!hasPermission(await sessionPermissions(session), "agents:manage")) {
       return reply.status(403).send(apiErrorSchema.parse({ code: "FORBIDDEN", message: "Admin access required", correlationId: (req as any).correlationId }));
     }
     const parsed = updateAgentRequestSchema.safeParse(req.body ?? {});
@@ -2556,7 +2712,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
     if (!session) {
       return reply.status(401).send(apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId }));
     }
-    if (session.role !== "owner" && session.role !== "admin") {
+    if (!hasPermission(await sessionPermissions(session), "agents:manage")) {
       return reply.status(403).send(apiErrorSchema.parse({ code: "FORBIDDEN", message: "Admin access required", correlationId: (req as any).correlationId }));
     }
     const deleted = await domainStore.deleteAgent(session.tenantId, req.params.id);
@@ -2737,6 +2893,71 @@ export function buildServer(opts: BuildServerOptions = {}) {
     }
   }
 
+  // Effective permissions for a resolved session. API credentials get
+  // their legacy operator-role permissions (plus owner-equivalence when
+  // they hold all scopes); user sessions get the union of their groups.
+  // Falls back to the role's built-in permission set when the DB is
+  // unavailable so a transient DB blip can't lock everyone out.
+  async function sessionPermissions(session: SessionInfo): Promise<string[]> {
+    if (session.permissions) return session.permissions;
+    if (session.role === "owner" || session.role === "admin") {
+      session.permissions = ["*"];
+      return session.permissions;
+    }
+    if (session.kind === "apiCredential") {
+      session.permissions = permissionsForRole(session.role);
+      return session.permissions;
+    }
+    try {
+      const q = await getBuildsQuery();
+      if (q) {
+        const perms = await getEffectivePermissions(q, session.tenantId, session.id);
+        session.permissions = perms.length > 0 ? perms : permissionsForRole(session.role);
+        return session.permissions;
+      }
+    } catch (err) {
+      app.log.warn?.({ err }, "sessionPermissions: falling back to role perms");
+    }
+    session.permissions = permissionsForRole(session.role);
+    return session.permissions;
+  }
+
+  /**
+   * Resolve + authorize a request in one step. On failure it sends the
+   * 401/403 and returns null (caller does `if (!s) return;`). `perm`
+   * is the required permission; `userOnly` rejects machine api
+   * credentials (mirrors the prior explicit apiCredential exclusions).
+   */
+  async function authorize(
+    req: { headers: { authorization?: string }; correlationId?: string },
+    reply: { status: (n: number) => { send: (b: unknown) => unknown } },
+    opts: { perm?: string; userOnly?: boolean } = {}
+  ): Promise<SessionInfo | null> {
+    const session = await resolveSession(authStore, req.headers.authorization);
+    if (!session) {
+      reply
+        .status(401)
+        .send(apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId }));
+      return null;
+    }
+    if (opts.userOnly && session.kind === "apiCredential") {
+      reply
+        .status(403)
+        .send(apiErrorSchema.parse({ code: "FORBIDDEN", message: "A user session is required for this action", correlationId: (req as any).correlationId }));
+      return null;
+    }
+    if (opts.perm) {
+      const perms = await sessionPermissions(session);
+      if (!hasPermission(perms, opts.perm)) {
+        reply
+          .status(403)
+          .send(apiErrorSchema.parse({ code: "FORBIDDEN", message: `Missing permission: ${opts.perm}`, correlationId: (req as any).correlationId }));
+        return null;
+      }
+    }
+    return session;
+  }
+
   app.get<{ Params: { id: string } }>("/api/v1/services/:id/builds", async (req, reply) => {
     const session = await resolveSession(authStore, req.headers.authorization);
     if (!session) {
@@ -2820,7 +3041,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
           apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId })
         );
       }
-      if (session.kind === "apiCredential" || (session.role !== "owner" && session.role !== "admin")) {
+      if (session.kind === "apiCredential" || !hasPermission(await sessionPermissions(session), "pipeline:edit")) {
         return reply.status(403).send(
           apiErrorSchema.parse({ code: "FORBIDDEN", message: "Owner or admin session required", correlationId: (req as any).correlationId })
         );
@@ -2882,7 +3103,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
           apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId })
         );
       }
-      if (session.kind === "apiCredential" || (session.role !== "owner" && session.role !== "admin")) {
+      if (session.kind === "apiCredential" || !hasPermission(await sessionPermissions(session), "pipeline:edit")) {
         return reply.status(403).send(
           apiErrorSchema.parse({ code: "FORBIDDEN", message: "Owner or admin session required", correlationId: (req as any).correlationId })
         );
@@ -2921,7 +3142,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
         .status(401)
         .send(apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId }));
     }
-    if (session.kind === "apiCredential" || (session.role !== "owner" && session.role !== "admin")) {
+    if (session.kind === "apiCredential" || !hasPermission(await sessionPermissions(session), "builds:trigger")) {
       return reply.status(403).send(
         apiErrorSchema.parse({
           code: "FORBIDDEN",
@@ -3163,7 +3384,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
           apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId })
         );
       }
-      if (session.kind === "apiCredential" || (session.role !== "owner" && session.role !== "admin")) {
+      if (session.kind === "apiCredential" || !hasPermission(await sessionPermissions(session), "agents:logs")) {
         return reply.status(403).send(
           apiErrorSchema.parse({ code: "FORBIDDEN", message: "Owner or admin session required to read logs", correlationId: (req as any).correlationId })
         );
@@ -3968,7 +4189,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
         })
       );
     }
-    if (session.role !== "owner" && session.role !== "admin") {
+    if (!hasPermission(await sessionPermissions(session), "agents:manage")) {
       return reply.status(403).send(
         apiErrorSchema.parse({
           code: "FORBIDDEN",

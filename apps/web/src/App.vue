@@ -10,7 +10,8 @@ import {
   LayoutDashboard,
   LogOut,
   Network,
-  Settings
+  Settings,
+  Users
 } from "lucide-vue-next";
 import "./tokens.css";
 import { api, meResponseToAuthUser } from "./lib/api.js";
@@ -26,6 +27,7 @@ import RegistryPage from "./features/registry/RegistryPage.vue";
 import LoadBalancersPage from "./features/load-balancers/LoadBalancersPage.vue";
 import AgentDetailPage from "./features/agents/AgentDetailPage.vue";
 import SettingsPage from "./features/settings/SettingsPage.vue";
+import UsersGroupsPage from "./features/users/UsersGroupsPage.vue";
 import TenantConfigurationPage from "./features/tenants/TenantConfigurationPage.vue";
 import LoginPage from "./features/auth/LoginPage.vue";
 import SetupWizardPage from "./features/setup/SetupWizardPage.vue";
@@ -41,6 +43,7 @@ type Route =
   | "loadBalancers"
   | "settings"
   | "tenants"
+  | "users"
   | "tenantConfig"
   | "login";
 
@@ -53,6 +56,7 @@ const NAV_ITEMS: { route: Route; label: string; icon: Component; adminOnly?: boo
   { route: "loadBalancers", label: "Load Balancers", icon: Network },
   { route: "registry", label: "Registry", icon: Database, adminOnly: true },
   { route: "tenants", label: "Tenants", icon: Building2, adminOnly: true },
+  { route: "users", label: "Users & Groups", icon: Users, adminOnly: true },
   { route: "settings", label: "Settings", icon: Settings, adminOnly: true }
 ];
 
@@ -81,6 +85,7 @@ function readNavFromHash(): {
     "loadBalancers",
     "settings",
     "tenants",
+    "users",
     "login"
   ];
   if (allowed.includes(base)) {
@@ -280,6 +285,7 @@ const navStyle: CSSProperties = {
       <RegistryPage v-else-if="route === 'registry'" />
       <LoadBalancersPage v-else-if="route === 'loadBalancers'" />
       <TenantsPage v-else-if="route === 'tenants'" @auth-user-updated="(u: AuthUser) => (user = u)" />
+      <UsersGroupsPage v-else-if="route === 'users'" />
       <SettingsPage v-else-if="route === 'settings'" />
       <TenantConfigurationPage
         v-else-if="route === 'tenantConfig' && tenantConfigTenantId"

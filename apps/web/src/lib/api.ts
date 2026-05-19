@@ -27,7 +27,10 @@ export function meResponseToAuthUser(m: MeResponse): AuthUser {
     email: m.email,
     role: m.role,
     tenantId: m.tenantId,
-    memberships
+    memberships,
+    permissions: Array.isArray((m as { permissions?: unknown }).permissions)
+      ? ((m as { permissions: string[] }).permissions)
+      : []
   };
 }
 
@@ -699,4 +702,46 @@ export const api = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+
+  // --- Users, groups & permissions ---
+  listPermissions: () => apiFetch<{ permissions: string[] }>("/api/v1/permissions"),
+  listGroups: () =>
+    apiFetch<{ groups: PermissionGroup[] }>("/api/v1/groups"),
+  createGroup: (body: { name: string; description?: string; permissions: string[] }) =>
+    apiFetch<PermissionGroup>("/api/v1/groups", { method: "POST", body: JSON.stringify(body) }),
+  updateGroup: (id: string, body: { name?: string; description?: string; permissions?: string[] }) =>
+    apiFetch<PermissionGroup>(`/api/v1/groups/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body)
+    }),
+  deleteGroup: (id: string) =>
+    apiFetch<{ ok: true }>(`/api/v1/groups/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  listUsers: () => apiFetch<{ users: TenantMember[] }>("/api/v1/users"),
+  addUser: (email: string, role: string) =>
+    apiFetch<{ ok: true; userId: string }>("/api/v1/users", {
+      method: "POST",
+      body: JSON.stringify({ email, role })
+    }),
+  updateUser: (userId: string, body: { role?: string; groupIds?: string[] }) =>
+    apiFetch<{ ok: true }>(`/api/v1/users/${encodeURIComponent(userId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body)
+    }),
+  removeUser: (userId: string) =>
+    apiFetch<void>(`/api/v1/users/${encodeURIComponent(userId)}`, { method: "DELETE" }),
+};
+
+export type PermissionGroup = {
+  id: string;
+  tenantId: string;
+  name: string;
+  description: string;
+  builtin: boolean;
+  permissions: string[];
+};
+export type TenantMember = {
+  userId: string;
+  email: string;
+  role: string;
+  groups: { id: string; name: string; builtin: boolean }[];
 };

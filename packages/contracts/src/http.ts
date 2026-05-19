@@ -16,7 +16,9 @@ export const meResponseSchema = z.object({
   email: z.string().email(),
   role: z.enum(["owner", "admin", "operator", "viewer"]),
   tenantId: z.string(),
-  memberships: z.array(membershipEntrySchema)
+  memberships: z.array(membershipEntrySchema),
+  /** Effective permissions for the active tenant (union of the user's groups). */
+  permissions: z.array(z.string()).default([])
 });
 
 export const switchActiveTenantRequestSchema = z.object({

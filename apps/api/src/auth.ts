@@ -16,6 +16,8 @@ export type SessionInfo = {
   kind?: "session" | "apiCredential";
   /** Explicit scopes attached to api credentials. Owner/admin sessions implicitly hold all scopes. */
   scopes?: string[];
+  /** Effective permissions (union of the user's groups). Populated by the API layer. */
+  permissions?: string[];
 };
 
 /**

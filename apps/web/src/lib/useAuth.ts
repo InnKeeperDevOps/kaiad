@@ -1,4 +1,5 @@
 import { computed, inject, provide, type ComputedRef, type InjectionKey, type Ref } from "vue";
+import { hasPermission } from "@sm/contracts";
 
 export type AuthMembership = {
   tenantId: string;
@@ -12,6 +13,8 @@ export type AuthUser = {
   role: string;
   tenantId: string;
   memberships: AuthMembership[];
+  /** Effective permissions for the active tenant (union of the user's groups). */
+  permissions: string[];
 };
 
 export type AuthState = {
@@ -20,21 +23,35 @@ export type AuthState = {
   isAdmin: boolean;
   isOperator: boolean;
   isViewer: boolean;
+  permissions: string[];
+  /** Permission check — `*` (owner/admin) satisfies anything. */
+  can: (perm: string) => boolean;
 };
 
-const EMPTY: AuthState = { user: null, role: null, isAdmin: false, isOperator: false, isViewer: false };
+const EMPTY: AuthState = {
+  user: null,
+  role: null,
+  isAdmin: false,
+  isOperator: false,
+  isViewer: false,
+  permissions: [],
+  can: () => false
+};
 
 export const AuthKey: InjectionKey<Ref<AuthUser | null>> = Symbol("AuthUser");
 
 export function buildAuthState(user: AuthUser | null): AuthState {
   if (!user) return EMPTY;
   const role = user.role;
+  const permissions = user.permissions ?? [];
   return {
     user,
     role,
     isAdmin: role === "admin" || role === "owner",
     isOperator: role === "operator",
     isViewer: role === "viewer",
+    permissions,
+    can: (perm: string) => hasPermission(permissions, perm)
   };
 }
 

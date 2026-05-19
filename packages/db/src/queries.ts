@@ -1485,3 +1485,232 @@ export async function getBuildArtifact(
   );
   return rows.length === 0 ? undefined : mapArtifact(rows[0]);
 }
+
+// ── Permission groups + membership ────────────────────────────────────────
+
+export interface PermissionGroupRow {
+  id: string;
+  tenantId: string;
+  name: string;
+  description: string;
+  builtin: boolean;
+  permissions: string[];
+}
+
+function mapGroup(r: Record<string, unknown>): PermissionGroupRow {
+  return {
+    id: String(r.id),
+    tenantId: String(r.tenant_id),
+    name: String(r.name),
+    description: r.description == null ? "" : String(r.description),
+    builtin: r.builtin === true,
+    permissions: Array.isArray(r.permissions) ? (r.permissions as unknown[]).map(String) : []
+  };
+}
+
+/** Effective permissions for a (tenant,user): union of their groups. */
+export async function getEffectivePermissions(
+  query: QueryFn,
+  tenantId: string,
+  userId: string
+): Promise<string[]> {
+  const { rows } = await query(
+    `SELECT DISTINCT p.perm AS perm
+       FROM user_groups ug
+       JOIN permission_groups g ON g.id = ug.group_id
+       CROSS JOIN LATERAL unnest(g.permissions) AS p(perm)
+      WHERE ug.tenant_id = $1 AND ug.user_id = $2`,
+    [tenantId, userId]
+  );
+  return rows.map((r) => String(r.perm));
+}
+
+export async function listGroups(query: QueryFn, tenantId: string): Promise<PermissionGroupRow[]> {
+  const { rows } = await query(
+    `SELECT * FROM permission_groups WHERE tenant_id = $1 ORDER BY builtin DESC, name`,
+    [tenantId]
+  );
+  return rows.map(mapGroup);
+}
+
+export async function getGroup(
+  query: QueryFn,
+  tenantId: string,
+  id: string
+): Promise<PermissionGroupRow | undefined> {
+  const { rows } = await query(
+    `SELECT * FROM permission_groups WHERE tenant_id = $1 AND id = $2`,
+    [tenantId, id]
+  );
+  return rows.length === 0 ? undefined : mapGroup(rows[0]);
+}
+
+export async function createGroup(
+  query: QueryFn,
+  tenantId: string,
+  data: { name: string; description?: string; permissions: string[] }
+): Promise<PermissionGroupRow> {
+  const id = crypto.randomUUID();
+  const { rows } = await query(
+    `INSERT INTO permission_groups (id, tenant_id, name, description, builtin, permissions)
+     VALUES ($1, $2, $3, $4, false, $5) RETURNING *`,
+    [id, tenantId, data.name, data.description ?? "", data.permissions]
+  );
+  return mapGroup(rows[0]);
+}
+
+/** Update a NON-builtin group. Returns undefined if not found or builtin. */
+export async function updateGroup(
+  query: QueryFn,
+  tenantId: string,
+  id: string,
+  data: { name?: string; description?: string; permissions?: string[] }
+): Promise<PermissionGroupRow | undefined> {
+  const { rows } = await query(
+    `UPDATE permission_groups
+        SET name = COALESCE($3, name),
+            description = COALESCE($4, description),
+            permissions = COALESCE($5, permissions)
+      WHERE tenant_id = $1 AND id = $2 AND builtin = false
+      RETURNING *`,
+    [tenantId, id, data.name ?? null, data.description ?? null, data.permissions ?? null]
+  );
+  return rows.length === 0 ? undefined : mapGroup(rows[0]);
+}
+
+/** Delete a NON-builtin group. Returns false if not found / builtin. */
+export async function deleteGroup(query: QueryFn, tenantId: string, id: string): Promise<boolean> {
+  const { rows } = await query(
+    `DELETE FROM permission_groups WHERE tenant_id = $1 AND id = $2 AND builtin = false RETURNING id`,
+    [tenantId, id]
+  );
+  return rows.length > 0;
+}
+
+export interface TenantMemberRow {
+  userId: string;
+  email: string;
+  role: string;
+  groups: { id: string; name: string; builtin: boolean }[];
+}
+
+export async function listTenantMembers(
+  query: QueryFn,
+  tenantId: string
+): Promise<TenantMemberRow[]> {
+  const { rows } = await query(
+    `SELECT u.id AS user_id, u.email, m.role,
+            COALESCE(json_agg(json_build_object('id', g.id, 'name', g.name, 'builtin', g.builtin))
+                     FILTER (WHERE g.id IS NOT NULL), '[]') AS groups
+       FROM tenant_memberships m
+       JOIN users u ON u.id = m.user_id
+  LEFT JOIN user_groups ug ON ug.tenant_id = m.tenant_id AND ug.user_id = m.user_id
+  LEFT JOIN permission_groups g ON g.id = ug.group_id
+      WHERE m.tenant_id = $1
+   GROUP BY u.id, u.email, m.role
+   ORDER BY u.email`,
+    [tenantId]
+  );
+  return rows.map((r) => ({
+    userId: String(r.user_id),
+    email: String(r.email),
+    role: String(r.role),
+    groups: (typeof r.groups === "string" ? JSON.parse(r.groups) : (r.groups ?? [])) as {
+      id: string;
+      name: string;
+      builtin: boolean;
+    }[]
+  }));
+}
+
+/** Replace a member's custom-group membership (built-in groups untouched). */
+export async function setMemberCustomGroups(
+  query: QueryFn,
+  tenantId: string,
+  userId: string,
+  groupIds: string[]
+): Promise<void> {
+  await query(
+    `DELETE FROM user_groups ug USING permission_groups g
+      WHERE ug.group_id = g.id AND ug.tenant_id = $1 AND ug.user_id = $2 AND g.builtin = false`,
+    [tenantId, userId]
+  );
+  for (const gid of groupIds) {
+    await query(
+      `INSERT INTO user_groups (tenant_id, user_id, group_id)
+       SELECT $1, $2, $3 WHERE EXISTS
+         (SELECT 1 FROM permission_groups WHERE id = $3 AND tenant_id = $1 AND builtin = false)
+       ON CONFLICT DO NOTHING`,
+      [tenantId, userId, gid]
+    );
+  }
+}
+
+/** Change a member's legacy role AND swap their built-in group accordingly. */
+export async function setMemberRole(
+  query: QueryFn,
+  tenantId: string,
+  userId: string,
+  role: string
+): Promise<boolean> {
+  const { rows } = await query(
+    `UPDATE tenant_memberships SET role = $3
+      WHERE tenant_id = $1 AND user_id = $2 RETURNING user_id`,
+    [tenantId, userId, role]
+  );
+  if (rows.length === 0) return false;
+  await query(
+    `DELETE FROM user_groups ug USING permission_groups g
+      WHERE ug.group_id = g.id AND ug.tenant_id = $1 AND ug.user_id = $2
+        AND g.builtin = true`,
+    [tenantId, userId]
+  );
+  await query(
+    `INSERT INTO user_groups (tenant_id, user_id, group_id)
+     SELECT $1, $2, g.id FROM permission_groups g
+      WHERE g.tenant_id = $1 AND g.name = 'builtin:' || $3
+     ON CONFLICT DO NOTHING`,
+    [tenantId, userId, role]
+  );
+  return true;
+}
+
+export async function removeTenantMember(
+  query: QueryFn,
+  tenantId: string,
+  userId: string
+): Promise<boolean> {
+  await query(`DELETE FROM user_groups WHERE tenant_id = $1 AND user_id = $2`, [tenantId, userId]);
+  const { rows } = await query(
+    `DELETE FROM tenant_memberships WHERE tenant_id = $1 AND user_id = $2 RETURNING user_id`,
+    [tenantId, userId]
+  );
+  return rows.length > 0;
+}
+
+/** Add an EXISTING user (by email) to a tenant with a role + built-in group. */
+export async function addTenantMemberByEmail(
+  query: QueryFn,
+  tenantId: string,
+  email: string,
+  role: string
+): Promise<{ ok: true; userId: string } | { ok: false; reason: string }> {
+  const u = await query(`SELECT id FROM users WHERE lower(email) = lower($1)`, [email]);
+  if (u.rows.length === 0) {
+    return { ok: false, reason: "No user with that email. They must sign in once first." };
+  }
+  const userId = String(u.rows[0].id);
+  await query(
+    `INSERT INTO tenant_memberships (tenant_id, user_id, role)
+     VALUES ($1, $2, $3) ON CONFLICT (tenant_id, user_id) DO UPDATE SET role = EXCLUDED.role`,
+    [tenantId, userId, role]
+  );
+  await query(
+    `INSERT INTO user_groups (tenant_id, user_id, group_id)
+     SELECT $1, $2, g.id FROM permission_groups g
+      WHERE g.tenant_id = $1 AND g.name = 'builtin:' || $3
+     ON CONFLICT DO NOTHING`,
+    [tenantId, userId, role]
+  );
+  return { ok: true, userId };
+}

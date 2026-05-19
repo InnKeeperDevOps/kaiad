@@ -19,6 +19,68 @@ create table if not exists tenant_memberships (
   primary key (tenant_id, user_id)
 );
 
+-- Fine-grained permission groups. A group is a named permission set;
+-- a user's effective permissions are the union of their groups. The
+-- legacy membership roles map to built-in groups (seeded + kept current
+-- below) so existing users keep exactly the access they had.
+create table if not exists permission_groups (
+  id text primary key,
+  tenant_id text not null references tenants(id) on delete cascade,
+  name text not null,
+  description text not null default '',
+  builtin boolean not null default false,
+  permissions text[] not null default ARRAY[]::text[],
+  created_at timestamptz not null default now(),
+  unique (tenant_id, name)
+);
+
+create table if not exists user_groups (
+  tenant_id text not null references tenants(id) on delete cascade,
+  user_id text not null references users(id) on delete cascade,
+  group_id text not null references permission_groups(id) on delete cascade,
+  primary key (tenant_id, user_id, group_id)
+);
+create index if not exists user_groups_user_idx on user_groups (tenant_id, user_id);
+
+-- Seed/refresh the four built-in groups for every tenant. ON CONFLICT
+-- keeps their permission sets authoritative from code on each boot.
+insert into permission_groups (id, tenant_id, name, description, builtin, permissions)
+select 'bg-' || t.id || '-owner', t.id, 'builtin:owner', 'Owner — full access', true,
+       ARRAY['*']
+  from tenants t
+on conflict (tenant_id, name) do update
+  set permissions = excluded.permissions, builtin = true, description = excluded.description;
+
+insert into permission_groups (id, tenant_id, name, description, builtin, permissions)
+select 'bg-' || t.id || '-admin', t.id, 'builtin:admin', 'Admin — full access', true,
+       ARRAY['*']
+  from tenants t
+on conflict (tenant_id, name) do update
+  set permissions = excluded.permissions, builtin = true, description = excluded.description;
+
+insert into permission_groups (id, tenant_id, name, description, builtin, permissions)
+select 'bg-' || t.id || '-operator', t.id, 'builtin:operator', 'Operator — read + day-to-day ops', true,
+       ARRAY['services:read','agents:read','registry:read','loadbalancers:read','incidents:read','sshkeys:read','users:read','services:deploy','builds:trigger','pipeline:edit','agents:bind','agents:logs','incidents:write']
+  from tenants t
+on conflict (tenant_id, name) do update
+  set permissions = excluded.permissions, builtin = true, description = excluded.description;
+
+insert into permission_groups (id, tenant_id, name, description, builtin, permissions)
+select 'bg-' || t.id || '-viewer', t.id, 'builtin:viewer', 'Viewer — read only', true,
+       ARRAY['services:read','agents:read','registry:read','loadbalancers:read','incidents:read','sshkeys:read','users:read']
+  from tenants t
+on conflict (tenant_id, name) do update
+  set permissions = excluded.permissions, builtin = true, description = excluded.description;
+
+-- Backfill: every existing membership joins its role's built-in group,
+-- so nobody loses access when the permission engine goes live.
+insert into user_groups (tenant_id, user_id, group_id)
+select m.tenant_id, m.user_id, g.id
+  from tenant_memberships m
+  join permission_groups g
+    on g.tenant_id = m.tenant_id and g.name = 'builtin:' || m.role
+on conflict do nothing;
+
 create table if not exists oauth_providers (
   id text primary key,
   tenant_id text not null references tenants(id) on delete cascade,

@@ -12,6 +12,8 @@ export type DomainStore = {
   getIncident(tenantId: string, id: string): Promise<Incident | undefined>;
   upsertIncident(tenantId: string, data: { serviceId: string; fingerprint: string; message?: string }): Promise<Incident>;
   updateIncidentStatus(tenantId: string, id: string, status: IncidentStatus): Promise<Incident | undefined>;
+  /** Resolve open incidents for a service+fingerprint after an auto-fix lands. Returns count closed. */
+  resolveIncidentByFingerprint(tenantId: string, serviceId: string, fingerprint: string): Promise<number>;
 
   listAgents(tenantId: string): Promise<Agent[]>;
   getAgent(tenantId: string, id: string): Promise<Agent | undefined>;
@@ -67,6 +69,7 @@ export type DomainStore = {
       dockerImage?: string;
       composePath?: string;
       pipelineName?: string | null;
+      fixExecutor?: "claude" | "cursor";
     }
   ): Promise<MonitoredService>;
   updateService(
@@ -86,6 +89,7 @@ export type DomainStore = {
       dockerImage?: string;
       composePath?: string;
       pipelineName?: string | null;
+      fixExecutor?: "claude" | "cursor";
     }
   ): Promise<MonitoredService | undefined>;
   deleteService(tenantId: string, id: string): Promise<boolean>;
@@ -168,6 +172,22 @@ export function createMemoryDomainStore(): DomainStore {
       if (!inc || inc.tenantId !== tenantId) return undefined;
       inc.status = status;
       return inc;
+    },
+    async resolveIncidentByFingerprint(tenantId, serviceId, fingerprint) {
+      let n = 0;
+      for (const inc of incidents.values()) {
+        if (
+          inc.tenantId === tenantId &&
+          inc.serviceId === serviceId &&
+          inc.fingerprint === fingerprint &&
+          (inc.status === "open" || inc.status === "acknowledged")
+        ) {
+          inc.status = "resolved";
+          inc.lastSeenAt = new Date().toISOString();
+          n++;
+        }
+      }
+      return n;
     },
 
     async listAgents(tenantId) {
@@ -290,6 +310,7 @@ export function createMemoryDomainStore(): DomainStore {
         dockerImage: data.dockerImage ?? null,
         composePath: data.composePath ?? null,
         pipelineName: data.pipelineName ?? null,
+        fixExecutor: data.fixExecutor ?? "claude",
         agents: []
       };
       services.set(svc.id, svc);
@@ -308,6 +329,7 @@ export function createMemoryDomainStore(): DomainStore {
       if (patch.dockerImage !== undefined) svc.dockerImage = patch.dockerImage;
       if (patch.composePath !== undefined) svc.composePath = patch.composePath;
       if (patch.pipelineName !== undefined) svc.pipelineName = patch.pipelineName;
+      if (patch.fixExecutor !== undefined) svc.fixExecutor = patch.fixExecutor;
       if (patch.agentIds !== undefined) {
         // Replace the full set: drop bindings for this service that aren't in the
         // desired list, then add any missing ones.

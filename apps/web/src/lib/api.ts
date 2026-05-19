@@ -212,6 +212,8 @@ export type MonitoredService = {
    * yaml uses the legacy single-pipeline form, this is null/unset.
    */
   pipelineName?: string | null;
+  /** AI CLI kaiad spins up to autonomously fix this service. Defaults to claude. */
+  fixExecutor?: "claude" | "cursor";
 };
 
 /** Matches server OAuth provider registration (POST /api/v1/settings/oauth-providers). */
@@ -413,6 +415,7 @@ export const api = {
     composePath?: string;
     /** Required when the repo's kaiad.yaml is multi-pipeline. */
     pipelineName?: string | null;
+    fixExecutor?: "claude" | "cursor";
   }) =>
     apiFetch<MonitoredService>("/api/v1/services", {
       method: "POST",
@@ -433,6 +436,7 @@ export const api = {
      * Set to null to clear (revert to single-pipeline default).
      */
     pipelineName?: string | null;
+    fixExecutor?: "claude" | "cursor";
   }) =>
     apiFetch<MonitoredService>(`/api/v1/services/${encodeURIComponent(id)}`, {
       method: "PATCH",

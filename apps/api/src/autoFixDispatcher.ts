@@ -93,7 +93,8 @@ export async function dispatchAutoFix(
     branch: service.branch || "main",
     sshKeyType: keyMaterial.type,
     sshKeyValue: keyMaterial.privateKey ?? keyMaterial.localPath ?? null,
-    serviceId: service.id
+    serviceId: service.id,
+    executor: service.fixExecutor ?? "claude"
   };
 
   deps.errorGroups.setStatus(group.id, "fixing");

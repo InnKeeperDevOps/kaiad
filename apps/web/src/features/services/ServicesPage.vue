@@ -15,6 +15,7 @@ type ServiceForm = {
   dockerImage: string;
   composePath: string;
   pipelineName: string;
+  fixExecutor: "claude" | "cursor";
   agentIds: string[];
 };
 
@@ -26,6 +27,7 @@ const emptyForm = (): ServiceForm => ({
   dockerImage: "",
   composePath: "",
   pipelineName: "",
+  fixExecutor: "claude",
   agentIds: []
 });
 
@@ -95,6 +97,7 @@ async function handleSubmit(ev: Event) {
         dockerImage: form.dockerImage.trim() || undefined,
         composePath: form.composePath.trim() || undefined,
         pipelineName: trimmedPipeline || null,
+        fixExecutor: form.fixExecutor,
         agentIds: form.agentIds
       });
       services.value = services.value.map((s) => (s.id === editingId.value ? svc : s));
@@ -107,6 +110,7 @@ async function handleSubmit(ev: Event) {
         dockerImage: form.dockerImage.trim() || undefined,
         composePath: form.composePath.trim() || undefined,
         pipelineName: trimmedPipeline || undefined,
+        fixExecutor: form.fixExecutor,
         agentIds: form.agentIds
       });
       services.value = [...services.value, svc];
@@ -127,6 +131,7 @@ function handleEdit(svc: MonitoredService) {
   form.dockerImage = svc.dockerImage || "";
   form.composePath = svc.composePath || "";
   form.pipelineName = svc.pipelineName || "";
+  form.fixExecutor = svc.fixExecutor === "cursor" ? "cursor" : "claude";
   form.agentIds = (svc.agents ?? []).map((b) => b.agentId);
   editingId.value = svc.id;
   showWizard.value = false;
@@ -299,6 +304,16 @@ function togglePipeline(id: string) {
           placeholder="e.g. php (matches services.<name> in kaiad.yaml)"
           :style="inputStyle"
         />
+      </label>
+      <label>
+        Auto-fix executor
+        <span :style="{ color: 'var(--color-text-secondary)', fontSize: '0.8rem' }">
+          (which AI CLI kaiad spins up to fix this service's errors)
+        </span>
+        <select v-model="form.fixExecutor" :style="{ ...inputStyle, background: 'var(--color-surface)' }">
+          <option value="claude">Claude</option>
+          <option value="cursor">Cursor</option>
+        </select>
       </label>
       <fieldset
         :style="{

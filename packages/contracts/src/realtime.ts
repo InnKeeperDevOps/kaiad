@@ -391,7 +391,10 @@ const runFixPlanCommandSchema = z.object({
   sshKeyValue: z.string().nullable(),
   workspacePath: z.string().optional(),
   serviceId: z.string(),
-  agentRuntimeBackend: z.enum(["docker", "kubernetes", "shell"]).optional()
+  agentRuntimeBackend: z.enum(["docker", "kubernetes", "shell"]).optional(),
+  /** Which AI CLI the agent runs to author the fix. Per-service config
+   *  (monitored_services.fix_executor); defaults to claude. */
+  executor: z.enum(["claude", "cursor"]).default("claude")
 });
 
 /**

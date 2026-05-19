@@ -145,6 +145,11 @@ export const monitoredServiceSchema = z.object({
    * pipeline at the file root.
    */
   pipelineName: z.string().nullable().optional(),
+  /**
+   * Which AI CLI the agent spins up to author an autonomous fix when
+   * this service throws an error kaiad can see. Defaults to claude.
+   */
+  fixExecutor: z.enum(["claude", "cursor"]).default("claude"),
   /** Agents currently bound to this service. Empty until at least one is attached. */
   agents: z.array(agentBindingSchema).default([])
 });
@@ -158,7 +163,8 @@ export const createMonitoredServiceRequestSchema = z.object({
   agentIds: z.array(z.string()).default([]),
   dockerImage: z.string().min(1).optional(),
   composePath: z.string().min(1).optional(),
-  pipelineName: z.string().min(1).nullable().optional()
+  pipelineName: z.string().min(1).nullable().optional(),
+  fixExecutor: z.enum(["claude", "cursor"]).optional()
 });
 
 export const updateMonitoredServiceRequestSchema = z.object({
@@ -174,7 +180,8 @@ export const updateMonitoredServiceRequestSchema = z.object({
   agentIds: z.array(z.string()).optional(),
   dockerImage: z.string().min(1).optional(),
   composePath: z.string().min(1).optional(),
-  pipelineName: z.string().min(1).nullable().optional()
+  pipelineName: z.string().min(1).nullable().optional(),
+  fixExecutor: z.enum(["claude", "cursor"]).optional()
 });
 
 export const listMonitoredServicesResponseSchema = z.object({

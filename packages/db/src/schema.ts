@@ -168,6 +168,11 @@ alter table monitored_services drop column if exists agent_runtime_backend casca
 -- multi-image project.
 alter table monitored_services add column if not exists pipeline_name text;
 
+-- Which AI CLI the agent runs to author an autonomous fix for this
+-- service (see realtime run_fix_plan.executor). Per-service so different
+-- repos/teams can pick Claude or Cursor. Defaults to claude.
+alter table monitored_services add column if not exists fix_executor text not null default 'claude';
+
 -- "supporting" services (typically a base/library docker image) are NOT
 -- deployed to agents — they just build and serve as build-time inputs
 -- for other services via the dependsOn relationship. Refreshed from

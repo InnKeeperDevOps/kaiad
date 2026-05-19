@@ -55,6 +55,8 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
     upsertIncident: (tenantId, data) => queries.upsertIncident(queryFn, tenantId, data),
     updateIncidentStatus: (tenantId, id, status) =>
       queries.updateIncidentStatus(queryFn, tenantId, id, status),
+    resolveIncidentByFingerprint: (tenantId, serviceId, fingerprint) =>
+      queries.resolveIncidentByFingerprint(queryFn, tenantId, serviceId, fingerprint),
 
     listSshKeys: async (tenantId) => {
       const rows = await queries.listSshKeys(queryFn, tenantId);
@@ -132,7 +134,8 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
         branch: data.branch,
         dockerImage: data.dockerImage,
         composePath: data.composePath,
-        pipelineName: data.pipelineName
+        pipelineName: data.pipelineName,
+        fixExecutor: data.fixExecutor
       });
       if (data.agentIds && data.agentIds.length > 0) {
         await queries.setAgentBindings(queryFn, tenantId, row.id, data.agentIds);
@@ -154,6 +157,7 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
       if (patch.dockerImage !== undefined) push("docker_image", patch.dockerImage);
       if (patch.composePath !== undefined) push("compose_path", patch.composePath);
       if (patch.pipelineName !== undefined) push("pipeline_name", patch.pipelineName);
+      if (patch.fixExecutor !== undefined) push("fix_executor", patch.fixExecutor);
       if (assignments.length > 0) {
         values.push(id, tenantId);
         const { rows } = await queryFn(

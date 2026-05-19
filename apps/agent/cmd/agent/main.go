@@ -19,6 +19,7 @@ import (
 	"github.com/service-monitor/agent/internal/docker"
 	"github.com/service-monitor/agent/internal/executor"
 	"github.com/service-monitor/agent/internal/hoststats"
+	"github.com/service-monitor/agent/internal/k8slog"
 	"github.com/service-monitor/agent/internal/logfile"
 	"github.com/service-monitor/agent/internal/logship"
 	"github.com/service-monitor/agent/internal/managed"
@@ -332,16 +333,17 @@ func main() {
 					return
 				}
 				if b == "kubernetes" {
-					// k8s-mode agents observe pods via the docker daemon
-					// running on the kubelet node — the agent's pod has
-					// /var/run/docker.sock mounted from the host. Pods
-					// surface as containers labelled with the k8s pod
-					// metadata; serviceIDForContainer maps the
-					// kaiad.dev/service-id label (set by our k8s
-					// manifest renderer) to the same UUID the docker-
-					// mode agents use, so incidents from both runtimes
-					// dedupe into one error-group entry per service.
+					// k8s-mode: stream pod logs via the kube API
+					// (kubectl + in-cluster SA), keyed by the
+					// kaiad.dev/service-id label. The old docker.sock
+					// path only worked on Docker-runtime nodes; on
+					// CRI-O/containerd there is no daemon, so pods were
+					// never tailed and no incident/auto-fix ever fired.
+					// We still best-effort the docker path first in
+					// case a node genuinely runs Docker (it no-ops
+					// harmlessly when the socket is absent).
 					streamExistingContainerLogs(ctx, dc, agentID, logSender)
+					go k8slog.Stream(ctx, agentID, logSender)
 					return
 				}
 				if b == "shell" {

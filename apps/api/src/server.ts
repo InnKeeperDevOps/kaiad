@@ -352,6 +352,8 @@ function createLazyDomainStore(resolve: () => Promise<DomainStore>): DomainStore
     upsertIncident: (tenantId, data) => get().then((s) => s.upsertIncident(tenantId, data)),
     updateIncidentStatus: (tenantId, id, status) =>
       get().then((s) => s.updateIncidentStatus(tenantId, id, status)),
+    resolveIncidentByFingerprint: (tenantId, serviceId, fingerprint) =>
+      get().then((s) => s.resolveIncidentByFingerprint(tenantId, serviceId, fingerprint)),
     listAgents: (tenantId) => get().then((s) => s.listAgents(tenantId)),
     getAgent: (tenantId, id) => get().then((s) => s.getAgent(tenantId, id)),
     recordAgentHeartbeat: (tenantId, data) =>
@@ -1255,8 +1257,9 @@ export function buildServer(opts: BuildServerOptions = {}) {
             // the service-name label); resolve to the canonical
             // MonitoredService.id with the same id-then-name lookup
             // we used at dispatch time.
+            let lockSvc: Awaited<ReturnType<typeof domainStore.getService>> | undefined;
             try {
-              let lockSvc = await domainStore.getService(fixMeta.tenantId, fixMeta.serviceId);
+              lockSvc = await domainStore.getService(fixMeta.tenantId, fixMeta.serviceId);
               if (!lockSvc) {
                 const all = await domainStore.listServices(fixMeta.tenantId);
                 lockSvc = all.find((s) => s.name === fixMeta.serviceId);
@@ -1271,6 +1274,18 @@ export function buildServer(opts: BuildServerOptions = {}) {
             if (msg.status === "completed") {
               const commitSha = extractCommitShaFromOutput(msg.output ?? "");
               const updated = errorGroups.setStatus(fixMeta.errorGroupId, "fixed", commitSha ?? undefined);
+              // Close the visible incident now the fix pushed a commit.
+              if (lockSvc && updated) {
+                try {
+                  await domainStore.resolveIncidentByFingerprint(
+                    fixMeta.tenantId,
+                    lockSvc.id,
+                    updated.fingerprint
+                  );
+                } catch (err) {
+                  req.log?.warn?.({ event: "incident.resolve_failed", err: String(err) });
+                }
+              }
               if (updated) {
                 realtimeManager.broadcastToTenant(
                   fixMeta.tenantId,
@@ -1333,6 +1348,31 @@ export function buildServer(opts: BuildServerOptions = {}) {
               )
             );
 
+            // Resolve the kaiad service for this error once. The agent's
+            // log streamer reports `serviceId` as the container/pod name
+            // (or the kaiad service UUID via the service-id label). Look
+            // up by id first; on miss, fall back to a name match.
+            let service = await domainStore.getService(tenantId, msg.serviceId);
+            if (!service) {
+              const all = await domainStore.listServices(tenantId);
+              service = all.find((s) => s.name === msg.serviceId);
+            }
+
+            // Create / bump a visible Incident regardless of auto-fix
+            // gating so the Incidents page reflects the live failure even
+            // when auto-fix is disabled or can't run.
+            if (service) {
+              try {
+                await domainStore.upsertIncident(tenantId, {
+                  serviceId: service.id,
+                  fingerprint: upsert.group.fingerprint,
+                  message: upsert.group.sampleMessage
+                });
+              } catch (err) {
+                req.log?.warn?.({ event: "incident.upsert_failed", err: String(err) });
+              }
+            }
+
             // Auto-fix dispatch — only on a NEW group or when status was open.
             // Paused / fixing groups are skipped by the dispatcher itself.
             // Env knob `SM_AUTO_FIX_DISABLED=1` short-circuits the entire
@@ -1348,15 +1388,6 @@ export function buildServer(opts: BuildServerOptions = {}) {
                 serviceId: msg.serviceId
               });
             } else if (upsert.isNew || upsert.group.status === "open") {
-              // The agent's log streamer reports `serviceId` as the docker
-              // container name (not the kaiad service UUID). Look up by id
-              // first; on miss, fall back to a name match so this works for
-              // services managed via the panel UI without a sync_desired_state.
-              let service = await domainStore.getService(tenantId, msg.serviceId);
-              if (!service) {
-                const all = await domainStore.listServices(tenantId);
-                service = all.find((s) => s.name === msg.serviceId);
-              }
               const svcKey = service ? fixServiceKey(tenantId, service.id) : null;
               // Optimistic synchronous acquire so concurrent
               // app_log_error handlers (3+ per NPE due to Spring's

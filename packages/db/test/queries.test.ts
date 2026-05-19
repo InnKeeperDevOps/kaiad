@@ -381,7 +381,9 @@ describe("listServices", () => {
         branch: "main",
         dockerImage: "acme/web:latest",
         composePath: "compose.yml",
-        pipelineName: null
+        pipelineName: null,
+        pipelineOverride: null,
+        fixExecutor: "claude"
       },
     ]);
   });

@@ -183,6 +183,24 @@ export async function upsertIncident(
   return mapIncident(rows[0]);
 }
 
+/** Resolve any open/acknowledged incident for this service+fingerprint
+ *  (called when an autonomous fix lands). Returns the count closed. */
+export async function resolveIncidentByFingerprint(
+  query: QueryFn,
+  tenantId: string,
+  serviceId: string,
+  fingerprint: string,
+): Promise<number> {
+  const { rows } = await query(
+    `UPDATE incidents SET status = 'resolved', last_seen_at = now()
+     WHERE tenant_id = $1 AND service_id = $2 AND fingerprint = $3
+       AND status IN ('open', 'acknowledged')
+     RETURNING id`,
+    [tenantId, serviceId, fingerprint],
+  );
+  return rows.length;
+}
+
 export async function updateIncidentStatus(
   query: QueryFn,
   tenantId: string,
@@ -356,6 +374,8 @@ export interface ServiceRow {
   pipelineName?: string | null;
   /** Panel-stored kaiad.yaml override; null = use the repo file. */
   pipelineOverride?: string | null;
+  /** AI CLI for autonomous fixes. */
+  fixExecutor: "claude" | "cursor";
 }
 
 function mapService(r: Record<string, unknown>): ServiceRow {
@@ -370,6 +390,7 @@ function mapService(r: Record<string, unknown>): ServiceRow {
     composePath: r.compose_path == null ? null : String(r.compose_path),
     pipelineName: r.pipeline_name == null ? null : String(r.pipeline_name),
     pipelineOverride: r.pipeline_override == null ? null : String(r.pipeline_override),
+    fixExecutor: r.fix_executor === "cursor" ? "cursor" : "claude",
   };
 }
 
@@ -500,14 +521,15 @@ export async function createService(
     dockerImage?: string;
     composePath?: string;
     pipelineName?: string | null;
+    fixExecutor?: string | null;
   },
 ): Promise<ServiceRow> {
   const id = crypto.randomUUID();
   const { rows } = await query(
-    `INSERT INTO monitored_services (id, tenant_id, name, git_repo_url, ssh_key_id, branch, docker_image, compose_path, pipeline_name)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `INSERT INTO monitored_services (id, tenant_id, name, git_repo_url, ssh_key_id, branch, docker_image, compose_path, pipeline_name, fix_executor)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING *`,
-    [id, tenantId, data.name, data.gitRepoUrl, data.sshKeyId ?? null, data.branch, data.dockerImage ?? null, data.composePath ?? null, data.pipelineName ?? null],
+    [id, tenantId, data.name, data.gitRepoUrl, data.sshKeyId ?? null, data.branch, data.dockerImage ?? null, data.composePath ?? null, data.pipelineName ?? null, data.fixExecutor ?? "claude"],
   );
   return mapService(rows[0]);
 }

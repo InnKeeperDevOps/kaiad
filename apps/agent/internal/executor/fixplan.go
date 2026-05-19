@@ -99,8 +99,15 @@ func executeRunFixPlanInner(e *Executor, ctx context.Context, payload map[string
 		return CommandResult{Success: false, Output: fmt.Sprintf("git config user.name: %v", err)}
 	}
 
+	// Per-service config (monitored_services.fix_executor) selects the
+	// AI CLI. Unknown / missing => claude (the proven default).
+	fixExecutor, _ := payload["executor"].(string)
+	if fixExecutor != "cursor" {
+		fixExecutor = "claude"
+	}
+
 	prompt := buildFixPrompt(errorMessage, contextLines)
-	planBin := planBinary("claude")
+	planBin := planBinary(fixExecutor)
 	planTimeoutDur := planTimeout()
 	runCtx, cancel := context.WithTimeout(ctx, planTimeoutDur)
 	defer cancel()
@@ -127,12 +134,18 @@ func executeRunFixPlanInner(e *Executor, ctx context.Context, payload map[string
 	// automated fix run.
 	// We deliberately omit --add-dir: it's variadic and would swallow the
 	// positional prompt argument that follows. The working directory is enough.
-	claudeArgs := []string{
-		"-p",
-		"--permission-mode", "bypassPermissions",
-		prompt,
+	//
+	// cursor-agent's headless form mirrors this: `-p "<prompt>"` is
+	// non-interactive and `--force` skips the edit-approval prompts
+	// (the Cursor analogue of bypassPermissions). Override the binary
+	// path per host with SM_CURSOR_BIN / SM_CLAUDE_BIN if needed.
+	var planArgs []string
+	if fixExecutor == "cursor" {
+		planArgs = []string{"-p", prompt, "--force"}
+	} else {
+		planArgs = []string{"-p", "--permission-mode", "bypassPermissions", prompt}
 	}
-	cmd := exec.CommandContext(runCtx, planBin, claudeArgs...)
+	cmd := exec.CommandContext(runCtx, planBin, planArgs...)
 	cmd.Dir = scratch
 	cmd.Env = os.Environ()
 	for k, v := range env {

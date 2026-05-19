@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { buildServer } from "../src/server.js";
 import { __resetDomainStoreForTests } from "../src/domainStore.js";
+import type { KaiadFixParams, KaiadFixResult } from "../src/kaiadFix.js";
 import {
   __resetAuthStoreForTests,
   createMemoryAuthStore,
@@ -8,7 +9,10 @@ import {
 } from "../src/memoryAuthStore.js";
 import { __resetTenantStoreForTests } from "../src/store.js";
 
-const enqueuedAgentCommands: unknown[] = [];
+// The fix runs IN kaiad now (not the agent). Stub the runner so the
+// test asserts the in-kaiad lifecycle without cloning a real repo.
+const fixCalls: KaiadFixParams[] = [];
+let fixResult: KaiadFixResult = { ok: true, commitSha: "deadbee1234", output: "ok" };
 let app: ReturnType<typeof buildServer>;
 let token: string;
 
@@ -19,8 +23,9 @@ beforeAll(async () => {
   await seedDevUser(authStore);
   app = buildServer({
     authStore,
-    enqueueAgentCommand: (job) => {
-      enqueuedAgentCommands.push(job);
+    runFix: async (p) => {
+      fixCalls.push(p);
+      return fixResult;
     }
   });
   await app.ready();
@@ -35,7 +40,8 @@ beforeAll(async () => {
 beforeEach(() => {
   __resetDomainStoreForTests();
   __resetTenantStoreForTests();
-  enqueuedAgentCommands.splice(0);
+  fixCalls.splice(0);
+  fixResult = { ok: true, commitSha: "deadbee1234", output: "ok" };
 });
 
 afterAll(async () => {
@@ -95,8 +101,18 @@ async function listGroupsForService(serviceId: string) {
   return (res.json() as { groups: { status: string; sampleMessage: string }[] }).groups;
 }
 
-describe("auto-fix loop end-to-end", () => {
-  it("dispatches a run_fix_plan command when an app_log_error arrives for a service with sshKeyId", async () => {
+async function waitForGroupStatus(serviceId: string, status: string, ms = 1500) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    const groups = await listGroupsForService(serviceId);
+    if (groups[0]?.status === status) return groups;
+    await new Promise<void>((r) => setTimeout(r, 20));
+  }
+  return listGroupsForService(serviceId);
+}
+
+describe("auto-fix loop end-to-end (runs in kaiad)", () => {
+  it("runs the fix in kaiad and marks the group fixed on success", async () => {
     const ws = await bringAgentOnline("a-fix");
     const sshKeyId = await createSshKey();
     const serviceId = await createService({ sshKeyId, agentId: "a-fix", name: "checkout" });
@@ -113,26 +129,24 @@ describe("auto-fix loop end-to-end", () => {
       })
     );
     await ack;
-    await new Promise<void>((r) => setTimeout(r, 30));
 
-    expect(enqueuedAgentCommands).toHaveLength(1);
-    const job = enqueuedAgentCommands[0] as { agentId: string; payload: Record<string, unknown> };
-    expect(job.agentId).toBe("a-fix");
-    expect(job.payload.type).toBe("run_fix_plan");
-    expect(job.payload.gitRepoUrl).toBe("git@github.com:example/checkout.git");
-    expect(job.payload.branch).toBe("main");
-    expect(job.payload.sshKeyType).toBe("uploaded");
-    expect(job.payload.sshKeyValue).toBe("fake-key-material");
-    expect(Array.isArray(job.payload.contextLines)).toBe(true);
-
-    const groups = await listGroupsForService(serviceId);
+    const groups = await waitForGroupStatus(serviceId, "fixed");
     expect(groups).toHaveLength(1);
-    expect(groups[0].status).toBe("fixing");
+    expect(groups[0].status).toBe("fixed");
     expect(groups[0].sampleMessage).toContain("TypeError");
+
+    expect(fixCalls).toHaveLength(1);
+    expect(fixCalls[0].repoUrl).toBe("git@github.com:example/checkout.git");
+    expect(fixCalls[0].branch).toBe("main");
+    expect(fixCalls[0].sshKeyType).toBe("uploaded");
+    // Upload normalization guarantees a trailing newline (OpenSSH needs it).
+    expect(fixCalls[0].sshKeyValue).toBe("fake-key-material\n");
+    expect(fixCalls[0].executor).toBe("claude");
+    expect(fixCalls[0].errorMessage).toContain("TypeError");
     ws.terminate();
   });
 
-  it("marks the group missing_auth and skips dispatch when service has no sshKeyId", async () => {
+  it("marks the group missing_auth when service has no sshKeyId (no fix run)", async () => {
     const ws = await bringAgentOnline("a-noauth");
     const serviceId = await createService({ agentId: "a-noauth", name: "noauth" });
 
@@ -148,12 +162,37 @@ describe("auto-fix loop end-to-end", () => {
       })
     );
     await ack;
-    await new Promise<void>((r) => setTimeout(r, 30));
+    await new Promise<void>((r) => setTimeout(r, 50));
 
-    expect(enqueuedAgentCommands).toHaveLength(0);
+    expect(fixCalls).toHaveLength(0);
     const groups = await listGroupsForService(serviceId);
     expect(groups).toHaveLength(1);
     expect(groups[0].status).toBe("missing_auth");
+    ws.terminate();
+  });
+
+  it("on a failed fix the group returns to open (retryable)", async () => {
+    fixResult = { ok: false, reason: "cli_failed", output: "claude exited 1" };
+    const ws = await bringAgentOnline("a-failfix");
+    const sshKeyId = await createSshKey("failkey");
+    const serviceId = await createService({ sshKeyId, agentId: "a-failfix", name: "failsvc" });
+
+    const ack = new Promise<void>((r) => ws.once("message", () => r()));
+    ws.send(
+      JSON.stringify({
+        type: "app_log_error",
+        agentId: "a-failfix",
+        serviceId,
+        ts: new Date().toISOString(),
+        message: "RuntimeError: kaboom",
+        contextLines: []
+      })
+    );
+    await ack;
+
+    const groups = await waitForGroupStatus(serviceId, "open");
+    expect(fixCalls).toHaveLength(1);
+    expect(groups[0].status).toBe("open");
     ws.terminate();
   });
 
@@ -174,9 +213,9 @@ describe("auto-fix loop end-to-end", () => {
       })
     );
     await ack;
-    await new Promise<void>((r) => setTimeout(r, 30));
+    await new Promise<void>((r) => setTimeout(r, 50));
 
-    expect(enqueuedAgentCommands).toHaveLength(0);
+    expect(fixCalls).toHaveLength(0);
     const groups = await listGroupsForService(serviceId);
     expect(groups).toHaveLength(0);
     ws.terminate();

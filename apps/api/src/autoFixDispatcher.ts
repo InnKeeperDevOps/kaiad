@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { AgentCommandJob, ErrorGroup, MonitoredService, SshKey } from "@sm/contracts";
+import type { ErrorGroup, MonitoredService, SshKey } from "@sm/contracts";
 import type { DomainStore } from "./domainStore.js";
 import type { ErrorGroupStore } from "./errorGrouping.js";
 
@@ -12,33 +12,41 @@ export type DispatchOutcome =
   | { kind: "skipped_in_flight" }
   | { kind: "skipped_no_repo" };
 
+/** Everything the in-kaiad fix runner needs. The dispatcher fires this
+ *  and returns immediately — the fix (clone → AI CLI → commit → push)
+ *  runs in the background inside the kaiad container, NOT on the agent. */
+export interface KaiadFixStart {
+  commandId: string;
+  tenantId: string;
+  service: MonitoredService;
+  group: ErrorGroup;
+  sshKeyType: SshKey["type"];
+  sshKeyValue: string | null;
+  executor: "claude" | "cursor";
+  contextLines: string[];
+}
+
 export interface AutoFixDispatcherDeps {
   domainStore: DomainStore;
   errorGroups: ErrorGroupStore;
-  /** Reads the raw private key for an SSH key id (only the agent uses it).
-   *  When the key type is `local_path`, returns null and the path is sent
-   *  in `localPath` instead. */
+  /** Reads the raw private key for an SSH key id. For `local_path`
+   *  keys returns the path in `localPath` instead of `privateKey`. */
   readSshKeyMaterial: (tenantId: string, sshKeyId: string) => Promise<{
     type: SshKey["type"];
     privateKey: string | null;
     localPath: string | null;
   } | null>;
-  enqueueAgentCommand: (job: AgentCommandJob) => Promise<void> | void;
-  /**
-   * Returns true if the agent has a live realtime session. Used to pick a
-   * recipient from a service's many bound agents — the first online wins.
-   * If none are online, the dispatcher reports `skipped_no_online_agent`
-   * rather than queueing a command no one will execute.
-   */
-  isAgentOnline: (agentId: string) => boolean;
+  /** Start the fix inside kaiad. Fire-and-forget — the dispatcher does
+   *  NOT await it; the runner reports completion via its own lifecycle
+   *  (group status + incident + in-flight lock release). */
+  startFix: (args: KaiadFixStart) => void;
 }
 
 /**
- * Dispatch a `run_fix_plan` agent command for an error group. Returns a
- * tagged outcome so the caller can broadcast the right status to the UI.
- *
- * The dispatcher is responsible for ALL gating (auth/agent/state) so the
- * server's WS handler stays a thin pipe.
+ * Gate + kick off an in-kaiad autonomous fix for an error group.
+ * Returns a tagged outcome so the caller can broadcast UI status. The
+ * actual clone/CLI/commit/push happens in the kaiad container via
+ * `deps.startFix` — there is no agent round-trip.
  */
 export async function dispatchAutoFix(
   deps: AutoFixDispatcherDeps,
@@ -53,17 +61,6 @@ export async function dispatchAutoFix(
   }
   if (!service) {
     return { kind: "skipped_no_agent" };
-  }
-  const bindings = service.agents ?? [];
-  if (bindings.length === 0) {
-    return { kind: "skipped_no_agent" };
-  }
-  // Pick the first bound agent that's currently online. Round-robin /
-  // load-balanced strategies are a future iteration — see plan
-  // docs/superpowers/plans/2026-05-08-multi-agent-service-binding-plan.md.
-  const targetAgentId = bindings.map((b) => b.agentId).find((id) => deps.isAgentOnline(id));
-  if (!targetAgentId) {
-    return { kind: "skipped_no_online_agent" };
   }
   if (!service.gitRepoUrl) {
     return { kind: "skipped_no_repo" };
@@ -81,27 +78,17 @@ export async function dispatchAutoFix(
 
   const commandId = `cmd-${crypto.randomUUID()}`;
   const contextLines = deps.errorGroups.contextLinesFor(group.id);
-  const payload = {
-    type: "run_fix_plan",
-    commandId,
-    errorGroupId: group.id,
-    errorMessage: group.sampleMessage,
-    normalizedMessage: group.normalizedMessage,
-    fingerprint: group.fingerprint,
-    contextLines,
-    gitRepoUrl: service.gitRepoUrl,
-    branch: service.branch || "main",
-    sshKeyType: keyMaterial.type,
-    sshKeyValue: keyMaterial.privateKey ?? keyMaterial.localPath ?? null,
-    serviceId: service.id,
-    executor: service.fixExecutor ?? "claude"
-  };
 
   deps.errorGroups.setStatus(group.id, "fixing");
-  await deps.enqueueAgentCommand({
-    agentId: targetAgentId,
+  deps.startFix({
     commandId,
-    payload
+    tenantId: service.tenantId,
+    service,
+    group,
+    sshKeyType: keyMaterial.type,
+    sshKeyValue: keyMaterial.privateKey ?? keyMaterial.localPath ?? null,
+    executor: (service.fixExecutor as "claude" | "cursor") ?? "claude",
+    contextLines
   });
-  return { kind: "dispatched", commandId, agentId: targetAgentId };
+  return { kind: "dispatched", commandId, agentId: "" };
 }

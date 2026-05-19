@@ -152,6 +152,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
+# Claude Code CLI — the autonomous fix runs IN this container
+# (apps/api/src/kaiadFix.ts), not on the agent. The CLI authenticates
+# via its own logged-in session (mount/persist ~/.claude), NOT an API
+# key. node:22-slim already provides node + npm. The "cursor" executor
+# expects `cursor-agent` on PATH; provision that separately if used.
+RUN npm install -g @anthropic-ai/claude-code
+
 # Docker CLI binary (no daemon — the daemon is on the host, accessed
 # via the socket bind-mounted by compose). Static-linked, ~50 MB.
 # Pin the version so a hostile mirror can't surprise us.

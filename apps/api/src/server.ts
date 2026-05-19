@@ -118,7 +118,8 @@ import { enforcePolicy } from "./policy.js";
 import { createReadinessCheckersFromEnv, type ReadinessChecker } from "./readyChecks.js";
 import { RealtimeManager, type PendingCommandRedis } from "./realtimeManager.js";
 import { ErrorGroupStore, isProbablyUserInputError } from "./errorGrouping.js";
-import { dispatchAutoFix } from "./autoFixDispatcher.js";
+import { dispatchAutoFix, type KaiadFixStart } from "./autoFixDispatcher.js";
+import { runKaiadFix } from "./kaiadFix.js";
 import {
   getTenantSettings,
   upsertTenantSettings
@@ -268,6 +269,9 @@ export type BuildServerOptions = {
   redis?: PendingCommandRedis;
   authStore?: AuthStore;
   onSetupComplete?: SetupCompleteCallback;
+  /** Override the in-kaiad fix runner (tests stub this). Defaults to
+   *  the real clone → AI CLI → commit → push. */
+  runFix?: typeof runKaiadFix;
 };
 
 export type RuntimeQueueWiring = {
@@ -514,6 +518,69 @@ export function buildServer(opts: BuildServerOptions = {}) {
   app.register(cors);
   app.register(websocket);
   app.register(correlationIdPlugin);
+
+  // The autonomous fix runs HERE, in the kaiad container (clone → AI
+  // CLI → commit → push) — never dispatched to the agent. dispatchAutoFix
+  // fires this fire-and-forget; it owns the post-fix lifecycle:
+  // group status, incident resolution, and releasing the per-service
+  // in-flight lock so the next incident isn't starved.
+  const resolvedRunFix = opts.runFix ?? runKaiadFix;
+  const broadcastGroup = (tenantId: string, groupId: string) => {
+    const g = errorGroups.get(groupId);
+    if (g) {
+      realtimeManager.broadcastToTenant(
+        tenantId,
+        JSON.stringify(uiTelemetryEventSchema.parse({ type: "error_group_updated", group: g }))
+      );
+    }
+  };
+  const startKaiadFix = (a: KaiadFixStart): void => {
+    void (async () => {
+      const lockKey = fixServiceKey(a.tenantId, a.service.id);
+      let result: Awaited<ReturnType<typeof runKaiadFix>>;
+      try {
+        result = await resolvedRunFix({
+          repoUrl: a.service.gitRepoUrl,
+          branch: a.service.branch || "main",
+          sshKeyType: a.sshKeyType,
+          sshKeyValue: a.sshKeyValue,
+          executor: a.executor,
+          errorMessage: a.group.sampleMessage,
+          contextLines: a.contextLines,
+          logger: app.log
+        });
+      } catch (err) {
+        result = { ok: false, reason: "error", output: String((err as Error)?.message ?? err) };
+      }
+      try {
+        if (result.ok) {
+          errorGroups.setStatus(a.group.id, "fixed", result.commitSha ?? undefined);
+          try {
+            await domainStore.resolveIncidentByFingerprint(a.tenantId, a.service.id, a.group.fingerprint);
+          } catch (e) {
+            app.log.warn?.({ event: "incident.resolve_failed", err: String(e) });
+          }
+        } else if (result.reason === "auth") {
+          errorGroups.setStatus(a.group.id, "missing_auth");
+        } else {
+          // no_changes / cli_failed / push_failed / error → back to
+          // open so a later occurrence can retry.
+          errorGroups.setStatus(a.group.id, "open");
+        }
+        app.log.info?.({
+          event: "kaiad_fix.done",
+          groupId: a.group.id,
+          serviceId: a.service.id,
+          ok: result.ok,
+          reason: result.reason,
+          commitSha: result.commitSha
+        });
+        broadcastGroup(a.tenantId, a.group.id);
+      } finally {
+        fixInFlightByService.delete(lockKey);
+      }
+    })();
+  };
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const publicDir = path.join(__dirname, "public");
@@ -1414,26 +1481,21 @@ export function buildServer(opts: BuildServerOptions = {}) {
                       domainStore,
                       errorGroups,
                       readSshKeyMaterial: (tid, kid) => domainStore.getSshKeyMaterial(tid, kid),
-                      enqueueAgentCommand,
-                      isAgentOnline: (id) => realtimeManager.getConnectedAgentIds().includes(id)
+                      startFix: startKaiadFix
                     },
                     upsert.group,
                     service
                   );
-              // Release the lock when dispatchAutoFix declined to
-              // actually send a command (no online agent, missing
-              // repo, missing auth). Without this the service would
-              // be jammed until process restart.
+              // For dispatched fixes the in-flight lock is released by
+              // startKaiadFix when the in-kaiad fix settles. For every
+              // other (declined) outcome, release it now or the service
+              // is jammed until process restart.
               if (weAcquired && outcome.kind !== "dispatched" && svcKey) {
                 fixInFlightByService.delete(svcKey);
               }
               if (outcome.kind === "dispatched") {
-                fixCommandToGroup.set(outcome.commandId, {
-                  tenantId,
-                  serviceId: msg.serviceId,
-                  agentId: msg.agentId,
-                  errorGroupId: upsert.group.id
-                });
+                // Fix is now running inside kaiad (startKaiadFix); just
+                // surface the "fixing" status the dispatcher set.
                 const fixing = errorGroups.get(upsert.group.id);
                 if (fixing) {
                   realtimeManager.broadcastToTenant(

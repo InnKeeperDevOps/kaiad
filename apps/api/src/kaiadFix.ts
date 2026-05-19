@@ -8,7 +8,7 @@
 // per-service AI CLI (claude|cursor) on the error+repo prompt → commit
 // → push to the service's configured branch. The CLI authenticates via
 // its own logged-in session (e.g. ~/.claude), NOT an API key.
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -85,6 +85,43 @@ function run(
         resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
       }
     );
+  });
+}
+
+// runCli runs the AI CLI with stdin explicitly closed. The CLIs read a
+// prompt from argv but still probe stdin; without this they emit "no
+// stdin data received in 3s" and can misbehave. spawn (not execFile)
+// lets us set stdin to 'ignore'.
+function runCli(
+  bin: string,
+  args: string[],
+  opts: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; uid?: number; gid?: number }
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, {
+      cwd: opts.cwd,
+      env: opts.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      ...(opts.uid != null ? { uid: opts.uid } : {}),
+      ...(opts.gid != null ? { gid: opts.gid } : {})
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => {
+      stdout += d;
+    });
+    child.stderr.on("data", (d) => {
+      stderr += d;
+    });
+    const timer = setTimeout(() => child.kill("SIGKILL"), opts.timeoutMs);
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      resolve({ code: 1, stdout, stderr: stderr + String(e) });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code: code ?? 1, stdout, stderr });
+    });
   });
 }
 
@@ -189,7 +226,7 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       cliUid = FIX_UID;
       cliGid = FIX_GID;
     }
-    const cli = await run(bin, args, {
+    const cli = await runCli(bin, args, {
       cwd: repoDir,
       env: cliEnv,
       timeoutMs,

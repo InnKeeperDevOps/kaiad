@@ -603,11 +603,12 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
       }
     }
 
-    // ── Dockerfile mode (alternative to build/runtime/artifacts) ──
+    // ── Dockerfile mode (replaces the build step only) ──
     //    `docker build -t <ref>` against the host daemon, then `docker
-    //    push`. Image config (entrypoint, exposed ports, env, etc.)
-    //    comes from the Dockerfile. Skip the entire crane-assembly
-    //    flow below.
+    //    push`. Image config (entrypoint, exposed ports, base) comes
+    //    from the Dockerfile, so we skip the crane-assembly flow below.
+    //    `runtime` (env/secretEnv/volumes/command) is NOT a build input
+    //    — it's applied at deploy time, same as for a built image.
     if (pipeline.dockerfile) {
       // Dockerfile mode reads the build context with the docker CLI
       // (which runs INSIDE the kaiad container), so the path passed

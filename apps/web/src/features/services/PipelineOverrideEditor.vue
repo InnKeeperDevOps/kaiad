@@ -142,21 +142,19 @@ function ensure(p: AnyObj, key: string, init: any) {
 function lb(p: AnyObj) {
   return ensure(p, "loadBalancer", { type: "none" });
 }
-// `dockerfile:` is mutually exclusive with build/artifacts/runtime
-// (the parser rejects them together). The form picks one image source
-// and prunes the other so it can never emit an invalid kaiad.yaml.
+// A Dockerfile replaces only the *build step* — `dockerfile:` and
+// `build:` are mutually exclusive (the parser rejects them together),
+// but runtime/artifacts/env/volumes still apply. Switching mode prunes
+// just the conflicting key so the form can't emit invalid kaiad.yaml.
 function dfMode(p: AnyObj): boolean {
   return !!p.dockerfile;
 }
 function setImageMode(p: AnyObj, mode: "build" | "dockerfile") {
   if (mode === "dockerfile") {
     delete p.build;
-    delete p.artifacts;
-    delete p.runtime;
     if (!p.dockerfile) p.dockerfile = { path: "Dockerfile", context: "." };
   } else {
     delete p.dockerfile;
-    ensure(p, "runtime", { image: "scratch", command: [] });
   }
   syncYamlFromForm();
 }
@@ -420,7 +418,7 @@ async function clearOverride() {
 
           <section class="pl-section">
             <h4 class="pl-section__title">
-              Image source <span class="pl-hint">build &amp; runtime, or a Dockerfile — not both</span>
+              Image source <span class="pl-hint">build step, or a Dockerfile — runtime config applies either way</span>
             </h4>
             <div class="pl-row">
               <label class="pl-label">Mode</label>
@@ -492,7 +490,7 @@ async function clearOverride() {
           </section>
 
           <!-- Env -->
-          <section v-if="!dfMode(entry.p)" class="pl-section">
+          <section class="pl-section">
             <h4 class="pl-section__title">Environment variables</h4>
             <div v-for="k in envKeys(entry.p)" :key="'e-' + k" class="pl-row">
               <input class="sm-input pl-in" :value="k" readonly />
@@ -506,7 +504,7 @@ async function clearOverride() {
           </section>
 
           <!-- Secret-ref env -->
-          <section v-if="!dfMode(entry.p)" class="pl-section">
+          <section class="pl-section">
             <h4 class="pl-section__title">Secret-ref env <span class="pl-hint">existing k8s Secret</span></h4>
             <div v-for="(s, i) in arr(entry.p, 'runtime', 'secretEnv')" :key="'s' + i" class="pl-row">
               <input class="sm-input pl-in" v-model="s.name" @input="syncYamlFromForm" placeholder="ENV_NAME" />
@@ -519,7 +517,7 @@ async function clearOverride() {
           </section>
 
           <!-- Volumes -->
-          <section v-if="!dfMode(entry.p)" class="pl-section">
+          <section class="pl-section">
             <h4 class="pl-section__title">Volumes</h4>
             <div v-for="(v, i) in arr(entry.p, 'runtime', 'volumes')" :key="'v' + i" class="pl-vol">
               <div class="pl-row">
@@ -554,8 +552,10 @@ async function clearOverride() {
           </section>
 
           <!-- Runtime image + command -->
-          <section v-if="!dfMode(entry.p)" class="pl-section">
-            <h4 class="pl-section__title">Runtime image &amp; command</h4>
+          <section class="pl-section">
+            <h4 class="pl-section__title">
+              Runtime <span class="pl-hint">command &amp; (build mode) base image</span>
+            </h4>
             <div class="pl-row">
               <label class="pl-label">Image</label>
               <input class="sm-input pl-in" :value="ensure(entry.p,'runtime',{}).image" @input="ensure(entry.p,'runtime',{}).image = ($event.target as HTMLInputElement).value; syncYamlFromForm()" placeholder="nginx:alpine" />
@@ -618,7 +618,7 @@ async function clearOverride() {
           </section>
 
           <!-- Artifacts, copy, layers -->
-          <section v-if="!dfMode(entry.p)" class="pl-section">
+          <section class="pl-section">
             <h4 class="pl-section__title">Artifacts &amp; runtime layers</h4>
             <div v-for="(a, i) in strArr(entry.p, null, 'artifacts')" :key="'art'+i" class="pl-row">
               <span class="pl-hint">artifact</span>

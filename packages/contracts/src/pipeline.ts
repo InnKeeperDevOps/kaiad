@@ -317,10 +317,12 @@ export const pipelineDefinitionSchema = z
     artifacts: z.array(safeRelativePath).default([]),
     runtime: pipelineRuntimeSchema.optional(),
     /**
-     * Alternative build mode — exclusive with build/artifacts/runtime.
-     * When set, kaiad runs `docker build` on the host daemon and pushes
-     * the resulting image to its built-in registry. Image config
-     * (entrypoint, exposed ports, env, etc.) comes from the Dockerfile.
+     * Alternative build mode — replaces the `build:` step only (the two
+     * are mutually exclusive). When set, kaiad runs `docker build` on
+     * the host daemon and pushes the resulting image to its built-in
+     * registry; image config (entrypoint, exposed ports, base) comes
+     * from the Dockerfile. `runtime` (deploy-time env/secretEnv/volumes/
+     * command) still applies just like for a build-produced image.
      */
     dockerfile: pipelineDockerfileSchema.optional(),
     ports: z.array(pipelinePortSchema).default([]),
@@ -373,18 +375,17 @@ export const pipelineDefinitionSchema = z
     dependsOn: z.array(z.string().min(1)).default([])
   })
   .superRefine((def, ctx) => {
-    // dockerfile mode is mutually exclusive with the build/artifacts/
-    // runtime trio: the Dockerfile already describes everything those
-    // express. Allowing both would silently let one win and confuse
-    // the user.
-    if (def.dockerfile) {
-      if (def.build || def.runtime || def.artifacts.length > 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["dockerfile"],
-          message: "dockerfile: is exclusive with build/artifacts/runtime — pick one mode"
-        });
-      }
+    // dockerfile mode replaces only the *build step*: the Dockerfile is
+    // how the image gets built, so a `build:` block alongside it is
+    // contradictory. `runtime` (deploy-time env/secretEnv/volumes/
+    // command) and `artifacts` still apply — the Dockerfile-built image
+    // is deployed with the same runtime config any other image gets.
+    if (def.dockerfile && def.build) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["dockerfile"],
+        message: "dockerfile: is exclusive with build: — a Dockerfile already is the build step"
+      });
     }
     // Cross-field validation: every runtime.copy.from / runtime.layers
     // MUST appear in artifacts[]. Catches typos early instead of

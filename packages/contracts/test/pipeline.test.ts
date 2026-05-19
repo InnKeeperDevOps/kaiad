@@ -603,24 +603,27 @@ build:
       expect(r.reason).toMatch(/exclusive/);
     });
 
-    it("rejects dockerfile alongside runtime", () => {
+    it("accepts dockerfile alongside runtime (deploy-time config still applies)", () => {
       const r = parsePipelineYaml(`
 version: 1
 dockerfile: {}
 runtime:
-  image: alpine
   command: ["sh"]
+  env:
+    LOG_LEVEL: debug
 `);
-      expect(r.ok).toBe(false);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.pipeline.runtime?.env).toEqual({ LOG_LEVEL: "debug" });
     });
 
-    it("rejects dockerfile alongside non-empty artifacts", () => {
+    it("accepts dockerfile alongside artifacts", () => {
       const r = parsePipelineYaml(`
 version: 1
 dockerfile: {}
 artifacts: ["foo.tar"]
 `);
-      expect(r.ok).toBe(false);
+      expect(r.ok).toBe(true);
     });
 
     it("dockerfile mode works inside multi-pipeline file", () => {

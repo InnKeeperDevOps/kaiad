@@ -142,6 +142,24 @@ function ensure(p: AnyObj, key: string, init: any) {
 function lb(p: AnyObj) {
   return ensure(p, "loadBalancer", { type: "none" });
 }
+// `dockerfile:` is mutually exclusive with build/artifacts/runtime
+// (the parser rejects them together). The form picks one image source
+// and prunes the other so it can never emit an invalid kaiad.yaml.
+function dfMode(p: AnyObj): boolean {
+  return !!p.dockerfile;
+}
+function setImageMode(p: AnyObj, mode: "build" | "dockerfile") {
+  if (mode === "dockerfile") {
+    delete p.build;
+    delete p.artifacts;
+    delete p.runtime;
+    if (!p.dockerfile) p.dockerfile = { path: "Dockerfile", context: "." };
+  } else {
+    delete p.dockerfile;
+    ensure(p, "runtime", { image: "scratch", command: [] });
+  }
+  syncYamlFromForm();
+}
 function arr(p: AnyObj, parentKey: string | null, key: string): AnyObj[] {
   const parent = parentKey ? ensure(p, parentKey, {}) : p;
   if (!Array.isArray(parent[key])) parent[key] = [];
@@ -400,6 +418,23 @@ async function clearOverride() {
             <Button v-if="entry.name" variant="ghost" size="sm" @click="removeService(entry.name)">Remove</Button>
           </div>
 
+          <section class="pl-section">
+            <h4 class="pl-section__title">
+              Image source <span class="pl-hint">build &amp; runtime, or a Dockerfile — not both</span>
+            </h4>
+            <div class="pl-row">
+              <label class="pl-label">Mode</label>
+              <select
+                class="sm-input"
+                :value="dfMode(entry.p) ? 'dockerfile' : 'build'"
+                @change="setImageMode(entry.p, ($event.target as HTMLSelectElement).value as 'build' | 'dockerfile')"
+              >
+                <option value="build">Build &amp; runtime</option>
+                <option value="dockerfile">Dockerfile</option>
+              </select>
+            </div>
+          </section>
+
           <!-- Load balancer -->
           <section class="pl-section">
             <h4 class="pl-section__title">Load balancer</h4>
@@ -457,7 +492,7 @@ async function clearOverride() {
           </section>
 
           <!-- Env -->
-          <section class="pl-section">
+          <section v-if="!dfMode(entry.p)" class="pl-section">
             <h4 class="pl-section__title">Environment variables</h4>
             <div v-for="k in envKeys(entry.p)" :key="'e-' + k" class="pl-row">
               <input class="sm-input pl-in" :value="k" readonly />
@@ -471,7 +506,7 @@ async function clearOverride() {
           </section>
 
           <!-- Secret-ref env -->
-          <section class="pl-section">
+          <section v-if="!dfMode(entry.p)" class="pl-section">
             <h4 class="pl-section__title">Secret-ref env <span class="pl-hint">existing k8s Secret</span></h4>
             <div v-for="(s, i) in arr(entry.p, 'runtime', 'secretEnv')" :key="'s' + i" class="pl-row">
               <input class="sm-input pl-in" v-model="s.name" @input="syncYamlFromForm" placeholder="ENV_NAME" />
@@ -484,7 +519,7 @@ async function clearOverride() {
           </section>
 
           <!-- Volumes -->
-          <section class="pl-section">
+          <section v-if="!dfMode(entry.p)" class="pl-section">
             <h4 class="pl-section__title">Volumes</h4>
             <div v-for="(v, i) in arr(entry.p, 'runtime', 'volumes')" :key="'v' + i" class="pl-vol">
               <div class="pl-row">
@@ -519,7 +554,7 @@ async function clearOverride() {
           </section>
 
           <!-- Runtime image + command -->
-          <section class="pl-section">
+          <section v-if="!dfMode(entry.p)" class="pl-section">
             <h4 class="pl-section__title">Runtime image &amp; command</h4>
             <div class="pl-row">
               <label class="pl-label">Image</label>
@@ -556,8 +591,8 @@ async function clearOverride() {
           </section>
 
           <!-- Build -->
-          <section class="pl-section">
-            <h4 class="pl-section__title">Build <span class="pl-hint">repo build step (exclusive with Dockerfile mode)</span></h4>
+          <section v-if="!dfMode(entry.p)" class="pl-section">
+            <h4 class="pl-section__title">Build <span class="pl-hint">repo build step</span></h4>
             <div class="pl-row">
               <label class="pl-label">Build image</label>
               <input class="sm-input pl-in" :value="ensure(entry.p,'build',{}).image" @input="ensure(entry.p,'build',{}).image = ($event.target as HTMLInputElement).value; syncYamlFromForm()" placeholder="maven:3.9-eclipse-temurin-17" />
@@ -583,7 +618,7 @@ async function clearOverride() {
           </section>
 
           <!-- Artifacts, copy, layers -->
-          <section class="pl-section">
+          <section v-if="!dfMode(entry.p)" class="pl-section">
             <h4 class="pl-section__title">Artifacts &amp; runtime layers</h4>
             <div v-for="(a, i) in strArr(entry.p, null, 'artifacts')" :key="'art'+i" class="pl-row">
               <span class="pl-hint">artifact</span>
@@ -612,8 +647,8 @@ async function clearOverride() {
           </section>
 
           <!-- Dockerfile mode -->
-          <section class="pl-section">
-            <h4 class="pl-section__title">Dockerfile mode <span class="pl-hint">exclusive with Build/Runtime</span></h4>
+          <section v-if="dfMode(entry.p)" class="pl-section">
+            <h4 class="pl-section__title">Dockerfile</h4>
             <div class="pl-row">
               <label class="pl-label">Path</label>
               <input class="sm-input pl-in pl-in--sm" :value="ensure(entry.p,'dockerfile',{}).path" @input="ensure(entry.p,'dockerfile',{}).path = ($event.target as HTMLInputElement).value; syncYamlFromForm()" placeholder="Dockerfile" />

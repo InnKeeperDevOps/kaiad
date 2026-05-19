@@ -2513,10 +2513,16 @@ export function buildServer(opts: BuildServerOptions = {}) {
       );
     }
     const payload = createSshKeyRequestSchema.parse(req.body);
+    // Repair textarea/JSON transport damage so OpenSSH can parse the
+    // key (CRLF→LF, exactly one trailing newline). Content unchanged.
+    const normalizedKey =
+      typeof payload.privateKey === "string"
+        ? payload.privateKey.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n+$/, "") + "\n"
+        : payload.privateKey;
     const key = await domainStore.createSshKey(session.tenantId, {
       name: payload.name,
       type: payload.type,
-      privateKey: payload.privateKey,
+      privateKey: normalizedKey,
       localPath: payload.localPath
     });
     return reply.status(201).send(key);

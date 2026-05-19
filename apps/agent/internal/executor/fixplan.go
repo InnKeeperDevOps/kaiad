@@ -205,6 +205,17 @@ func executeRunFixPlanInner(e *Executor, ctx context.Context, payload map[string
 
 // buildSSHEnvFromPayload sets GIT_SSH_COMMAND for the duration of the fix run.
 // Mirrors the same logic in executePlanRunner so the two stay consistent.
+// normalizePEM repairs transport damage to a PEM/OpenSSH private key
+// without changing its content: CRLF/CR → LF, and ensure exactly one
+// trailing newline. Both are required by OpenSSH and are routinely lost
+// when a key is pasted through a browser textarea / JSON.
+func normalizePEM(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	s = strings.TrimRight(s, "\n")
+	return s + "\n"
+}
+
 func buildSSHEnvFromPayload(payload map[string]interface{}) (map[string]string, func(), error) {
 	env := map[string]string{}
 	noop := func() {}
@@ -212,6 +223,15 @@ func buildSSHEnvFromPayload(payload map[string]interface{}) (map[string]string, 
 	sshKeyValue := stringValue(payload["sshKeyValue"])
 
 	if sshKeyType == "uploaded" && sshKeyValue != "" {
+		// Use the service's configured key as-is, but repair the two
+		// ways a pasted-into-a-textarea PEM gets mangled and trips
+		// OpenSSH with "error in libcrypto": Windows CRLF line endings,
+		// and a missing final newline (OpenSSH's new key format
+		// requires the trailing LF). This does NOT alter key bytes —
+		// only line endings — so a genuinely valid key keeps working
+		// and a previously-broken-on-transport one starts working
+		// without the operator having to re-upload it.
+		sshKeyValue = normalizePEM(sshKeyValue)
 		f, err := os.CreateTemp("", "kaiad_fix_ssh_key_*")
 		if err != nil {
 			return nil, noop, fmt.Errorf("failed to create temp ssh key file: %v", err)

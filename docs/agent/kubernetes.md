@@ -444,9 +444,44 @@ kubectl -n kube-system patch deploy metrics-server --type=json \
 ```
 
 Once `kubectl top pods` returns numbers the panel populates on the next
-agent telemetry tick — no Kaiad restart or redeploy needed. (Network
-throughput isn't exposed by the Kubernetes metrics API, so it stays
-blank for `kubernetes`-mode agents.)
+agent telemetry tick — no Kaiad restart or redeploy needed.
+
+### Network throughput (k8s)
+
+The **Net (rx/tx)** column is populated for **docker**-mode agents (the
+agent reads it from the container runtime). For **kubernetes**-mode
+agents it stays `—`, and that's a Kubernetes limitation, not a Kaiad
+one:
+
+- `metrics.k8s.io` (`kubectl top`) reports **CPU and memory only** — no
+  network, by API design.
+- The kubelet **Summary API** (`/stats/summary`) has a per-pod
+  `network` block, but on many `containerd` + CNI setups it is `null`
+  (the pod sandbox's interface counters aren't surfaced to cAdvisor).
+- The kubelet **cAdvisor** endpoint (`/metrics/cadvisor`) often only
+  carries node-root `container_network_*` series (`pod=""`), i.e. no
+  per-pod breakdown.
+
+So there is frequently **no per-pod network counter to read** through
+any first-party Kubernetes API, regardless of RBAC. Kaiad deliberately
+does not ship a privileged kubelet/`nodes/proxy` scraper for data that
+is empty on these clusters.
+
+To get per-pod network in the panel you need a **cluster-side network
+metrics source** that actually tracks it — typically an eBPF/CNI
+exporter:
+
+- **Cilium** — enable Hubble metrics
+  (`hubble.metrics.enabled={flow,...}`); exposes per-pod flow bytes.
+- **Calico** — enable Felix Prometheus metrics
+  (`FELIX_PROMETHEUSMETRICSENABLED=true`).
+- A node `cAdvisor`/CNI combination that populates per-pod
+  `container_network_*` (runtime-dependent).
+
+These publish Prometheus series, not the kubelet/metrics-API shape the
+agent samples today, so surfacing them in the Agents panel is a future
+Kaiad integration rather than an automatic pickup — track it as a
+separate enhancement if you want it wired in.
 
 If your workflow needs a verb not in the allow-list, that's a deliberate
 review point — open an issue rather than working around it.

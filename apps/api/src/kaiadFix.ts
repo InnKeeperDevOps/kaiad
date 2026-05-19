@@ -238,6 +238,16 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       await run("chown", ["-R", "0:0", repoDir], { timeoutMs: 30000 });
     }
     const cliOut = cli.stdout + cli.stderr;
+    // Diagnostic: exactly what the CLI was asked and what it produced.
+    p.logger?.info?.({
+      phase: "cli_done",
+      executor: p.executor,
+      code: cli.code,
+      errorMessageHead: p.errorMessage.slice(0, 400),
+      contextLineCount: p.contextLines.length,
+      contextTail: p.contextLines.slice(-12),
+      cliOutHead: cliOut.slice(0, 2500)
+    });
     if (cli.code !== 0) {
       return { ok: false, reason: "cli_failed", output: `${p.executor} failed:\n${cliOut}` };
     }

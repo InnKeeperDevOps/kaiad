@@ -249,7 +249,8 @@ describe("upsertIncident", () => {
     const updateCall = (query as ReturnType<typeof vi.fn>).mock.calls[1];
     expect(updateCall[0]).toContain("event_count = event_count + 1");
     expect(updateCall[0]).toContain("tenant_id = $2");
-    expect(updateCall[1]).toEqual(["inc-existing", "t1"]);
+    // message + full_log are COALESCE-refreshed on every bump (null = keep).
+    expect(updateCall[1]).toEqual(["inc-existing", "t1", null, null]);
   });
 });
 

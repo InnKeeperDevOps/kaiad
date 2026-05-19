@@ -106,6 +106,8 @@ export const incidentSchema = z.object({
   fingerprint: z.string(),
   status: incidentStatusSchema,
   message: z.string().optional(),
+  /** Full captured log / stack trace for the incident. */
+  fullLog: z.string().optional(),
   firstSeenAt: z.string().datetime(),
   lastSeenAt: z.string().datetime(),
   eventCount: z.number().int().nonnegative().default(1)

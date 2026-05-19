@@ -10,7 +10,7 @@ import type {
 export type DomainStore = {
   listIncidents(tenantId: string): Promise<Incident[]>;
   getIncident(tenantId: string, id: string): Promise<Incident | undefined>;
-  upsertIncident(tenantId: string, data: { serviceId: string; fingerprint: string; message?: string }): Promise<Incident>;
+  upsertIncident(tenantId: string, data: { serviceId: string; fingerprint: string; message?: string; fullLog?: string }): Promise<Incident>;
   updateIncidentStatus(tenantId: string, id: string, status: IncidentStatus): Promise<Incident | undefined>;
   /** Resolve open incidents for a service+fingerprint after an auto-fix lands. Returns count closed. */
   resolveIncidentByFingerprint(tenantId: string, serviceId: string, fingerprint: string): Promise<number>;
@@ -152,6 +152,8 @@ export function createMemoryDomainStore(): DomainStore {
       if (existing) {
         existing.lastSeenAt = new Date().toISOString();
         existing.eventCount = (existing.eventCount ?? 1) + 1;
+        if (data.message) existing.message = data.message;
+        if (data.fullLog) existing.fullLog = data.fullLog;
         return existing;
       }
       const now = new Date().toISOString();
@@ -162,6 +164,7 @@ export function createMemoryDomainStore(): DomainStore {
         fingerprint: data.fingerprint,
         status: "open",
         message: data.message,
+        fullLog: data.fullLog,
         firstSeenAt: now,
         lastSeenAt: now,
         eventCount: 1

@@ -169,6 +169,29 @@ const btnStyle = {
                   Last seen {{ new Date(inc.lastSeenAt).toLocaleString() }} ·
                   {{ inc.eventCount }} event{{ inc.eventCount !== 1 ? "s" : "" }}
                 </div>
+                <div>
+                  <strong>Full log:</strong>
+                  <pre
+                    v-if="inc.fullLog"
+                    :style="{
+                      marginTop: '0.35rem',
+                      maxHeight: '22rem',
+                      overflow: 'auto',
+                      background: 'var(--color-bg)',
+                      border: '1px solid var(--color-border)',
+                      borderRadius: '6px',
+                      padding: '0.6rem 0.75rem',
+                      fontSize: '0.78rem',
+                      lineHeight: '1.35',
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word'
+                    }"
+                  >{{ inc.fullLog }}</pre>
+                  <span
+                    v-else
+                    :style="{ color: 'var(--color-text-secondary)', marginLeft: '0.35rem' }"
+                  >not captured</span>
+                </div>
                 <div :style="{ display: 'flex', gap: '1rem' }">
                   <a
                     href="#agents"

@@ -1,14 +1,11 @@
 package logship
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
-
-type capturedLog struct {
-	agentID, serviceID, level, message string
-}
 
 type capturedErr struct {
 	agentID, serviceID, message string
@@ -17,13 +14,13 @@ type capturedErr struct {
 
 type fakeInner struct {
 	mu   sync.Mutex
-	logs []capturedLog
+	logs int
 }
 
-func (f *fakeInner) SendLogEvent(agentID, serviceID, level, message string) error {
+func (f *fakeInner) SendLogEvent(_, _, _, _ string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.logs = append(f.logs, capturedLog{agentID, serviceID, level, message})
+	f.logs++
+	f.mu.Unlock()
 	return nil
 }
 
@@ -35,149 +32,141 @@ type fakeErr struct {
 func (f *fakeErr) SendAppLogError(agentID, serviceID, message string, contextLines []string, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	cp := append([]string(nil), contextLines...)
-	f.errs = append(f.errs, capturedErr{agentID, serviceID, message, cp})
+	f.errs = append(f.errs, capturedErr{agentID, serviceID, message, append([]string(nil), contextLines...)})
 	return nil
 }
 
-func TestSenderForwardsAllAndEmitsErrorWithContext(t *testing.T) {
-	inner := &fakeInner{}
-	errs := &fakeErr{}
-	s := NewSender(inner, errs, 5)
-
-	_ = s.SendLogEvent("agent-1", "svc", "info", "starting up")
-	_ = s.SendLogEvent("agent-1", "svc", "info", "ready")
-	_ = s.SendLogEvent("agent-1", "svc", "info", "request 1")
-	_ = s.SendLogEvent("agent-1", "svc", "error", "boom: connection refused")
-
-	if got := len(inner.logs); got != 4 {
-		t.Fatalf("inner forwarded %d, want 4", got)
-	}
-	if got := len(errs.errs); got != 1 {
-		t.Fatalf("errors emitted %d, want 1", got)
-	}
-	got := errs.errs[0]
-	if got.message != "boom: connection refused" || got.serviceID != "svc" {
-		t.Fatalf("unexpected error frame: %+v", got)
-	}
-	if len(got.contextLines) != 4 {
-		t.Fatalf("context lines = %d, want 4 (incl. error line)", len(got.contextLines))
-	}
-	if got.contextLines[0] != "starting up" || got.contextLines[3] != "boom: connection refused" {
-		t.Fatalf("context order wrong: %v", got.contextLines)
-	}
+func (f *fakeErr) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.errs)
 }
 
-func TestSenderRingBufferKeepsOnlyLastN(t *testing.T) {
-	inner := &fakeInner{}
-	errs := &fakeErr{}
-	s := NewSender(inner, errs, 3)
+// A fresh non-error log line ends a burst and triggers the single emit.
+const freshLine = "2026-05-19 10:00:00 INFO  Restarting AibeApplication"
 
-	for i := 0; i < 10; i++ {
-		_ = s.SendLogEvent("a", "svc", "info", "line")
-	}
-	_ = s.SendLogEvent("a", "svc", "error", "fail")
-
-	if got := len(errs.errs[0].contextLines); got != 3 {
-		t.Fatalf("context lines = %d, want 3", got)
-	}
-	if errs.errs[0].contextLines[2] != "fail" {
-		t.Fatalf("last context line = %q, want fail", errs.errs[0].contextLines[2])
-	}
-}
-
-func TestSenderIsolatesPerService(t *testing.T) {
-	inner := &fakeInner{}
-	errs := &fakeErr{}
-	s := NewSender(inner, errs, 5)
-
-	_ = s.SendLogEvent("a", "svcA", "info", "A1")
-	_ = s.SendLogEvent("a", "svcB", "info", "B1")
-	_ = s.SendLogEvent("a", "svcA", "error", "Aerr")
-
-	if len(errs.errs) != 1 {
-		t.Fatalf("expected 1 error frame, got %d", len(errs.errs))
-	}
-	got := errs.errs[0].contextLines
-	for _, line := range got {
-		if line == "B1" {
-			t.Fatalf("svcA error context leaked svcB line: %v", got)
-		}
-	}
-	if len(got) != 2 || got[0] != "A1" || got[1] != "Aerr" {
-		t.Fatalf("svcA context = %v, want [A1 Aerr]", got)
-	}
-}
-
-func TestSenderFatalAlsoEmits(t *testing.T) {
-	inner := &fakeInner{}
-	errs := &fakeErr{}
-	s := NewSender(inner, errs, 5)
-	_ = s.SendLogEvent("a", "svc", "fatal", "crash")
-	if len(errs.errs) != 1 {
-		t.Fatalf("fatal should emit, got %d", len(errs.errs))
-	}
-}
-
-func TestSenderCoalescesStackTraceIntoOneIncident(t *testing.T) {
+func TestSenderShipsFullStackTraceAsOneIncident(t *testing.T) {
 	inner := &fakeInner{}
 	errs := &fakeErr{}
 	s := NewSender(inner, errs, 50)
+	defer s.Close()
 
-	// A Spring/JVM crash: one top-level ERROR followed by the
-	// exception chain and frames. Every "Exception"/"Caused by" line
-	// is error-classified by the agent's log classifier, so without
-	// coalescing this produced ~5 separate incidents.
-	trace := []struct {
-		level, msg string
-	}{
-		{"error", "2026-05-19 ERROR o.s.boot.SpringApplication - Application run failed"},
+	// info startup, the vague first ERROR, then the exception chain —
+	// the actionable SQLException is AFTER the first error line.
+	feed := []struct{ level, msg string }{
+		{"info", "2026-05-19 09:59:58 INFO  Starting AibeApplication"},
+		{"info", "2026-05-19 09:59:59 INFO  Bootstrapping Spring"},
+		{"error", "2026-05-19 10:00:00 ERROR o.s.boot.SpringApplication - Application run failed"},
 		{"error", "org.springframework.beans.factory.BeanCreationException: Error creating bean 'flyway'"},
 		{"info", "\tat org.springframework.beans.factory.support.AbstractBeanFactory.doGetBean(AbstractBeanFactory.java:333)"},
-		{"error", "Caused by: org.flywaydb.core.internal.exception.FlywaySqlException: Unable to obtain connection"},
 		{"error", "Caused by: java.sql.SQLException: path to './data/sitemanager.db': '/app/./data' does not exist"},
-		{"info", "\tat org.sqlite.core.NativeDB._open_utf8(Native Method)"},
+		{"info", "\tat org.sqlite.core.CoreConnection.open(CoreConnection.java:74)"},
 		{"info", "\t... 24 more"},
 	}
+	for _, l := range feed {
+		_ = s.SendLogEvent("a", "svc", l.level, l.msg)
+	}
+	if errs.count() != 0 {
+		t.Fatalf("burst should not emit until it ends; got %d", errs.count())
+	}
+	// Fresh non-error line ends the burst → single emit.
+	_ = s.SendLogEvent("a", "svc", "info", freshLine)
+
+	if errs.count() != 1 {
+		t.Fatalf("want exactly 1 incident, got %d", errs.count())
+	}
+	got := errs.errs[0]
+	if !strings.Contains(got.message, "SQLException") {
+		t.Fatalf("representative should be the deepest cause, got %q", got.message)
+	}
+	joined := strings.Join(got.contextLines, "\n")
+	if !strings.Contains(joined, "path to './data/sitemanager.db'") {
+		t.Fatalf("full trace (the SQLException) must be in contextLines:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Application run failed") {
+		t.Fatalf("the first error line should also be in context:\n%s", joined)
+	}
+}
+
+func TestSenderCrashLoopReplayIsOneIncident(t *testing.T) {
+	errs := &fakeErr{}
 	clock := time.Unix(1_700_000_000, 0)
+	s := NewSender(&fakeInner{}, errs, 50)
 	s.now = func() time.Time { return clock }
+	defer s.Close()
 
-	for _, l := range trace {
-		_ = s.SendLogEvent("a", "svc", l.level, l.msg)
+	burst := func() {
+		_ = s.SendLogEvent("a", "svc", "error", "ERROR boom")
+		_ = s.SendLogEvent("a", "svc", "error", "Caused by: java.lang.IllegalStateException: bad")
+		_ = s.SendLogEvent("a", "svc", "info", freshLine) // ends burst
 	}
+	burst()
+	if errs.count() != 1 {
+		t.Fatalf("first crash → 1 incident, got %d", errs.count())
+	}
+	clock = clock.Add(5 * time.Second) // crash-loop replay within window
+	burst()
+	if errs.count() != 1 {
+		t.Fatalf("replay within incidentWindow must not add incidents, got %d", errs.count())
+	}
+	clock = clock.Add(incidentWindow + time.Second) // genuinely later
+	burst()
+	if errs.count() != 2 {
+		t.Fatalf("error after the window is a new incident, got %d", errs.count())
+	}
+}
 
-	if got := len(errs.errs); got != 1 {
-		t.Fatalf("stack trace produced %d incidents, want 1", got)
-	}
-	if errs.errs[0].message != trace[0].msg {
-		t.Fatalf("incident representative = %q, want the first error line", errs.errs[0].message)
-	}
+func TestSenderMaxHoldFlush(t *testing.T) {
+	errs := &fakeErr{}
+	clock := time.Unix(1_700_000_000, 0)
+	s := NewSender(&fakeInner{}, errs, 10)
+	s.now = func() time.Time { return clock }
+	defer s.Close()
 
-	// Crash-loop: the whole trace replays a few seconds later (even
-	// interleaved across replicas) — still the same single incident.
-	clock = clock.Add(7 * time.Second)
-	for _, l := range trace {
-		_ = s.SendLogEvent("a", "svc", l.level, l.msg)
+	_ = s.SendLogEvent("a", "svc", "error", "ERROR no trailing fresh line ever")
+	if errs.count() != 0 {
+		t.Fatalf("not yet (burst open), got %d", errs.count())
 	}
-	if got := len(errs.errs); got != 1 {
-		t.Fatalf("crash-loop replay within the window must not add incidents; got %d", got)
+	clock = clock.Add(maxHold + time.Second)
+	for _, e := range s.collectAged() {
+		_ = s.errSender.SendAppLogError(e.agentID, e.serviceID, e.message, e.context, e.ts)
 	}
+	if errs.count() != 1 {
+		t.Fatalf("maxHold should flush the quiescent burst, got %d", errs.count())
+	}
+}
 
-	// A genuinely new error well after the window is a new incident.
-	clock = clock.Add(incidentWindow + time.Second)
-	_ = s.SendLogEvent("a", "svc", "error", "2026-05-19 ERROR pool - connection timeout")
-	if got := len(errs.errs); got != 2 {
-		t.Fatalf("error after the window should be a new incident; got %d frames, want 2", got)
+func TestSenderPerServiceIsolation(t *testing.T) {
+	errs := &fakeErr{}
+	s := NewSender(&fakeInner{}, errs, 20)
+	defer s.Close()
+
+	_ = s.SendLogEvent("a", "svcA", "info", "A boot")
+	_ = s.SendLogEvent("a", "svcB", "info", "B boot")
+	_ = s.SendLogEvent("a", "svcA", "error", "ERROR A failed")
+	_ = s.SendLogEvent("a", "svcA", "info", freshLine) // end svcA burst
+
+	if errs.count() != 1 {
+		t.Fatalf("only svcA should have emitted, got %d", errs.count())
+	}
+	if errs.errs[0].serviceID != "svcA" {
+		t.Fatalf("wrong service: %s", errs.errs[0].serviceID)
+	}
+	for _, l := range errs.errs[0].contextLines {
+		if strings.Contains(l, "B boot") {
+			t.Fatalf("svcA context leaked svcB line: %v", errs.errs[0].contextLines)
+		}
 	}
 }
 
 func TestSenderTolerantOfNilErrSender(t *testing.T) {
 	inner := &fakeInner{}
 	s := NewSender(inner, nil, 5)
+	defer s.Close()
 	if err := s.SendLogEvent("a", "svc", "error", "x"); err != nil {
 		t.Fatal(err)
 	}
-	if len(inner.logs) != 1 {
+	if inner.logs != 1 {
 		t.Fatal("inner should still receive the log_event")
 	}
 }

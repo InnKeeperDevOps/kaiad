@@ -267,6 +267,11 @@ create table if not exists incidents (
   last_seen_at timestamptz not null default now()
 );
 
+-- Full captured log/stack-trace for the incident (the agent now ships
+-- the whole error burst). Surfaced via the Incidents page "show full
+-- log" and used to build the AI fix prompt.
+alter table incidents add column if not exists full_log text;
+
 create table if not exists remediation_jobs (
   id text primary key,
   tenant_id text not null references tenants(id) on delete cascade,

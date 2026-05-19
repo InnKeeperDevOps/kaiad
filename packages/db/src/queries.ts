@@ -100,6 +100,7 @@ export interface IncidentRow {
   serviceId: string;
   fingerprint: string;
   message?: string;
+  fullLog?: string;
   status: string;
   eventCount: number;
   firstSeenAt: string;
@@ -113,6 +114,7 @@ function mapIncident(r: Record<string, unknown>): IncidentRow {
     serviceId: r.service_id as string,
     fingerprint: r.fingerprint as string,
     message: r.message as string | undefined,
+    fullLog: (r.full_log as string | null) ?? undefined,
     status: r.status as string,
     eventCount: Number(r.event_count ?? 1),
     firstSeenAt:
@@ -152,7 +154,7 @@ export async function getIncident(
 export async function upsertIncident(
   query: QueryFn,
   tenantId: string,
-  data: { serviceId: string; fingerprint: string; message?: string },
+  data: { serviceId: string; fingerprint: string; message?: string; fullLog?: string },
 ): Promise<IncidentRow> {
   const { rows: existing } = await query(
     `SELECT * FROM incidents
@@ -163,22 +165,26 @@ export async function upsertIncident(
   );
 
   if (existing.length > 0) {
+    // Refresh message + full_log so the incident always reflects the
+    // latest (richest) capture of the recurring error.
     const { rows } = await query(
       `UPDATE incidents
-       SET event_count = event_count + 1, last_seen_at = now()
+       SET event_count = event_count + 1, last_seen_at = now(),
+           message = COALESCE($3, message),
+           full_log = COALESCE($4, full_log)
        WHERE id = $1 AND tenant_id = $2
        RETURNING *`,
-      [existing[0].id, tenantId],
+      [existing[0].id, tenantId, data.message ?? null, data.fullLog ?? null],
     );
     return mapIncident(rows[0]);
   }
 
   const id = crypto.randomUUID();
   const { rows } = await query(
-    `INSERT INTO incidents (id, tenant_id, service_id, fingerprint, message, status, event_count, first_seen_at, last_seen_at)
-     VALUES ($1, $2, $3, $4, $5, 'open', 1, now(), now())
+    `INSERT INTO incidents (id, tenant_id, service_id, fingerprint, message, full_log, status, event_count, first_seen_at, last_seen_at)
+     VALUES ($1, $2, $3, $4, $5, $6, 'open', 1, now(), now())
      RETURNING *`,
-    [id, tenantId, data.serviceId, data.fingerprint, data.message ?? null],
+    [id, tenantId, data.serviceId, data.fingerprint, data.message ?? null, data.fullLog ?? null],
   );
   return mapIncident(rows[0]);
 }

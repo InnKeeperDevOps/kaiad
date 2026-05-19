@@ -104,6 +104,8 @@ export type Incident = {
   fingerprint: string;
   status: string;
   message?: string;
+  /** Full captured log / stack trace for the incident. */
+  fullLog?: string;
   firstSeenAt: string;
   lastSeenAt: string;
   eventCount: number;

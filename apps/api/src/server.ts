@@ -1451,7 +1451,15 @@ export function buildServer(opts: BuildServerOptions = {}) {
                 await domainStore.upsertIncident(tenantId, {
                   serviceId: service.id,
                   fingerprint: upsert.group.fingerprint,
-                  message: upsert.group.sampleMessage
+                  message: upsert.group.sampleMessage,
+                  // The agent now ships the whole error burst (the
+                  // stack trace incl. "Caused by:") in contextLines —
+                  // store it so the Incidents page can show the full
+                  // log and the AI fix prompt has the real exception.
+                  fullLog:
+                    Array.isArray(msg.contextLines) && msg.contextLines.length > 0
+                      ? msg.contextLines.join("\n")
+                      : upsert.group.sampleMessage
                 });
               } catch (err) {
                 req.log?.warn?.({ event: "incident.upsert_failed", err: String(err) });

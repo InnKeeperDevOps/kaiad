@@ -43,6 +43,17 @@ export interface KaiadFixResult {
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 
+// The AI CLIs refuse to run as root ("--dangerously-skip-permissions /
+// bypassPermissions cannot be used with root"). The kaiad container
+// runs as root, so the CLI subprocess is dropped to an unprivileged
+// uid (the node:22 image ships `node` = uid/gid 1000 with /home/node).
+// git runs as root before/after, so the scratch tree is chowned to the
+// CLI uid for the CLI step and back to root for commit/push.
+const FIX_UID = Number(process.env.SM_FIX_UID) || 1000;
+const FIX_GID = Number(process.env.SM_FIX_GID) || 1000;
+const FIX_HOME = process.env.SM_FIX_HOME || "/home/node";
+const runningAsRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
 // normalizePEM repairs transport damage to a key without changing its
 // content: CRLF/CR → LF and exactly one trailing newline. Both are
 // required by OpenSSH and routinely lost when a key is pasted through a
@@ -54,7 +65,7 @@ function normalizePEM(s: string): string {
 function run(
   bin: string,
   args: string[],
-  opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs: number }
+  opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs: number; uid?: number; gid?: number }
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     execFile(
@@ -64,7 +75,9 @@ function run(
         cwd: opts.cwd,
         env: opts.env ?? process.env,
         timeout: opts.timeoutMs,
-        maxBuffer: 16 * 1024 * 1024
+        maxBuffer: 16 * 1024 * 1024,
+        ...(opts.uid != null ? { uid: opts.uid } : {}),
+        ...(opts.gid != null ? { gid: opts.gid } : {})
       },
       (err, stdout, stderr) => {
         const e = err as (NodeJS.ErrnoException & { code?: number | string }) | null;
@@ -153,13 +166,36 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
 
     const prompt = buildFixPrompt(p.repoUrl, branch, p.errorMessage, p.contextLines);
     // claude: -p non-interactive; bypassPermissions skips the prompt
-    // gate without the --dangerously-skip-permissions root guard.
-    // cursor-agent: -p headless, --force skips edit approval.
+    // gate. cursor-agent: -p headless, --force skips edit approval.
     const [bin, args] =
       p.executor === "cursor"
         ? ["cursor-agent", ["-p", prompt, "--force"]]
         : ["claude", ["-p", "--permission-mode", "bypassPermissions", prompt]];
-    const cli = await run(bin, args, { cwd: scratch, env, timeoutMs });
+
+    // Drop the CLI to a non-root uid (it refuses to run as root). git
+    // stays root, so hand the tree to the CLI uid for this step only.
+    const cliEnv: NodeJS.ProcessEnv = { ...env };
+    let cliUid: number | undefined;
+    let cliGid: number | undefined;
+    if (runningAsRoot) {
+      await run("chown", ["-R", `${FIX_UID}:${FIX_GID}`, scratch], {
+        timeoutMs: 30000
+      });
+      cliEnv.HOME = FIX_HOME;
+      cliUid = FIX_UID;
+      cliGid = FIX_GID;
+    }
+    const cli = await run(bin, args, {
+      cwd: scratch,
+      env: cliEnv,
+      timeoutMs,
+      uid: cliUid,
+      gid: cliGid
+    });
+    if (runningAsRoot) {
+      // Reclaim ownership so the root git commit/push can write.
+      await run("chown", ["-R", "0:0", scratch], { timeoutMs: 30000 });
+    }
     const cliOut = cli.stdout + cli.stderr;
     if (cli.code !== 0) {
       return { ok: false, reason: "cli_failed", output: `${p.executor} failed:\n${cliOut}` };

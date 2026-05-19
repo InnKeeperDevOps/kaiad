@@ -534,9 +534,22 @@ export function buildServer(opts: BuildServerOptions = {}) {
       );
     }
   };
+  // Fastify's logger is disabled (app.log is a no-op here), so the fix
+  // pipeline logs to the console explicitly — same pattern as
+  // logAuthStep — otherwise the whole flow is undebuggable in prod.
+  const fixLog = (o: Record<string, unknown>) =>
+    console.log("[kaiad_fix]", JSON.stringify(o));
   const startKaiadFix = (a: KaiadFixStart): void => {
     void (async () => {
       const lockKey = fixServiceKey(a.tenantId, a.service.id);
+      fixLog({
+        event: "kaiad_fix.start",
+        groupId: a.group.id,
+        serviceId: a.service.id,
+        repo: a.service.gitRepoUrl,
+        branch: a.service.branch || "main",
+        executor: a.executor
+      });
       let result: Awaited<ReturnType<typeof runKaiadFix>>;
       try {
         result = await resolvedRunFix({
@@ -547,7 +560,10 @@ export function buildServer(opts: BuildServerOptions = {}) {
           executor: a.executor,
           errorMessage: a.group.sampleMessage,
           contextLines: a.contextLines,
-          logger: app.log
+          logger: {
+            info: (...m: unknown[]) => fixLog({ event: "kaiad_fix.info", m }),
+            warn: (...m: unknown[]) => fixLog({ event: "kaiad_fix.warn", m })
+          }
         });
       } catch (err) {
         result = { ok: false, reason: "error", output: String((err as Error)?.message ?? err) };
@@ -558,7 +574,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
           try {
             await domainStore.resolveIncidentByFingerprint(a.tenantId, a.service.id, a.group.fingerprint);
           } catch (e) {
-            app.log.warn?.({ event: "incident.resolve_failed", err: String(e) });
+            fixLog({ event: "incident.resolve_failed", err: String(e) });
           }
         } else if (result.reason === "auth") {
           errorGroups.setStatus(a.group.id, "missing_auth");
@@ -567,13 +583,14 @@ export function buildServer(opts: BuildServerOptions = {}) {
           // open so a later occurrence can retry.
           errorGroups.setStatus(a.group.id, "open");
         }
-        app.log.info?.({
+        fixLog({
           event: "kaiad_fix.done",
           groupId: a.group.id,
           serviceId: a.service.id,
           ok: result.ok,
           reason: result.reason,
-          commitSha: result.commitSha
+          commitSha: result.commitSha,
+          output: result.output?.slice(0, 800)
         });
         broadcastGroup(a.tenantId, a.group.id);
       } finally {

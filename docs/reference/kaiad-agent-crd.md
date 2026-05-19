@@ -88,18 +88,24 @@ any Role/ClusterRole. Anything outside fails admission with
 
 | API Group | Resources | Permitted verbs |
 |-----------|-----------|-----------------|
-| `apps` | `deployments`, `statefulsets` | `get`, `list`, `watch`, `patch`, `update` |
+| `apps` | `deployments`, `statefulsets` | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
 | `apps` | `daemonsets` | `get`, `list`, `watch` |
 | `""` (core) | `pods`, `pods/log` | `get`, `list`, `watch` |
+| `""` (core) | `services` | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
+| `""` (core) | `namespaces` | `get`, `list`, `watch`, `create` |
+| `""` (core) | `secrets` | `create`, `delete` (write-only — no read) |
 | `""` (core) | `events` | `get`, `list`, `watch`, `create`, `patch` |
 | `""` (core) | `configmaps` | `get`, `list`, `watch` |
+| `networking.k8s.io` | `ingresses` | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
+| `metrics.k8s.io` | `pods` | `get`, `list` (read-only — Agents-page CPU/memory) |
 | `batch` | `jobs` | `get`, `list`, `watch`, `create`, `delete` |
 | `batch` | `cronjobs` | `get`, `list`, `watch` |
 
 The intent is that **a tenant who can apply a `KaiadAgent` CR cannot
-escalate to cluster-admin or read Secrets through it.** Adding a row
-should be a deliberate decision — pair it with a test in
-`deploy/operator/internal/controller/rbac_test.go`.
+escalate to cluster-admin or read Secrets through it** — note `secrets`
+is create/delete only (the agent writes its own image-pull Secret but
+can never read one). Adding a row should be a deliberate decision —
+pair it with a test in `deploy/operator/internal/controller/rbac_test.go`.
 
 Source: **`deploy/operator/internal/controller/allowlist.go`**.
 

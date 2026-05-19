@@ -396,17 +396,57 @@ the allow-list contains:
 
 | API Group | Resources | Verbs |
 |----|----|----|
-| `apps` | `deployments`, `statefulsets` | `get`, `list`, `watch`, `patch`, `update` |
+| `apps` | `deployments`, `statefulsets` | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
 | `apps` | `daemonsets` | `get`, `list`, `watch` |
 | (core) | `pods`, `pods/log` | `get`, `list`, `watch` |
+| (core) | `services` | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
+| (core) | `namespaces` | `get`, `list`, `watch`, `create` |
+| (core) | `secrets` | `create`, `delete` (write-only — the agent can never *read* a Secret) |
 | (core) | `events` | `get`, `list`, `watch`, `create`, `patch` |
 | (core) | `configmaps` | `get`, `list`, `watch` |
+| `networking.k8s.io` | `ingresses` | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
+| `metrics.k8s.io` | `pods` | `get`, `list` (read-only — Agents-page CPU/memory; see below) |
 | `batch` | `jobs` | `get`, `list`, `watch`, `create`, `delete` |
 | `batch` | `cronjobs` | `get`, `list`, `watch` |
 
-Anything outside this list — including `secrets`, `clusterroles`, or
+`create`/`delete` on `deployments`/`services`/`ingresses` let the agent
+actually deploy + tear down a service; `namespaces.create` lets it
+self-provision the target namespace; `secrets` is **create/delete only**
+(the agent writes its own image-pull Secret but can never read any
+Secret). Anything outside this list — `clusterroles`, secret *reads*,
 wildcards — is rejected at admission time and surfaced as
 `Ready=False, Reason=InvalidSpec`.
+
+## Pod metrics in the Agents page (requires metrics-server)
+
+The Agents page's per-agent detail panel shows, for every service the
+agent runs: **running instances, state, deployed version, namespace,
+load balancer, queued actions, and logs** — all work out of the box.
+
+The **CPU** and **Memory** columns additionally require
+[metrics-server](https://github.com/kubernetes-sigs/metrics-server) in
+the workload cluster: in `kubernetes` mode the agent samples per-pod
+usage with `kubectl top pods` (hence the read-only `metrics.k8s.io/pods`
+grant above). Without metrics-server those two columns show `—`;
+nothing else is affected.
+
+```bash
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+```
+
+If `v1beta1.metrics.k8s.io` stays `MissingEndpoints` after ~1 min,
+metrics-server can't verify the kubelet's self-signed serving cert
+(common on bare-metal / kubeadm clusters). Add the insecure-TLS flag:
+
+```bash
+kubectl -n kube-system patch deploy metrics-server --type=json \
+  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+```
+
+Once `kubectl top pods` returns numbers the panel populates on the next
+agent telemetry tick — no Kaiad restart or redeploy needed. (Network
+throughput isn't exposed by the Kubernetes metrics API, so it stays
+blank for `kubernetes`-mode agents.)
 
 If your workflow needs a verb not in the allow-list, that's a deliberate
 review point — open an issue rather than working around it.

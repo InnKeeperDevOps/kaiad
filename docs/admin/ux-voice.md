@@ -1,6 +1,6 @@
 ---
 title: UX Voice & Terminology
-nav_order: 9
+nav_order: 8
 ---
 
 # UX voice & terminology

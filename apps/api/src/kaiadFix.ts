@@ -9,7 +9,7 @@
 // → push to the service's configured branch. The CLI authenticates via
 // its own logged-in session (e.g. ~/.claude), NOT an API key.
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile, chmod } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -130,10 +130,14 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
   const timeoutMs = p.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const branch = p.branch || "main";
   const scratch = await mkdtemp(join(tmpdir(), "kaiad-fix-"));
+  // Clone into a subdir so the SSH key file (and anything else under
+  // scratch) doesn't make `git clone .` see a non-empty target.
+  const repoDir = join(scratch, "repo");
   let keyPath: string | null = null;
   const env: NodeJS.ProcessEnv = { ...process.env };
 
   try {
+    await mkdir(repoDir, { recursive: true });
     if (p.sshKeyType === "uploaded" && p.sshKeyValue) {
       keyPath = join(scratch, ".sshkey");
       await writeFile(keyPath, normalizePEM(p.sshKeyValue), { mode: 0o600 });
@@ -146,7 +150,7 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
     const clone = await run(
       "git",
       ["clone", "--branch", branch, "--single-branch", p.repoUrl, "."],
-      { cwd: scratch, env, timeoutMs }
+      { cwd: repoDir, env, timeoutMs }
     );
     if (clone.code !== 0) {
       const out = clone.stdout + clone.stderr;
@@ -161,7 +165,7 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       ["user.email", "kaiad-bot@kaiad.dev"],
       ["user.name", "Kaiad Auto-Fix"]
     ]) {
-      await run("git", ["config", k, v], { cwd: scratch, env, timeoutMs: 15000 });
+      await run("git", ["config", k, v], { cwd: repoDir, env, timeoutMs: 15000 });
     }
 
     const prompt = buildFixPrompt(p.repoUrl, branch, p.errorMessage, p.contextLines);
@@ -178,7 +182,7 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
     let cliUid: number | undefined;
     let cliGid: number | undefined;
     if (runningAsRoot) {
-      await run("chown", ["-R", `${FIX_UID}:${FIX_GID}`, scratch], {
+      await run("chown", ["-R", `${FIX_UID}:${FIX_GID}`, repoDir], {
         timeoutMs: 30000
       });
       cliEnv.HOME = FIX_HOME;
@@ -186,7 +190,7 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       cliGid = FIX_GID;
     }
     const cli = await run(bin, args, {
-      cwd: scratch,
+      cwd: repoDir,
       env: cliEnv,
       timeoutMs,
       uid: cliUid,
@@ -194,7 +198,7 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
     });
     if (runningAsRoot) {
       // Reclaim ownership so the root git commit/push can write.
-      await run("chown", ["-R", "0:0", scratch], { timeoutMs: 30000 });
+      await run("chown", ["-R", "0:0", repoDir], { timeoutMs: 30000 });
     }
     const cliOut = cli.stdout + cli.stderr;
     if (cli.code !== 0) {
@@ -202,7 +206,7 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
     }
 
     const status = await run("git", ["status", "--porcelain"], {
-      cwd: scratch,
+      cwd: repoDir,
       env,
       timeoutMs: 15000
     });
@@ -210,10 +214,10 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       return { ok: false, reason: "no_changes", output: `${p.executor} made no changes.\n${cliOut}` };
     }
 
-    await run("git", ["add", "-A"], { cwd: scratch, env, timeoutMs: 30000 });
+    await run("git", ["add", "-A"], { cwd: repoDir, env, timeoutMs: 30000 });
     const commitMsg = `fix(auto): ${p.errorMessage.split("\n")[0].slice(0, 72)}`;
     const commit = await run("git", ["commit", "-m", commitMsg], {
-      cwd: scratch,
+      cwd: repoDir,
       env,
       timeoutMs: 30000
     });
@@ -222,7 +226,7 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
     }
 
     const push = await run("git", ["push", "origin", branch], {
-      cwd: scratch,
+      cwd: repoDir,
       env,
       timeoutMs
     });
@@ -236,7 +240,7 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
     }
 
     const rev = await run("git", ["rev-parse", "HEAD"], {
-      cwd: scratch,
+      cwd: repoDir,
       env,
       timeoutMs: 15000
     });

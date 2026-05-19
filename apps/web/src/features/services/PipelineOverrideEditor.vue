@@ -147,6 +147,29 @@ function arr(p: AnyObj, parentKey: string | null, key: string): AnyObj[] {
   if (!Array.isArray(parent[key])) parent[key] = [];
   return parent[key];
 }
+// String-array (argv / steps / artifacts / layers / dependsOn) row edit.
+function strArr(p: AnyObj, parentKey: string | null, key: string): string[] {
+  const parent = parentKey ? ensure(p, parentKey, {}) : p;
+  if (!Array.isArray(parent[key])) parent[key] = [];
+  return parent[key] as string[];
+}
+function setStr(list: string[], i: number, ev: Event) {
+  list[i] = (ev.target as HTMLInputElement).value;
+  syncYamlFromForm();
+}
+// Generic key/value map editing (build.env, dockerfile.args).
+function kvObj(p: AnyObj, parentKey: string, key: string): AnyObj {
+  return ensure(ensure(p, parentKey, {}), key, {});
+}
+function addKv(obj: AnyObj, ev: Event) {
+  const el = ev.target as HTMLInputElement;
+  const k = el.value.trim();
+  if (k) {
+    obj[k] = "";
+    el.value = "";
+    syncYamlFromForm();
+  }
+}
 function envObj(p: AnyObj): AnyObj {
   return ensure(ensure(p, "runtime", {}), "env", {});
 }
@@ -495,6 +518,121 @@ async function clearOverride() {
             <Button variant="secondary" size="sm" @click="arr(entry.p, 'runtime', 'volumes').push({ name: 'vol', nfs: { server: '', path: '/' }, mounts: [{ path: '/' }] }); syncYamlFromForm()">+ Volume</Button>
           </section>
 
+          <!-- Runtime image + command -->
+          <section class="pl-section">
+            <h4 class="pl-section__title">Runtime image &amp; command</h4>
+            <div class="pl-row">
+              <label class="pl-label">Image</label>
+              <input class="sm-input pl-in" :value="ensure(entry.p,'runtime',{}).image" @input="ensure(entry.p,'runtime',{}).image = ($event.target as HTMLInputElement).value; syncYamlFromForm()" placeholder="nginx:alpine" />
+            </div>
+            <div v-for="(c, i) in strArr(entry.p, 'runtime', 'command')" :key="'c'+i" class="pl-row">
+              <span class="pl-hint">argv[{{ i }}]</span>
+              <input class="sm-input pl-in" :value="c" @input="setStr(strArr(entry.p,'runtime','command'), i, $event)" placeholder="/start.sh" />
+              <Button variant="ghost" size="sm" @click="strArr(entry.p,'runtime','command').splice(i,1); syncYamlFromForm()">✕</Button>
+            </div>
+            <Button variant="secondary" size="sm" @click="strArr(entry.p,'runtime','command').push(''); syncYamlFromForm()">+ Command arg</Button>
+          </section>
+
+          <!-- Scaling / kind / dependsOn -->
+          <section class="pl-section">
+            <h4 class="pl-section__title">Deployment</h4>
+            <div class="pl-row">
+              <label class="pl-label">Instances</label>
+              <input class="sm-input pl-in pl-in--xs" type="number" min="0" v-model.number="entry.p.instances" @input="syncYamlFromForm" placeholder="1" />
+              <label class="pl-label">Kind</label>
+              <select class="sm-input pl-in pl-in--sm" v-model="entry.p.kind" @change="syncYamlFromForm">
+                <option value="deployable">deployable</option>
+                <option value="supporting">supporting</option>
+              </select>
+              <label class="pl-label">Namespace</label>
+              <input class="sm-input pl-in pl-in--sm" v-model="entry.p.namespace" @input="syncYamlFromForm" placeholder="(default)" />
+            </div>
+            <div v-for="(d, i) in strArr(entry.p, null, 'dependsOn')" :key="'dep'+i" class="pl-row">
+              <span class="pl-hint">dependsOn</span>
+              <input class="sm-input pl-in pl-in--sm" :value="d" @input="setStr(strArr(entry.p,null,'dependsOn'), i, $event)" placeholder="php-image" />
+              <Button variant="ghost" size="sm" @click="strArr(entry.p,null,'dependsOn').splice(i,1); syncYamlFromForm()">✕</Button>
+            </div>
+            <Button variant="secondary" size="sm" @click="strArr(entry.p,null,'dependsOn').push(''); syncYamlFromForm()">+ Depends on</Button>
+          </section>
+
+          <!-- Build -->
+          <section class="pl-section">
+            <h4 class="pl-section__title">Build <span class="pl-hint">repo build step (exclusive with Dockerfile mode)</span></h4>
+            <div class="pl-row">
+              <label class="pl-label">Build image</label>
+              <input class="sm-input pl-in" :value="ensure(entry.p,'build',{}).image" @input="ensure(entry.p,'build',{}).image = ($event.target as HTMLInputElement).value; syncYamlFromForm()" placeholder="maven:3.9-eclipse-temurin-17" />
+            </div>
+            <div v-for="(st, i) in strArr(entry.p, 'build', 'steps')" :key="'bs'+i" class="pl-row">
+              <span class="pl-hint">step {{ i + 1 }}</span>
+              <input class="sm-input pl-in" :value="st" @input="setStr(strArr(entry.p,'build','steps'), i, $event)" placeholder="mvn -B package" />
+              <Button variant="ghost" size="sm" @click="strArr(entry.p,'build','steps').splice(i,1); syncYamlFromForm()">✕</Button>
+            </div>
+            <Button variant="secondary" size="sm" @click="strArr(entry.p,'build','steps').push(''); syncYamlFromForm()">+ Build step</Button>
+            <div :style="{ marginTop: '0.4rem' }">
+              <span class="pl-hint">build env</span>
+              <div v-for="k in Object.keys(kvObj(entry.p,'build','env'))" :key="'be'+k" class="pl-row">
+                <input class="sm-input pl-in pl-in--sm" :value="k" readonly />
+                <span class="pl-eq">=</span>
+                <input class="sm-input pl-in" v-model="kvObj(entry.p,'build','env')[k]" @input="syncYamlFromForm" />
+                <Button variant="ghost" size="sm" @click="delete kvObj(entry.p,'build','env')[k]; syncYamlFromForm()">✕</Button>
+              </div>
+              <div class="pl-row">
+                <input class="sm-input pl-in pl-in--sm" placeholder="KEY — Enter" @keyup.enter="addKv(kvObj(entry.p,'build','env'), $event)" />
+              </div>
+            </div>
+          </section>
+
+          <!-- Artifacts, copy, layers -->
+          <section class="pl-section">
+            <h4 class="pl-section__title">Artifacts &amp; runtime layers</h4>
+            <div v-for="(a, i) in strArr(entry.p, null, 'artifacts')" :key="'art'+i" class="pl-row">
+              <span class="pl-hint">artifact</span>
+              <input class="sm-input pl-in pl-in--sm" :value="a" @input="setStr(strArr(entry.p,null,'artifacts'), i, $event)" placeholder="app.jar" />
+              <Button variant="ghost" size="sm" @click="strArr(entry.p,null,'artifacts').splice(i,1); syncYamlFromForm()">✕</Button>
+            </div>
+            <Button variant="secondary" size="sm" @click="strArr(entry.p,null,'artifacts').push(''); syncYamlFromForm()">+ Artifact</Button>
+            <div :style="{ marginTop: '0.4rem' }">
+              <div v-for="(l, i) in strArr(entry.p, 'runtime', 'layers')" :key="'ly'+i" class="pl-row">
+                <span class="pl-hint">layer (artifact tar)</span>
+                <input class="sm-input pl-in pl-in--sm" :value="l" @input="setStr(strArr(entry.p,'runtime','layers'), i, $event)" placeholder="rootfs.tar" />
+                <Button variant="ghost" size="sm" @click="strArr(entry.p,'runtime','layers').splice(i,1); syncYamlFromForm()">✕</Button>
+              </div>
+              <Button variant="secondary" size="sm" @click="strArr(entry.p,'runtime','layers').push(''); syncYamlFromForm()">+ Layer</Button>
+            </div>
+            <div :style="{ marginTop: '0.4rem' }">
+              <div v-for="(cp, i) in arr(entry.p, 'runtime', 'copy')" :key="'cp'+i" class="pl-row">
+                <span class="pl-hint">copy</span>
+                <input class="sm-input pl-in pl-in--sm" v-model="cp.from" @input="syncYamlFromForm" placeholder="from (artifact)" />
+                <span class="pl-eq">→</span>
+                <input class="sm-input pl-in" v-model="cp.to" @input="syncYamlFromForm" placeholder="/abs/path" />
+                <Button variant="ghost" size="sm" @click="arr(entry.p,'runtime','copy').splice(i,1); syncYamlFromForm()">✕</Button>
+              </div>
+              <Button variant="secondary" size="sm" @click="arr(entry.p,'runtime','copy').push({ from: '', to: '/' }); syncYamlFromForm()">+ Copy</Button>
+            </div>
+          </section>
+
+          <!-- Dockerfile mode -->
+          <section class="pl-section">
+            <h4 class="pl-section__title">Dockerfile mode <span class="pl-hint">exclusive with Build/Runtime</span></h4>
+            <div class="pl-row">
+              <label class="pl-label">Path</label>
+              <input class="sm-input pl-in pl-in--sm" :value="ensure(entry.p,'dockerfile',{}).path" @input="ensure(entry.p,'dockerfile',{}).path = ($event.target as HTMLInputElement).value; syncYamlFromForm()" placeholder="Dockerfile" />
+              <label class="pl-label">Context</label>
+              <input class="sm-input pl-in pl-in--sm" :value="ensure(entry.p,'dockerfile',{}).context" @input="ensure(entry.p,'dockerfile',{}).context = ($event.target as HTMLInputElement).value; syncYamlFromForm()" placeholder="." />
+              <label class="pl-label">Target</label>
+              <input class="sm-input pl-in pl-in--sm" :value="ensure(entry.p,'dockerfile',{}).target" @input="ensure(entry.p,'dockerfile',{}).target = ($event.target as HTMLInputElement).value; syncYamlFromForm()" placeholder="(stage)" />
+            </div>
+            <div v-for="k in Object.keys(kvObj(entry.p,'dockerfile','args'))" :key="'da'+k" class="pl-row">
+              <input class="sm-input pl-in pl-in--sm" :value="k" readonly />
+              <span class="pl-eq">=</span>
+              <input class="sm-input pl-in" v-model="kvObj(entry.p,'dockerfile','args')[k]" @input="syncYamlFromForm" />
+              <Button variant="ghost" size="sm" @click="delete kvObj(entry.p,'dockerfile','args')[k]; syncYamlFromForm()">✕</Button>
+            </div>
+            <div class="pl-row">
+              <input class="sm-input pl-in pl-in--sm" placeholder="build-arg — Enter" @keyup.enter="addKv(kvObj(entry.p,'dockerfile','args'), $event)" />
+            </div>
+          </section>
+
           <!-- Per-environment overrides -->
           <section class="pl-section">
             <h4 class="pl-section__title">Environment overrides</h4>
@@ -511,7 +649,8 @@ async function clearOverride() {
         </div>
 
         <p class="pl-muted pl-foot">
-          Build steps, command, image &amp; artifacts are edited in the Raw tab.
+          The form covers the full kaiad.yaml schema; the Raw tab stays
+          available for hand-editing or anything unusual.
         </p>
       </div>
 

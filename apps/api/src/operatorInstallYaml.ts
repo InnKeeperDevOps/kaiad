@@ -4,7 +4,7 @@
 // deploy/operator/charts/kaiad-operator/ is the source of truth — the
 // constants below MUST stay in sync with the chart templates.
 
-const APP_VERSION = "0.1.6";
+const APP_VERSION = "0.1.7";
 const NAME = "kaiad-operator";
 
 // Mirrors deploy/operator/charts/kaiad-operator/crds/kaiadagents.yaml.
@@ -197,6 +197,9 @@ const CLUSTER_ROLE_RULES = `  - apiGroups: ["kaiad.dev"]
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

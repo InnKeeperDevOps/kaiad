@@ -44,6 +44,28 @@ func TestParseMemBytes(t *testing.T) {
 	}
 }
 
+func TestParseProcNetDev(t *testing.T) {
+	sample := `Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo:  12345     100    0    0    0     0          0         0    12345     100    0    0    0     0       0          0
+  eth0: 154712553  9999    0    0    0     0          0         0   908080    4321    0    0    0     0       0          0
+  eth1:   1000       10    0    0    0     0          0         0     2000      20    0    0    0     0       0          0`
+	rx, tx, ok := parseProcNetDev([]byte(sample))
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if rx != 154712553+1000 {
+		t.Fatalf("rx = %d, want %d", rx, 154712553+1000)
+	}
+	if tx != 908080+2000 {
+		t.Fatalf("tx = %d, want %d", tx, 908080+2000)
+	}
+	// lo excluded, headers ignored.
+	if _, _, ok := parseProcNetDev([]byte("no colon here\njust text")); ok {
+		t.Fatal("expected ok=false for non-/proc/net/dev content")
+	}
+}
+
 func TestK8sSamplerSkipsNonK8sBackend(t *testing.T) {
 	s := NewK8sSampler(func() string { return "docker" })
 	frames, err := s.Build("agent-1")

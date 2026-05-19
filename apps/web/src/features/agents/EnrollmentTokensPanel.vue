@@ -184,6 +184,11 @@ function buildKaiadAgentManifest(opts: {
     "    - apiGroups: [\"\"]",
     "      resources: [\"pods\", \"pods/log\"]",
     "      verbs: [\"get\", \"list\", \"watch\"]",
+    // kubectl exec — the k8s app_stats sampler reads per-pod network
+    // counters from inside each pod (no first-party API exposes them).
+    "    - apiGroups: [\"\"]",
+    "      resources: [\"pods/exec\"]",
+    "      verbs: [\"create\"]",
     // read-only pod metrics for the agent's k8s app_stats sampler
     // (kubectl top pods); needs metrics-server in the cluster.
     "    - apiGroups: [\"metrics.k8s.io\"]",

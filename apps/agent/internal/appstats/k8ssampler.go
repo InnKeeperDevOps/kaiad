@@ -13,19 +13,33 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const serviceIDLabel = "kaiad.dev/service-id"
 
+type netSample struct {
+	at time.Time
+	rx uint64
+	tx uint64
+}
+
 // K8sSampler emits app_stats frames for kaiad-deployed pods via kubectl.
 type K8sSampler struct {
 	backendFn func() string
 	timeout   time.Duration
+
+	mu     sync.Mutex
+	lastNet map[string]netSample // keyed by "namespace/pod"
 }
 
 func NewK8sSampler(getBackend func() string) *K8sSampler {
-	return &K8sSampler{backendFn: getBackend, timeout: 10 * time.Second}
+	return &K8sSampler{
+		backendFn: getBackend,
+		timeout:   10 * time.Second,
+		lastNet:   make(map[string]netSample),
+	}
 }
 
 type k8sPodList struct {
@@ -117,11 +131,88 @@ func (k *K8sSampler) Build(agentID string) ([][]byte, error) {
 		if b, ok := memBytes[key]; ok {
 			msg["memUsedBytes"] = b
 		}
+		// Per-pod network: no first-party k8s API exposes it on common
+		// containerd+CNI setups, so read the kernel counters from inside
+		// the pod's net namespace and rate them from the prior sample.
+		if rx, tx, ok := k.podNet(ctx, p.Metadata.Namespace, p.Metadata.Name); ok {
+			now := time.Now()
+			k.mu.Lock()
+			prev, had := k.lastNet[key]
+			k.lastNet[key] = netSample{at: now, rx: rx, tx: tx}
+			k.mu.Unlock()
+			if had {
+				dt := now.Sub(prev.at).Seconds()
+				if dt > 0 && rx >= prev.rx && tx >= prev.tx {
+					msg["netRxBytesPerSec"] = float64(rx-prev.rx) / dt
+					msg["netTxBytesPerSec"] = float64(tx-prev.tx) / dt
+				}
+			}
+		}
 		if buf, merr := json.Marshal(msg); merr == nil {
 			frames = append(frames, buf)
 		}
 	}
+	// Prune net history for pods that disappeared.
+	live := make(map[string]struct{}, len(list.Items))
+	for _, p := range list.Items {
+		live[p.Metadata.Namespace+"/"+p.Metadata.Name] = struct{}{}
+	}
+	k.mu.Lock()
+	for kk := range k.lastNet {
+		if _, ok := live[kk]; !ok {
+			delete(k.lastNet, kk)
+		}
+	}
+	k.mu.Unlock()
 	return frames, nil
+}
+
+// podNet reads cumulative rx/tx bytes (summed over non-loopback
+// interfaces) from inside a pod via `kubectl exec … cat /proc/net/dev`.
+// Best-effort: returns ok=false on any error (no shell/cat, exec
+// forbidden, distroless image, timeout) — that pod just shows no net.
+func (k *K8sSampler) podNet(ctx context.Context, ns, pod string) (uint64, uint64, bool) {
+	ectx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ectx, "kubectl", "-n", ns, "exec", pod,
+		"--", "cat", "/proc/net/dev").Output()
+	if err != nil {
+		return 0, 0, false
+	}
+	return parseProcNetDev(out)
+}
+
+// parseProcNetDev sums rx/tx bytes over all non-loopback interfaces in
+// /proc/net/dev content. Returns ok=false when no usable iface line is
+// found. Pure (no I/O) so it's unit-testable.
+func parseProcNetDev(out []byte) (uint64, uint64, bool) {
+	var rx, tx uint64
+	any := false
+	for _, line := range strings.Split(string(out), "\n") {
+		i := strings.IndexByte(line, ':')
+		if i < 0 {
+			continue // header lines have no ':'
+		}
+		iface := strings.TrimSpace(line[:i])
+		if iface == "" || iface == "lo" {
+			continue
+		}
+		f := strings.Fields(line[i+1:])
+		// receive: bytes packets errs drop fifo frame compressed multicast
+		// transmit: bytes(8) packets errs drop fifo colls carrier compressed
+		if len(f) < 9 {
+			continue
+		}
+		r, e1 := strconv.ParseUint(f[0], 10, 64)
+		t, e2 := strconv.ParseUint(f[8], 10, 64)
+		if e1 != nil || e2 != nil {
+			continue
+		}
+		rx += r
+		tx += t
+		any = true
+	}
+	return rx, tx, any
 }
 
 // topMetrics parses `kubectl top pods -A -l <label> --no-headers`.

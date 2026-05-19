@@ -399,6 +399,7 @@ the allow-list contains:
 | `apps` | `deployments`, `statefulsets` | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
 | `apps` | `daemonsets` | `get`, `list`, `watch` |
 | (core) | `pods`, `pods/log` | `get`, `list`, `watch` |
+| (core) | `pods/exec` | `create` (kubectl exec — in-pod network sampling) |
 | (core) | `services` | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
 | (core) | `namespaces` | `get`, `list`, `watch`, `create` |
 | (core) | `secrets` | `create`, `delete` (write-only — the agent can never *read* a Secret) |
@@ -448,40 +449,30 @@ agent telemetry tick — no Kaiad restart or redeploy needed.
 
 ### Network throughput (k8s)
 
-The **Net (rx/tx)** column is populated for **docker**-mode agents (the
-agent reads it from the container runtime). For **kubernetes**-mode
-agents it stays `—`, and that's a Kubernetes limitation, not a Kaiad
-one:
+The **Net (rx/tx)** column is populated for both **docker** mode (read
+from the container runtime) and **kubernetes** mode.
 
-- `metrics.k8s.io` (`kubectl top`) reports **CPU and memory only** — no
-  network, by API design.
-- The kubelet **Summary API** (`/stats/summary`) has a per-pod
-  `network` block, but on many `containerd` + CNI setups it is `null`
-  (the pod sandbox's interface counters aren't surfaced to cAdvisor).
-- The kubelet **cAdvisor** endpoint (`/metrics/cadvisor`) often only
-  carries node-root `container_network_*` series (`pod=""`), i.e. no
-  per-pod breakdown.
+No first-party Kubernetes API exposes per-pod network on common
+`containerd` + CNI setups — `metrics.k8s.io`/`kubectl top` is
+CPU/memory only by design; the kubelet **Summary API** `network` block
+is frequently `null`; and cAdvisor often carries only node-root
+`container_network_*` (`pod=""`). So in `kubernetes` mode the agent
+reads the kernel counters **inside each pod's network namespace**:
+`kubectl exec <pod> -- cat /proc/net/dev`, summed over non-loopback
+interfaces, rated against the previous sample. This is why the agent
+RBAC allow-list includes `pods/exec` (`create`).
 
-So there is frequently **no per-pod network counter to read** through
-any first-party Kubernetes API, regardless of RBAC. Kaiad deliberately
-does not ship a privileged kubelet/`nodes/proxy` scraper for data that
-is empty on these clusters.
+Trade-off and caveats:
 
-To get per-pod network in the panel you need a **cluster-side network
-metrics source** that actually tracks it — typically an eBPF/CNI
-exporter:
-
-- **Cilium** — enable Hubble metrics
-  (`hubble.metrics.enabled={flow,...}`); exposes per-pod flow bytes.
-- **Calico** — enable Felix Prometheus metrics
-  (`FELIX_PROMETHEUSMETRICSENABLED=true`).
-- A node `cAdvisor`/CNI combination that populates per-pod
-  `container_network_*` (runtime-dependent).
-
-These publish Prometheus series, not the kubelet/metrics-API shape the
-agent samples today, so surfacing them in the Agents panel is a future
-Kaiad integration rather than an automatic pickup — track it as a
-separate enhancement if you want it wired in.
+- `pods/exec` lets the agent run a command in pods it manages — a real
+  privilege, granted only because **no read-only source for this data
+  exists** on these clusters. It's the same allow-list governed by the
+  operator; remove the rule from `spec.manages` if you'd rather forgo
+  k8s network stats.
+- Best-effort: a pod whose image has no shell/`cat` (e.g. `distroless`
+  / `scratch`) simply shows no net — CPU/mem/instances are unaffected.
+- The first sample establishes the baseline; rates appear from the
+  second telemetry tick onward.
 
 If your workflow needs a verb not in the allow-list, that's a deliberate
 review point — open an issue rather than working around it.

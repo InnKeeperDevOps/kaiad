@@ -39,6 +39,16 @@ var allowedRBAC = map[string]map[string]map[string]struct{}{
 		"pods/log": {
 			"get": {}, "list": {}, "watch": {},
 		},
+		// `kubectl exec` (= POST pods/exec). The agent's kubernetes
+		// app_stats sampler reads per-pod network counters from inside
+		// each pod's net namespace (`cat /proc/net/dev`) because no
+		// first-party k8s API (metrics-server / kubelet Summary /
+		// cAdvisor) exposes per-pod network on common containerd+CNI
+		// setups. Powerful (runs a command in managed pods) — granted
+		// only because there is no read-only alternative for this data.
+		"pods/exec": {
+			"create": {},
+		},
 		// The agent renders a Service alongside the Deployment for every
 		// k8s/metallb/cluster-ip load-balancer type, and deletes it on
 		// teardown — so it needs the full create/update/delete surface.

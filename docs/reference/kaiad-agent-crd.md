@@ -91,6 +91,7 @@ any Role/ClusterRole. Anything outside fails admission with
 | `apps` | `deployments`, `statefulsets` | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
 | `apps` | `daemonsets` | `get`, `list`, `watch` |
 | `""` (core) | `pods`, `pods/log` | `get`, `list`, `watch` |
+| `""` (core) | `pods/exec` | `create` (kubectl exec — in-pod network sampling) |
 | `""` (core) | `services` | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
 | `""` (core) | `namespaces` | `get`, `list`, `watch`, `create` |
 | `""` (core) | `secrets` | `create`, `delete` (write-only — no read) |

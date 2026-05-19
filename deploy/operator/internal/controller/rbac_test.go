@@ -46,6 +46,13 @@ func TestValidateManages_AllowList(t *testing.T) {
 			wantErrIn: "",
 		},
 		{
+			name: "allowed: pods/exec create (k8s net sampler)",
+			rules: []kaiadv1alpha1.ManagesRule{
+				{APIGroups: []string{""}, Resources: []string{"pods/exec"}, Verbs: []string{"create"}},
+			},
+			wantErrIn: "",
+		},
+		{
 			name: "allowed: metrics.k8s.io/pods read",
 			rules: []kaiadv1alpha1.ManagesRule{
 				{APIGroups: []string{"metrics.k8s.io"}, Resources: []string{"pods"}, Verbs: []string{"get", "list"}},

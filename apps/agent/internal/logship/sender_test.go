@@ -118,6 +118,45 @@ func TestSenderFatalAlsoEmits(t *testing.T) {
 	}
 }
 
+func TestSenderCoalescesStackTraceIntoOneIncident(t *testing.T) {
+	inner := &fakeInner{}
+	errs := &fakeErr{}
+	s := NewSender(inner, errs, 50)
+
+	// A Spring/JVM crash: one top-level ERROR followed by the
+	// exception chain and frames. Every "Exception"/"Caused by" line
+	// is error-classified by the agent's log classifier, so without
+	// coalescing this produced ~5 separate incidents.
+	trace := []struct {
+		level, msg string
+	}{
+		{"error", "2026-05-19 ERROR o.s.boot.SpringApplication - Application run failed"},
+		{"error", "org.springframework.beans.factory.BeanCreationException: Error creating bean 'flyway'"},
+		{"info", "\tat org.springframework.beans.factory.support.AbstractBeanFactory.doGetBean(AbstractBeanFactory.java:333)"},
+		{"error", "Caused by: org.flywaydb.core.internal.exception.FlywaySqlException: Unable to obtain connection"},
+		{"error", "Caused by: java.sql.SQLException: path to './data/sitemanager.db': '/app/./data' does not exist"},
+		{"info", "\tat org.sqlite.core.NativeDB._open_utf8(Native Method)"},
+		{"info", "\t... 24 more"},
+	}
+	for _, l := range trace {
+		_ = s.SendLogEvent("a", "svc", l.level, l.msg)
+	}
+
+	if got := len(errs.errs); got != 1 {
+		t.Fatalf("stack trace produced %d incidents, want 1", got)
+	}
+	if errs.errs[0].message != trace[0].msg {
+		t.Fatalf("incident representative = %q, want the first error line", errs.errs[0].message)
+	}
+	// A fresh, unrelated log record ends the burst; a later error is a
+	// genuinely new incident.
+	_ = s.SendLogEvent("a", "svc", "info", "2026-05-19 INFO  Restarting AibeApplication")
+	_ = s.SendLogEvent("a", "svc", "error", "2026-05-19 ERROR pool - connection timeout")
+	if got := len(errs.errs); got != 2 {
+		t.Fatalf("post-recovery error should be a new incident; got %d frames, want 2", got)
+	}
+}
+
 func TestSenderTolerantOfNilErrSender(t *testing.T) {
 	inner := &fakeInner{}
 	s := NewSender(inner, nil, 5)

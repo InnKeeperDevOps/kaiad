@@ -65,16 +65,17 @@ FROM node:20-bookworm-slim AS agent-runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git openssh-client ca-certificates ripgrep curl \
- && rm -rf /var/lib/apt/lists/* \
- # Claude Code CLI on PATH for the "claude" fix executor. Cursor's
- # `cursor-agent` is the analogue for the "cursor" executor; install
- # it best-effort (its installer drops a glibc binary into /usr/local/bin).
- && npm install -g @anthropic-ai/claude-code \
- && (curl -fsSL https://cursor.com/install | bash -s -- --bin-dir /usr/local/bin || \
-     echo "cursor-agent install skipped (claude remains the default executor)") \
- # uid 1000: the unprivileged identity executeRunFixPlan switches the
- # AI CLI subprocess to (the CLIs refuse to run as root).
- && useradd -u 1000 -m -s /bin/sh claude
+ && rm -rf /var/lib/apt/lists/*
+# Claude Code CLI on PATH for the "claude" fix executor (the per-service
+# default). The "cursor" executor expects `cursor-agent` on PATH; its
+# installer is a curl|bash that isn't reliable inside the build sandbox,
+# so it is NOT baked here — set fix_executor=cursor only on agents where
+# cursor-agent has been provisioned separately.
+RUN npm install -g @anthropic-ai/claude-code
+# executeRunFixPlan runs the AI CLI as uid 1000 (the CLI refuses to run
+# as root). node:20-bookworm-slim already ships a `node` user at uid
+# 1000 with a home dir, which is exactly that unprivileged identity —
+# no extra useradd needed (and -u 1000 would collide).
 ARG AGENT_KUBECTL_VERSION=v1.30.5
 RUN curl -fsSL "https://dl.k8s.io/release/${AGENT_KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
       -o /usr/local/bin/kubectl \
@@ -185,7 +186,7 @@ ENV SM_EMBED_WORKER=1
 ENV KAIAD_DATA_DIR=/data
 # Defaults the boot-time publisher reads. Override per environment.
 ENV KAIAD_AGENT_BUNDLE=/opt/kaiad-agent.tar
-ENV KAIAD_AGENT_VERSION=0.1.13
+ENV KAIAD_AGENT_VERSION=0.1.14
 ENV KAIAD_OPERATOR_BUNDLE=/opt/kaiad-operator.tar
 ENV KAIAD_OPERATOR_VERSION=0.1.7
 ENV KAIAD_REGISTRY_INTERNAL=registry:5000

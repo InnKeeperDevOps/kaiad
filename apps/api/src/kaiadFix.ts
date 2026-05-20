@@ -114,39 +114,66 @@ function run(
   });
 }
 
-// runCli runs the AI CLI with stdin explicitly closed. The CLIs read a
-// prompt from argv but still probe stdin; without this they emit "no
-// stdin data received in 3s" and can misbehave. spawn (not execFile)
-// lets us set stdin to 'ignore'.
+// runCli runs the AI CLI with stdin explicitly closed and (when uid is
+// requested AND we are root) drops privileges via `setpriv` rather than
+// Node's spawn `{uid,gid}` option:
+//   - Node's spawn-with-uid keeps the parent's SUPPLEMENTARY GROUPS on
+//     the child (Node docs). claude-code under that path hangs until
+//     SIGKILL'd (reporting code 1 with empty stdout/stderr) when given
+//     the large production prompt + the kaiad container's env. The
+//     same invocation via `setpriv --clear-groups …` completes in
+//     seconds with real output.
+//   - setpriv keeps Node's own fork/exec untouched, and the explicit
+//     `--clear-groups` matches what a fresh login as that user would
+//     produce.
+// `signaled` distinguishes a timeout-kill from a genuine non-zero exit
+// so callers can produce useful error messages.
 function runCli(
   bin: string,
   args: string[],
   opts: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; uid?: number; gid?: number }
-): Promise<{ code: number; stdout: string; stderr: string }> {
+): Promise<{ code: number; stdout: string; stderr: string; signaled?: boolean }> {
   return new Promise((resolve) => {
-    const child = spawn(bin, args, {
+    let realBin = bin;
+    let realArgs = args;
+    if (opts.uid != null && runningAsRoot) {
+      realBin = "setpriv";
+      realArgs = [
+        "--reuid",
+        String(opts.uid),
+        "--regid",
+        String(opts.gid ?? opts.uid),
+        "--clear-groups",
+        "--",
+        bin,
+        ...args
+      ];
+    }
+    const child = spawn(realBin, realArgs, {
       cwd: opts.cwd,
       env: opts.env,
-      stdio: ["ignore", "pipe", "pipe"],
-      ...(opts.uid != null ? { uid: opts.uid } : {}),
-      ...(opts.gid != null ? { gid: opts.gid } : {})
+      stdio: ["ignore", "pipe", "pipe"]
     });
     let stdout = "";
     let stderr = "";
+    let signaled = false;
     child.stdout.on("data", (d) => {
       stdout += d;
     });
     child.stderr.on("data", (d) => {
       stderr += d;
     });
-    const timer = setTimeout(() => child.kill("SIGKILL"), opts.timeoutMs);
+    const timer = setTimeout(() => {
+      signaled = true;
+      child.kill("SIGKILL");
+    }, opts.timeoutMs);
     child.on("error", (e) => {
       clearTimeout(timer);
       resolve({ code: 1, stdout, stderr: stderr + String(e) });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      resolve({ code: code ?? 1, stdout, stderr });
+      resolve({ code: code ?? 1, stdout, stderr, signaled });
     });
   });
 }
@@ -321,7 +348,7 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
     // bails (claude exits 0 with no diff, or hits a transient error).
     // Resetting between attempts gives it a clean tree each try.
     const retryLimit = Math.max(1, Number(process.env.SM_FIX_RETRY_LIMIT) || 3);
-    let cli: { code: number; stdout: string; stderr: string } | null = null;
+    let cli: { code: number; stdout: string; stderr: string; signaled?: boolean } | null = null;
     let cliOut = "";
     let attempt = 0;
     let succeeded = false;
@@ -357,6 +384,9 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       const cliOutForUi = cliOut.length > 0 ? cliOut.slice(0, OUTPUT_HEAD) : "(no output)";
       // Per-attempt event; subsequent attempts are labelled "retry N/M".
       const attemptLabel = attempt > 1 ? ` (retry ${attempt}/${retryLimit})` : "";
+      const failMsg = cli.signaled
+        ? `${p.executor} timed out after ${Math.round(timeoutMs / 1000)}s (SIGKILL)${attemptLabel}`
+        : `${snippet(cliOut) || `${p.executor} exited ${cli.code}`}${attemptLabel}`;
       emit({
         step: "cli",
         ok: cli.code === 0,
@@ -365,7 +395,7 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
         output: cliOutForUi,
         message:
           cli.code !== 0
-            ? `${snippet(cliOut) || `${p.executor} exited ${cli.code}`}${attemptLabel}`
+            ? failMsg
             : attempt > 1
               ? `attempt ${attempt}/${retryLimit}`
               : undefined

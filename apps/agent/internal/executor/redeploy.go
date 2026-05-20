@@ -359,6 +359,63 @@ func teardownDocker(ctx context.Context, dc *docker.Client, serviceID, namespace
 	return CommandResult{Success: true, Output: out.String()}
 }
 
+// reapOrphanedK8sResources deletes every kaiad-managed k8s resource
+// labeled kaiad.dev/service-id=<serviceID> that lives OUTSIDE
+// `keepNamespace`. Used after a successful redeploy to clean up a
+// namespace change in kaiad.yaml (the old ns is left behind today —
+// pods there keep crashing and raising bogus incidents), and as part
+// of teardown_service (then keepNamespace="" — sweep everything).
+// Failures are captured into `out` but do not abort the sweep —
+// orphan cleanup is best-effort.
+func reapOrphanedK8sResources(ctx context.Context, serviceID, keepNamespace string, out *strings.Builder) {
+	if _, err := exec.LookPath("kubectl"); err != nil {
+		fmt.Fprintf(out, "orphan-reap: kubectl not on PATH; skipping\n")
+		return
+	}
+	// One list per kind keeps the parser dumb. Covers every resource
+	// the agent's renderK8sManifests creates for a service.
+	for _, kind := range []string{"deployment", "service", "ingress", "secret"} {
+		lctx, lcancel := context.WithTimeout(ctx, 15*time.Second)
+		listCmd := exec.CommandContext(lctx, "kubectl", "get", kind,
+			"--all-namespaces", "-l", LabelServiceID+"="+serviceID,
+			"-o", "jsonpath={range .items[*]}{.metadata.namespace}\t{.metadata.name}\n{end}")
+		listOut, listErr := listCmd.Output()
+		lcancel()
+		if listErr != nil {
+			continue // RBAC / kind-doesn't-apply: skip quietly.
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(listOut)), "\n") {
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, "\t", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			ns, name := parts[0], parts[1]
+			if keepNamespace != "" && ns == keepNamespace {
+				continue
+			}
+			dctx, dcancel := context.WithTimeout(ctx, 30*time.Second)
+			delCmd := exec.CommandContext(dctx, "kubectl", "delete", kind, name,
+				"-n", ns, "--ignore-not-found=true", "--wait=false")
+			delOutput, delErr := delCmd.CombinedOutput()
+			dcancel()
+			if delErr != nil {
+				fmt.Fprintf(out, "orphan-reap %s/%s in ns=%s: ERR %v: %s\n",
+					kind, name, ns, delErr, strings.TrimSpace(string(delOutput)))
+				log.Printf("[agent:orphan-reap] delete %s/%s ns=%q FAILED: %v: %s",
+					kind, name, ns, delErr, strings.TrimSpace(string(delOutput)))
+				continue
+			}
+			fmt.Fprintf(out, "orphan-reap %s/%s in ns=%s: %s\n",
+				kind, name, ns, strings.TrimSpace(string(delOutput)))
+			log.Printf("[agent:orphan-reap] deleted %s/%s ns=%q (svc=%s keep=%q): %s",
+				kind, name, ns, serviceID, keepNamespace, strings.TrimSpace(string(delOutput)))
+		}
+	}
+}
+
 func teardownKubernetes(ctx context.Context, serviceID, serviceName, namespace string) CommandResult {
 	if _, err := exec.LookPath("kubectl"); err != nil {
 		return CommandResult{Success: false, Output: "teardown_service: kubectl not on PATH"}
@@ -391,6 +448,11 @@ func teardownKubernetes(ctx context.Context, serviceID, serviceName, namespace s
 		}
 		out.WriteString("\n")
 	}
+	// Even after deleting the named-resource trio, OTHER namespaces
+	// may still hold older labelled resources (e.g. namespace was
+	// changed mid-life). Sweep all of them — teardown means the
+	// service is GONE from this agent's perspective.
+	reapOrphanedK8sResources(ctx, serviceID, "", &out)
 	return CommandResult{Success: true, Output: out.String()}
 }
 
@@ -912,6 +974,11 @@ func (e *Executor) redeployKubernetes(ctx context.Context, in redeployInput) Com
 	}
 	log.Printf("[agent:redeploy:k8s] kubectl apply OK service=%s ns=%q resource=%s lb=%s: %s",
 		in.serviceID, namespace, resourceName, in.loadBalancer.typ, strings.TrimSpace(string(combined)))
+
+	// Reap any labelled resources from a previous namespace — without
+	// this, a kaiad.yaml namespace change leaves the old Deployment
+	// crashing in the old ns and its pods keep raising incidents.
+	reapOrphanedK8sResources(ctx, in.serviceID, namespace, &out)
 
 	externalIP, externalHostname = queryK8sLbAddress(cctx, namespace, in.loadBalancer.typ, resourceName)
 

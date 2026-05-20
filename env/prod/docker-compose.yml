@@ -17,6 +17,10 @@ services:
       - REDIS_URL=redis://redis:6379
       - VITE_API_BASE=http://panel.kaiad.dev
       - KAIAD_ENCRYPTION_KEY=${KAIAD_ENCRYPTION_KEY}
+      # Per-attempt CLI timeout for the in-kaiad autonomous fix. A real
+      # claude run on a Spring repo takes ~3 min (clone → tool-use →
+      # Edit → exit), so 4 min gives headroom; retry loop caps total.
+      - SM_EXECUTOR_TIMEOUT_MS=900000
       # Internal worker→API command channel (redeploy_service etc.).
       # Required in production; the embedded worker and the
       # /api/v1/internal/* route share this via the same process env.

@@ -370,6 +370,8 @@ function createLazyDomainStore(resolve: () => Promise<DomainStore>): DomainStore
     resolveStaleIncidents: (cutoff) => get().then((s) => s.resolveStaleIncidents(cutoff)),
     recordFixProgress: (tenantId, serviceId, fingerprint, patch) =>
       get().then((s) => s.recordFixProgress(tenantId, serviceId, fingerprint, patch)),
+    getCurrentIncidentId: (tenantId, serviceId, fingerprint) =>
+      get().then((s) => s.getCurrentIncidentId(tenantId, serviceId, fingerprint)),
     listAgents: (tenantId) => get().then((s) => s.listAgents(tenantId)),
     getAgent: (tenantId, id) => get().then((s) => s.getAgent(tenantId, id)),
     recordAgentHeartbeat: (tenantId, data) =>
@@ -568,17 +570,34 @@ export function buildServer(opts: BuildServerOptions = {}) {
     void (async () => {
       const lockKey = fixServiceKey(a.tenantId, a.service.id);
       const branch = a.service.branch || "main";
+      // Pin the incident id ONCE at fix-start. Without this, every
+      // recordFixProgress call resolved "most recent incident for the
+      // fingerprint" independently — so when the agent shipped a new
+      // error mid-run a fresh incident appeared and events split
+      // across rows.
+      let incidentId: string | null = null;
+      try {
+        incidentId = await domainStore.getCurrentIncidentId(
+          a.tenantId,
+          a.service.id,
+          a.group.fingerprint
+        );
+      } catch (e) {
+        fixLog({ event: "fix_progress.lookup_failed", err: String(e) });
+      }
       fixLog({
         event: "kaiad_fix.start",
         groupId: a.group.id,
         serviceId: a.service.id,
+        incidentId,
         repo: a.service.gitRepoUrl,
         branch,
         executor: a.executor
       });
-      // Seed the fix-progress timeline on the incident.
+      // Seed the fix-progress timeline on the pinned incident.
       try {
         await domainStore.recordFixProgress(a.tenantId, a.service.id, a.group.fingerprint, {
+          incidentId: incidentId ?? undefined,
           status: "running",
           executor: a.executor,
           startedAt: new Date().toISOString(),
@@ -607,7 +626,10 @@ export function buildServer(opts: BuildServerOptions = {}) {
           // Each step appends an event AND advances incident.last_fix_status.
           onProgress: (ev) => {
             const nextStatus = stepToStatus[ev.step];
-            const patch: Parameters<typeof domainStore.recordFixProgress>[3] = { event: ev };
+            const patch: Parameters<typeof domainStore.recordFixProgress>[3] = {
+              incidentId: incidentId ?? undefined,
+              event: ev
+            };
             // Move the umbrella status forward when a step *starts*
             // (ev.ok undefined). When ev.ok === false, the timeline
             // freezes at that step until the final result is recorded
@@ -653,6 +675,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
         // commit sha) so the UI shows the result + last CLI output.
         try {
           await domainStore.recordFixProgress(a.tenantId, a.service.id, a.group.fingerprint, {
+            incidentId: incidentId ?? undefined,
             status: finalStatus,
             finishedAt: new Date().toISOString(),
             commitSha: result.commitSha ?? null,

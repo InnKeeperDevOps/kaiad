@@ -243,6 +243,11 @@ export async function recordFixProgress(
   serviceId: string,
   fingerprint: string,
   patch: {
+    /** Pin to a specific incident id (chosen at fix-start). Without
+     *  this, mid-run patches landed on whichever incident was most-recent
+     *  AT EACH CALL — so events split across rows when a fresh error
+     *  arrived during the fix. Always pass this for new code. */
+    incidentId?: string;
     status?: string;
     executor?: string;
     startedAt?: string;
@@ -274,14 +279,20 @@ export async function recordFixProgress(
     sets.push(`last_fix_events = COALESCE(last_fix_events, '[]'::jsonb) || $${values.length}::jsonb`);
   }
   if (sets.length === 0) return;
-  // Update the most recent incident for this (tenant, service,
-  // fingerprint) regardless of status. The runner's own finalize step
-  // fires AFTER resolveIncidentByFingerprint has flipped the incident
-  // to 'resolved'; an `status IN ('open','acknowledged')` filter here
-  // silently dropped that final patch and stuck last_fix_status at
-  // "running" forever. Manual operator resolve mid-run had the same
-  // effect. The progress timeline is tied to the incident's lifetime,
-  // not its current status, so always target it by id.
+  if (patch.incidentId) {
+    // Pinned-id path: every call from one fix-run targets the same row.
+    values.push(patch.incidentId);
+    await query(
+      `UPDATE incidents SET ${sets.join(", ")}
+         WHERE id = $${values.length}
+           AND tenant_id = $1 AND service_id = $2 AND fingerprint = $3`,
+      values,
+    );
+    return;
+  }
+  // Legacy fallback: update the most recent incident for this
+  // (tenant, service, fingerprint) regardless of status. Kept for
+  // back-compat; callers should pass `incidentId` whenever possible.
   await query(
     `UPDATE incidents SET ${sets.join(", ")}
        WHERE id = (
@@ -291,6 +302,25 @@ export async function recordFixProgress(
        )`,
     values,
   );
+}
+
+/** Resolve the most-recent incident id for (tenant, service, fingerprint).
+ *  Called at fix-start to pin every subsequent recordFixProgress call to
+ *  the same row, so events from one fix run can't split across siblings
+ *  if the agent ships a fresh error mid-run. */
+export async function getCurrentIncidentId(
+  query: QueryFn,
+  tenantId: string,
+  serviceId: string,
+  fingerprint: string,
+): Promise<string | null> {
+  const { rows } = await query(
+    `SELECT id FROM incidents
+       WHERE tenant_id = $1 AND service_id = $2 AND fingerprint = $3
+       ORDER BY last_seen_at DESC LIMIT 1`,
+    [tenantId, serviceId, fingerprint],
+  );
+  return rows.length > 0 ? String(rows[0].id) : null;
 }
 
 /** Mark any in-kaiad fix that has been "running"/cloning/cli/committing/

@@ -26,6 +26,7 @@ export type DomainStore = {
     serviceId: string,
     fingerprint: string,
     patch: {
+      incidentId?: string;
       status?: string;
       executor?: string;
       startedAt?: string;
@@ -36,6 +37,10 @@ export type DomainStore = {
       resetEvents?: boolean;
     }
   ): Promise<void>;
+  /** Lookup the most-recent incident id for (service, fingerprint) — pin
+   *  it at fix-start so all subsequent recordFixProgress calls target
+   *  the same row. */
+  getCurrentIncidentId(tenantId: string, serviceId: string, fingerprint: string): Promise<string | null>;
 
   listAgents(tenantId: string): Promise<Agent[]>;
   getAgent(tenantId: string, id: string): Promise<Agent | undefined>;
@@ -222,13 +227,18 @@ export function createMemoryDomainStore(): DomainStore {
       return n;
     },
     async recordFixProgress(tenantId, serviceId, fingerprint, patch) {
-      const inc = [...incidents.values()].find(
-        (i) =>
-          i.tenantId === tenantId &&
-          i.serviceId === serviceId &&
-          i.fingerprint === fingerprint &&
-          (i.status === "open" || i.status === "acknowledged")
-      );
+      const candidate =
+        patch.incidentId
+          ? incidents.get(patch.incidentId)
+          : [...incidents.values()]
+              .filter(
+                (i) =>
+                  i.tenantId === tenantId &&
+                  i.serviceId === serviceId &&
+                  i.fingerprint === fingerprint
+              )
+              .sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt))[0];
+      const inc = candidate && candidate.tenantId === tenantId ? candidate : undefined;
       if (!inc) return;
       const allowedStatuses = [
         "running",
@@ -260,6 +270,14 @@ export function createMemoryDomainStore(): DomainStore {
         const cur = Array.isArray(ix.lastFixEvents) ? (ix.lastFixEvents as unknown[]) : [];
         ix.lastFixEvents = [...cur, { at: new Date().toISOString(), ...patch.event }];
       }
+    },
+    async getCurrentIncidentId(tenantId, serviceId, fingerprint) {
+      const ix = [...incidents.values()]
+        .filter(
+          (i) => i.tenantId === tenantId && i.serviceId === serviceId && i.fingerprint === fingerprint
+        )
+        .sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt))[0];
+      return ix ? ix.id : null;
     },
     async resolveStaleIncidents(cutoff) {
       const cut = cutoff.getTime();

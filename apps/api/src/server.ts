@@ -2821,6 +2821,79 @@ export function buildServer(opts: BuildServerOptions = {}) {
     return { ok: true };
   });
 
+  // Manually trigger an in-kaiad fix for this incident (operator on the
+  // Incidents page). Reuses the existing startKaiadFix lifecycle so the
+  // timeline animates exactly like an auto-fix. Respects the per-service
+  // in-flight lock — if a fix is already running for the service, the
+  // second click returns 409 instead of stacking concurrent runs.
+  app.post<{ Params: { id: string } }>("/api/v1/incidents/:id/run-fix", async (req, reply) => {
+    const s = await authorize(req as any, reply as any, { perm: "incidents:write" });
+    if (!s) return;
+    const inc = await domainStore.getIncident(s.tenantId, req.params.id);
+    if (!inc) {
+      return reply.status(404).send(
+        apiErrorSchema.parse({ code: "NOT_FOUND", message: "Incident not found", correlationId: (req as any).correlationId })
+      );
+    }
+    const service = await domainStore.getService(s.tenantId, inc.serviceId);
+    if (!service) {
+      return reply.status(404).send(
+        apiErrorSchema.parse({ code: "NOT_FOUND", message: "Service for incident not found", correlationId: (req as any).correlationId })
+      );
+    }
+    if (!service.gitRepoUrl || !service.sshKeyId) {
+      return reply.status(400).send(
+        apiErrorSchema.parse({ code: "BAD_REQUEST", message: "Service is missing gitRepoUrl or sshKeyId", correlationId: (req as any).correlationId })
+      );
+    }
+    const lockKey = fixServiceKey(s.tenantId, service.id);
+    if (fixInFlightByService.has(lockKey)) {
+      return reply.status(409).send(
+        apiErrorSchema.parse({ code: "ALREADY_RUNNING", message: "A fix is already in flight for this service", correlationId: (req as any).correlationId })
+      );
+    }
+    const keyMaterial = await domainStore.getSshKeyMaterial(s.tenantId, service.sshKeyId);
+    if (!keyMaterial) {
+      return reply.status(400).send(
+        apiErrorSchema.parse({ code: "BAD_REQUEST", message: "SSH key material not found", correlationId: (req as any).correlationId })
+      );
+    }
+    // Synthesize / refresh an error group from the incident's stored
+    // message + fullLog so startKaiadFix has the same shape it gets
+    // from a live app_log_error.
+    const contextLines = inc.fullLog ? inc.fullLog.split("\n").filter((l) => l !== "") : [];
+    const upsert = errorGroups.upsert({
+      tenantId: s.tenantId,
+      agentId: "manual",
+      serviceId: service.id,
+      message: inc.message ?? "(manual fix)",
+      contextLines,
+      ts: new Date().toISOString()
+    });
+    // Force "open" so dispatch isn't suppressed by a stale "fixed" /
+    // "paused" — the operator explicitly asked for another shot.
+    errorGroups.setStatus(upsert.group.id, "open");
+    const group = errorGroups.get(upsert.group.id);
+    if (!group) {
+      return reply.status(500).send(
+        apiErrorSchema.parse({ code: "INTERNAL", message: "Error group missing after upsert", correlationId: (req as any).correlationId })
+      );
+    }
+    fixInFlightByService.add(lockKey);
+    errorGroups.setStatus(group.id, "fixing");
+    startKaiadFix({
+      commandId: `cmd-manual-${crypto.randomUUID()}`,
+      tenantId: s.tenantId,
+      service,
+      group,
+      sshKeyType: keyMaterial.type,
+      sshKeyValue: keyMaterial.privateKey ?? keyMaterial.localPath ?? null,
+      executor: (service.fixExecutor as "claude" | "cursor") ?? "claude",
+      contextLines: errorGroups.contextLinesFor(group.id)
+    });
+    return { ok: true, groupId: group.id };
+  });
+
   // --- Registry retention (admin) ---
 
   app.get("/api/v1/admin/registry-retention", async (req, reply) => {

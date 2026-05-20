@@ -129,6 +129,26 @@ async function handleDelete(id: string) {
   }
 }
 
+async function handleRunFix(id: string) {
+  try {
+    // Optimistic: mark the timeline as running so the button greys out
+    // and the auto-poll kicks in before the next refresh.
+    incidents.value = incidents.value.map((i) =>
+      i.id === id ? { ...i, lastFixStatus: "running", lastFixEvents: [] } : i
+    );
+    await api.runIncidentFix(id);
+    if (expandedId.value !== id) expandedId.value = id; // surface the timeline
+    await refreshIncidents();
+  } catch (e: unknown) {
+    error.value = (e as Error).message;
+    // Revert the optimistic state on failure.
+    await refreshIncidents();
+  }
+}
+function isFixRunning(inc: Incident): boolean {
+  return Boolean(inc.lastFixStatus && FIX_RUNNING_STATUSES.has(inc.lastFixStatus));
+}
+
 const headers = computed(() =>
   isViewer.value
     ? ["Status", "Message", "Fingerprint", "Service", "First Seen", "Events"]
@@ -233,6 +253,22 @@ const btnStyle = {
                 @click="handleStatusChange(inc.id, 'resolved')"
               >
                 Resolve
+              </button>
+              <button
+                :disabled="isFixRunning(inc)"
+                :style="{
+                  ...btnStyle,
+                  marginLeft: '0.25rem',
+                  background: 'transparent',
+                  color: 'var(--color-primary)',
+                  border: '1px solid var(--color-primary)',
+                  cursor: isFixRunning(inc) ? 'not-allowed' : 'pointer',
+                  opacity: isFixRunning(inc) ? 0.6 : 1
+                }"
+                :title="isFixRunning(inc) ? 'A fix is already in flight for this service' : 'Trigger an autonomous fix for this incident'"
+                @click="handleRunFix(inc.id)"
+              >
+                {{ isFixRunning(inc) ? "Fix running…" : "Run fix" }}
               </button>
               <button
                 :style="{

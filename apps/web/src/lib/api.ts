@@ -403,6 +403,10 @@ export const api = {
     apiFetch<{ ok: boolean }>(`/api/v1/incidents/${encodeURIComponent(id)}`, {
       method: "DELETE"
     }),
+  runIncidentFix: (id: string) =>
+    apiFetch<{ ok: boolean; groupId: string }>(`/api/v1/incidents/${encodeURIComponent(id)}/run-fix`, {
+      method: "POST"
+    }),
   listAgents: () => apiFetch<{ agents: Agent[] }>("/api/v1/agents"),
   getAgent: (id: string) =>
     apiFetch<Agent>(`/api/v1/agents/${encodeURIComponent(id)}`),

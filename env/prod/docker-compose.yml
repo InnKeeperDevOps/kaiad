@@ -44,11 +44,19 @@ services:
       # boot and signs bearer JWTs with it. Persisted so tokens issued
       # before a restart stay valid.
       - ./data/registry-auth:/data/registry-auth
-      # Claude Code CLI login for the autonomous fix. Persisted across
-      # rebuilds so the operator only has to run
-      #   docker compose exec -u node kaiad claude /login
-      # once. (Per the design choice: CLI login, not an API key.)
-      - ./data/claude-home:/home/node/.claude
+      # Claude Code CLI configuration for the autonomous fix — uses the
+      # HOST's config directly (not a docker-internal copy). claude
+      # reads BOTH `~/.claude/` (credentials + backups) AND `~/.claude.json`
+      # (the main settings file alongside the dir); both have to be
+      # mounted. The operator runs `claude login` on the host and the
+      # kaiad container picks up the same session. Writable so the CLI
+      # can refresh tokens; host uid (firestar=1000) matches the
+      # in-container `node` user so ownership is preserved. Override
+      # via KAIAD_CLAUDE_HOME / KAIAD_CLAUDE_JSON if elsewhere.
+      - ${KAIAD_CLAUDE_HOME:-/home/firestar/.claude}:/home/node/.claude
+      - ${KAIAD_CLAUDE_JSON:-/home/firestar/.claude.json}:/home/node/.claude.json
+      # Same for cursor-agent (set KAIAD_CURSOR_HOME if you use it).
+      - ${KAIAD_CURSOR_HOME:-/home/firestar/.cursor}:/home/node/.cursor
       # Build pipeline workspace + artifact root (same path as
       # KAIAD_BUILDS_HOST_DIR above).
       - ./data/kaiad-builds:/data/builds

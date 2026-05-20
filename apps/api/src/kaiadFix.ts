@@ -293,14 +293,12 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
         : ["claude", ["-p", "--permission-mode", "bypassPermissions", prompt]];
 
     // Drop the CLI to a non-root uid (it refuses to run as root). git
-    // stays root, so hand the tree to the CLI uid for this step only.
+    // stays root, so hand the tree to the CLI uid for the CLI step
+    // only and chown it back before each git command.
     const cliEnv: NodeJS.ProcessEnv = { ...env };
     let cliUid: number | undefined;
     let cliGid: number | undefined;
     if (runningAsRoot) {
-      await run("chown", ["-R", `${FIX_UID}:${FIX_GID}`, repoDir], {
-        timeoutMs: 30000
-      });
       // The CLI looks up its config under HOME, but also reads USER /
       // LOGNAME to resolve identity — inheriting "root" from the kaiad
       // process causes it to silently no-op while still exiting 0.
@@ -318,60 +316,90 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       cliGid = FIX_GID;
     }
     const cliCmd = cmdLine(bin, args);
-    const cli = await runCli(bin, args, {
-      cwd: repoDir,
-      env: cliEnv,
-      timeoutMs,
-      uid: cliUid,
-      gid: cliGid
-    });
-    if (runningAsRoot) {
-      // Reclaim ownership so the root git commit/push can write.
-      await run("chown", ["-R", "0:0", repoDir], { timeoutMs: 30000 });
-    }
-    const cliOut = cli.stdout + cli.stderr;
-    // Diagnostic: exactly what the CLI was asked and what it produced.
-    p.logger?.info?.({
-      phase: "cli_done",
-      executor: p.executor,
-      code: cli.code,
-      errorMessageHead: p.errorMessage.slice(0, 400),
-      contextLineCount: p.contextLines.length,
-      contextTail: p.contextLines.slice(-12),
-      cliOutHead: cliOut.slice(0, 2500)
-    });
-    const cliOutForUi = cliOut.length > 0 ? cliOut.slice(0, OUTPUT_HEAD) : "(no output)";
-    if (cli.code !== 0) {
+
+    // Retry the CLI a few times: a single shot at the model often
+    // bails (claude exits 0 with no diff, or hits a transient error).
+    // Resetting between attempts gives it a clean tree each try.
+    const retryLimit = Math.max(1, Number(process.env.SM_FIX_RETRY_LIMIT) || 3);
+    let cli: { code: number; stdout: string; stderr: string } | null = null;
+    let cliOut = "";
+    let attempt = 0;
+    let succeeded = false;
+    for (attempt = 1; attempt <= retryLimit; attempt++) {
+      // Before any attempt after the first, reset the worktree so the
+      // CLI sees the same clean clone it had originally.
+      if (attempt > 1) {
+        await run("git", ["reset", "--hard", "HEAD"], { cwd: repoDir, env, timeoutMs: 15000 });
+        await run("git", ["clean", "-fdx"], { cwd: repoDir, env, timeoutMs: 15000 });
+      }
+      if (runningAsRoot) {
+        await run("chown", ["-R", `${FIX_UID}:${FIX_GID}`, repoDir], { timeoutMs: 30000 });
+      }
+      cli = await runCli(bin, args, {
+        cwd: repoDir,
+        env: cliEnv,
+        timeoutMs,
+        uid: cliUid,
+        gid: cliGid
+      });
+      if (runningAsRoot) {
+        await run("chown", ["-R", "0:0", repoDir], { timeoutMs: 30000 });
+      }
+      cliOut = cli.stdout + cli.stderr;
+      p.logger?.info?.({
+        phase: "cli_done",
+        attempt,
+        retryLimit,
+        executor: p.executor,
+        code: cli.code,
+        cliOutHead: cliOut.slice(0, 2500)
+      });
+      const cliOutForUi = cliOut.length > 0 ? cliOut.slice(0, OUTPUT_HEAD) : "(no output)";
+      // Per-attempt event; subsequent attempts are labelled "retry N/M".
+      const attemptLabel = attempt > 1 ? ` (retry ${attempt}/${retryLimit})` : "";
       emit({
         step: "cli",
-        ok: false,
+        ok: cli.code === 0,
         cmd: cliCmd,
         code: cli.code,
         output: cliOutForUi,
-        message: snippet(cliOut) || `${p.executor} exited ${cli.code}`
+        message:
+          cli.code !== 0
+            ? `${snippet(cliOut) || `${p.executor} exited ${cli.code}`}${attemptLabel}`
+            : attempt > 1
+              ? `attempt ${attempt}/${retryLimit}`
+              : undefined
       });
-      return { ok: false, reason: "cli_failed", output: `${p.executor} failed:\n${cliOut}` };
-    }
-    emit({
-      step: "cli",
-      ok: true,
-      cmd: cliCmd,
-      code: cli.code,
-      output: cliOutForUi
-    });
-
-    const status = await run("git", ["status", "--porcelain"], {
-      cwd: repoDir,
-      env,
-      timeoutMs: 15000
-    });
-    if (status.stdout.trim() === "") {
+      if (cli.code !== 0) {
+        if (attempt < retryLimit) continue;
+        return { ok: false, reason: "cli_failed", output: `${p.executor} failed after ${attempt} attempt(s):\n${cliOut}` };
+      }
+      const status = await run("git", ["status", "--porcelain"], {
+        cwd: repoDir,
+        env,
+        timeoutMs: 15000
+      });
+      if (status.stdout.trim() !== "") {
+        succeeded = true;
+        break;
+      }
+      // exit 0 + no diff: retry if attempts remain.
+      if (attempt < retryLimit) continue;
       emit({
         step: "no_changes",
         ok: false,
-        message: `${p.executor} produced no diff${cliOut ? " — see CLI output" : " (and no output)"}.`
+        message: `${p.executor} produced no diff after ${attempt} attempt(s).`
       });
-      return { ok: false, reason: "no_changes", output: `${p.executor} made no changes.\n${cliOut}` };
+      return {
+        ok: false,
+        reason: "no_changes",
+        output: `${p.executor} made no changes in ${attempt} attempt(s).\n${cliOut}`
+      };
+    }
+    if (!succeeded) {
+      // Defensive — shouldn't reach here because the loop returns on
+      // every exhaustion branch above.
+      return { ok: false, reason: "cli_failed", output: `${p.executor} retry loop exited unexpectedly` };
     }
 
     // `git add -A` is bundled into the committing step's surface.

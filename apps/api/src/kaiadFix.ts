@@ -348,7 +348,29 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
     const [bin, args] =
       p.executor === "cursor"
         ? ["cursor-agent", ["-p", prompt, "--force"]]
-        : ["claude", ["-p", "--permission-mode", "bypassPermissions", prompt]];
+        : [
+            "claude",
+            [
+              "-p",
+              "--permission-mode",
+              "bypassPermissions",
+              // The host's ~/.claude.json registers MCP servers
+              // (Figma, Gmail, Drive…) that try to phone home to a
+              // proxy unreachable from inside the kaiad container —
+              // they hang ~60s each, blowing past our planTimeout.
+              // Run with an empty, strict MCP config so claude
+              // doesn't probe any of them.
+              "--strict-mcp-config",
+              "--mcp-config",
+              "{\"mcpServers\":{}}",
+              // Skip CLAUDE.md auto-discovery, hooks, background
+              // prefetches, etc. — none are useful here and they
+              // were another stall source in the debug log. OAuth
+              // still works (--bare disables it; this doesn't).
+              "--disable-slash-commands",
+              prompt
+            ]
+          ];
 
     // Drop the CLI to a non-root uid (it refuses to run as root). git
     // stays root, so hand the tree to the CLI uid for the CLI step

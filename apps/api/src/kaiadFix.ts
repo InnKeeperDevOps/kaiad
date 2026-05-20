@@ -249,6 +249,14 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
   try {
     emit({ step: "started", ok: true });
     await mkdir(repoDir, { recursive: true });
+    // mkdtemp defaults to mode 0700 (root-owned). When the CLI runs as
+    // a non-root uid with cwd=scratch/repo, it can chdir there but
+    // CAN'T traverse the 0700 parent → claude silently bails (exit 0,
+    // no output). Open the parent's traverse bit; the SSH key stays
+    // root-owned 0600 inside so uid 1000 still can't read it.
+    if (runningAsRoot) {
+      await chmod(scratch, 0o755);
+    }
     if (p.sshKeyType === "uploaded" && p.sshKeyValue) {
       keyPath = join(scratch, ".sshkey");
       await writeFile(keyPath, normalizePEM(p.sshKeyValue), { mode: 0o600 });

@@ -126,14 +126,19 @@ export const incidentSchema = z.object({
     ])
     .optional(),
   lastFixExecutor: z.enum(["claude", "cursor"]).optional(),
-  lastFixStartedAt: z.string().datetime().optional(),
-  lastFixFinishedAt: z.string().datetime().optional(),
+  // Datetime fields here are intentionally LOOSE — they're written from
+  // a few different paths (Date.toISOString, agent frames, ad-hoc SQL
+  // backfills) and a single non-ISO timestamp would otherwise blow up
+  // `listIncidents` and take the Incidents page down. The UI parses
+  // them with `new Date(...)` which is also forgiving.
+  lastFixStartedAt: z.string().optional(),
+  lastFixFinishedAt: z.string().optional(),
   lastFixCommitSha: z.string().optional(),
   lastFixOutput: z.string().optional(),
   lastFixEvents: z
     .array(
       z.object({
-        at: z.string().datetime(),
+        at: z.string(),
         step: z.string(),
         ok: z.boolean().optional(),
         message: z.string().optional(),

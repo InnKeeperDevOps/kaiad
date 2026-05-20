@@ -67,7 +67,11 @@ export interface KaiadFixResult {
   output: string;
 }
 
-const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+// Per-CLI-attempt timeout. With the retry loop (default 3 attempts)
+// the total fix budget is 3× this. 5 min × 3 = 15 min worst case
+// felt sluggish on the Incidents page when the CLI silently hung; 90s
+// surfaces failures fast while still leaving headroom for a real fix.
+const DEFAULT_TIMEOUT_MS = Number(process.env.SM_EXECUTOR_TIMEOUT_MS) || 90 * 1000;
 
 // The AI CLIs refuse to run as root ("--dangerously-skip-permissions /
 // bypassPermissions cannot be used with root"). The kaiad container
@@ -183,13 +187,34 @@ function runCli(
 // hard-states that this is an AUTOMATED, non-interactive run so the
 // model commits to a best-effort decision instead of stalling on
 // clarifying questions.
+// Cap how much context we send the CLI. Empirically claude-code 2.1.x
+// hangs (does NOT exit fast, just stops responding until SIGKILL) when
+// fed the full ~9KB+ aibe stack trace, even though small/synthetic
+// prompts of the same size work. Trim to the most-recent few KB —
+// enough for the model to see the "Caused by:" chain and act.
+const MAX_PROMPT_CONTEXT_BYTES = 3500;
+
+function trimContextForPrompt(lines: string[]): string {
+  if (lines.length === 0) return "(none)";
+  // Keep the tail (deepest causes) — that's the actionable signal.
+  let out = "";
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const next = lines[i] + (out ? "\n" : "") + out;
+    if (next.length > MAX_PROMPT_CONTEXT_BYTES && out.length > 0) {
+      return `… (older lines elided)\n${out}`;
+    }
+    out = next;
+  }
+  return out;
+}
+
 export function buildFixPrompt(
   repoUrl: string,
   branch: string,
   errorMessage: string,
   contextLines: string[]
 ): string {
-  const ctx = contextLines.length ? contextLines.join("\n") : "(none)";
+  const ctx = trimContextForPrompt(contextLines);
   return [
     "AUTOMATED TASK — you are running headless inside Kaiad. There is no human in the loop. NEVER ask questions, NEVER request clarification, NEVER wait for confirmation. If anything is ambiguous, make the best-effort decision and proceed.",
     "",

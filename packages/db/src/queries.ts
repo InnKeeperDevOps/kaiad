@@ -320,6 +320,20 @@ export async function resolveStaleIncidents(
   return rows.length;
 }
 
+/** Hard-delete an incident (operator-initiated cleanup). Returns true
+ *  when a row was removed. Tenant-scoped to prevent cross-tenant writes. */
+export async function deleteIncident(
+  query: QueryFn,
+  tenantId: string,
+  id: string,
+): Promise<boolean> {
+  const { rows } = await query(
+    `DELETE FROM incidents WHERE tenant_id = $1 AND id = $2 RETURNING id`,
+    [tenantId, id],
+  );
+  return rows.length > 0;
+}
+
 export async function updateIncidentStatus(
   query: QueryFn,
   tenantId: string,

@@ -55,6 +55,7 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
     upsertIncident: (tenantId, data) => queries.upsertIncident(queryFn, tenantId, data),
     updateIncidentStatus: (tenantId, id, status) =>
       queries.updateIncidentStatus(queryFn, tenantId, id, status),
+    deleteIncident: (tenantId, id) => queries.deleteIncident(queryFn, tenantId, id),
     resolveIncidentByFingerprint: (tenantId, serviceId, fingerprint) =>
       queries.resolveIncidentByFingerprint(queryFn, tenantId, serviceId, fingerprint),
     resolveStaleIncidents: (cutoff) => queries.resolveStaleIncidents(queryFn, cutoff),

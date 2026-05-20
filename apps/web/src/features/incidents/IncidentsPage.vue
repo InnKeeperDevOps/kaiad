@@ -118,6 +118,17 @@ async function handleStatusChange(id: string, status: string) {
   }
 }
 
+async function handleDelete(id: string) {
+  if (!window.confirm("Delete this incident permanently? This cannot be undone.")) return;
+  try {
+    await api.deleteIncident(id);
+    incidents.value = incidents.value.filter((i) => i.id !== id);
+    if (expandedId.value === id) expandedId.value = null;
+  } catch (e: unknown) {
+    error.value = (e as Error).message;
+  }
+}
+
 const headers = computed(() =>
   isViewer.value
     ? ["Status", "Message", "Fingerprint", "Service", "First Seen", "Events"]
@@ -222,6 +233,19 @@ const btnStyle = {
                 @click="handleStatusChange(inc.id, 'resolved')"
               >
                 Resolve
+              </button>
+              <button
+                :style="{
+                  ...btnStyle,
+                  marginLeft: '0.25rem',
+                  background: 'transparent',
+                  color: 'var(--color-danger)',
+                  border: '1px solid var(--color-danger)'
+                }"
+                title="Delete this incident permanently"
+                @click="handleDelete(inc.id)"
+              >
+                Delete
               </button>
             </td>
           </tr>

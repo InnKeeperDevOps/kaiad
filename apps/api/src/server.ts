@@ -356,6 +356,7 @@ function createLazyDomainStore(resolve: () => Promise<DomainStore>): DomainStore
     upsertIncident: (tenantId, data) => get().then((s) => s.upsertIncident(tenantId, data)),
     updateIncidentStatus: (tenantId, id, status) =>
       get().then((s) => s.updateIncidentStatus(tenantId, id, status)),
+    deleteIncident: (tenantId, id) => get().then((s) => s.deleteIncident(tenantId, id)),
     resolveIncidentByFingerprint: (tenantId, serviceId, fingerprint) =>
       get().then((s) => s.resolveIncidentByFingerprint(tenantId, serviceId, fingerprint)),
     resolveStaleIncidents: (cutoff) => get().then((s) => s.resolveStaleIncidents(cutoff)),
@@ -2799,6 +2800,18 @@ export function buildServer(opts: BuildServerOptions = {}) {
       return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Incident not found", correlationId: (req as any).correlationId }));
     }
     return updated;
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/v1/incidents/:id", async (req, reply) => {
+    const s = await authorize(req as any, reply as any, { perm: "incidents:write" });
+    if (!s) return;
+    const ok = await domainStore.deleteIncident(s.tenantId, req.params.id);
+    if (!ok) {
+      return reply.status(404).send(
+        apiErrorSchema.parse({ code: "NOT_FOUND", message: "Incident not found", correlationId: (req as any).correlationId })
+      );
+    }
+    return { ok: true };
   });
 
   // --- Agents ---

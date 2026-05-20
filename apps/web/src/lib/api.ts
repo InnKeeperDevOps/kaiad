@@ -379,6 +379,10 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ status })
     }),
+  deleteIncident: (id: string) =>
+    apiFetch<{ ok: boolean }>(`/api/v1/incidents/${encodeURIComponent(id)}`, {
+      method: "DELETE"
+    }),
   listAgents: () => apiFetch<{ agents: Agent[] }>("/api/v1/agents"),
   getAgent: (id: string) =>
     apiFetch<Agent>(`/api/v1/agents/${encodeURIComponent(id)}`),

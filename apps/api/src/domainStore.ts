@@ -12,6 +12,8 @@ export type DomainStore = {
   getIncident(tenantId: string, id: string): Promise<Incident | undefined>;
   upsertIncident(tenantId: string, data: { serviceId: string; fingerprint: string; message?: string; fullLog?: string }): Promise<Incident>;
   updateIncidentStatus(tenantId: string, id: string, status: IncidentStatus): Promise<Incident | undefined>;
+  /** Hard-delete an incident by id. Returns true if a row was removed. */
+  deleteIncident(tenantId: string, id: string): Promise<boolean>;
   /** Resolve open incidents for a service+fingerprint after an auto-fix lands. Returns count closed. */
   resolveIncidentByFingerprint(tenantId: string, serviceId: string, fingerprint: string): Promise<number>;
   /** Auto-resolve incidents not seen since `cutoff` (presumed healthy). Returns count closed. */
@@ -196,6 +198,12 @@ export function createMemoryDomainStore(): DomainStore {
       if (!inc || inc.tenantId !== tenantId) return undefined;
       inc.status = status;
       return inc;
+    },
+    async deleteIncident(tenantId, id) {
+      const inc = incidents.get(id);
+      if (!inc || inc.tenantId !== tenantId) return false;
+      incidents.delete(id);
+      return true;
     },
     async resolveIncidentByFingerprint(tenantId, serviceId, fingerprint) {
       let n = 0;

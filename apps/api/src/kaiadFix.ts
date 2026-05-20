@@ -187,24 +187,30 @@ function runCli(
 // hard-states that this is an AUTOMATED, non-interactive run so the
 // model commits to a best-effort decision instead of stalling on
 // clarifying questions.
-// Cap how much context we send the CLI. Empirically claude-code 2.1.x
-// hangs (does NOT exit fast, just stops responding until SIGKILL) when
-// fed the full ~9KB+ aibe stack trace, even though small/synthetic
-// prompts of the same size work. Trim to the most-recent few KB —
-// enough for the model to see the "Caused by:" chain and act.
-const MAX_PROMPT_CONTEXT_BYTES = 3500;
+// Keep the prompt aggressively small. Empirically claude-code 2.1.x
+// hangs on prompts that include the full Spring/Hibernate stack trace
+// the agent ships — even when other 9KB-class prompts process fine.
+// Claude can read the repo on its own; we only need to point it at the
+// deepest exception. Keep the FIRST "Caused by:" we can find (root
+// cause for nested exceptions in Java) plus a few following lines, or
+// the last ~10 lines if no "Caused by:" — bounded to ~800 bytes.
+const MAX_PROMPT_CONTEXT_BYTES = 800;
+const MAX_PROMPT_CONTEXT_LINES = 12;
 
 function trimContextForPrompt(lines: string[]): string {
   if (lines.length === 0) return "(none)";
-  // Keep the tail (deepest causes) — that's the actionable signal.
-  let out = "";
+  let startIdx = -1;
+  // Prefer the LAST "Caused by:" — it's usually the actionable root.
   for (let i = lines.length - 1; i >= 0; i--) {
-    const next = lines[i] + (out ? "\n" : "") + out;
-    if (next.length > MAX_PROMPT_CONTEXT_BYTES && out.length > 0) {
-      return `… (older lines elided)\n${out}`;
+    if (/^Caused by:/i.test(lines[i].trimStart())) {
+      startIdx = i;
+      break;
     }
-    out = next;
   }
+  if (startIdx < 0) startIdx = Math.max(0, lines.length - MAX_PROMPT_CONTEXT_LINES);
+  const slice = lines.slice(startIdx, startIdx + MAX_PROMPT_CONTEXT_LINES);
+  let out = slice.join("\n");
+  if (out.length > MAX_PROMPT_CONTEXT_BYTES) out = out.slice(0, MAX_PROMPT_CONTEXT_BYTES) + "\n…";
   return out;
 }
 

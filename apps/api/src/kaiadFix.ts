@@ -293,7 +293,19 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       await run("chown", ["-R", `${FIX_UID}:${FIX_GID}`, repoDir], {
         timeoutMs: 30000
       });
+      // The CLI looks up its config under HOME, but also reads USER /
+      // LOGNAME to resolve identity — inheriting "root" from the kaiad
+      // process causes it to silently no-op while still exiting 0.
+      // Set the full unprivileged identity explicitly.
       cliEnv.HOME = FIX_HOME;
+      cliEnv.USER = "node";
+      cliEnv.LOGNAME = "node";
+      cliEnv.SHELL = "/bin/sh";
+      // Drop root-inherited paths the unprivileged uid can't read so
+      // tools don't waste time probing them (e.g. /root/...).
+      delete cliEnv.XDG_CONFIG_HOME;
+      delete cliEnv.XDG_CACHE_HOME;
+      delete cliEnv.XDG_DATA_HOME;
       cliUid = FIX_UID;
       cliGid = FIX_GID;
     }

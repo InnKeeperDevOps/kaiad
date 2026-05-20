@@ -531,6 +531,19 @@ create table if not exists registry_tags (
 );
 create index if not exists registry_tags_repo_idx on registry_tags(repo);
 
+-- Registry retention policy. Single row (id=1) enforced by the CHECK;
+-- the periodic GC sweep reads this and prunes accordingly. Defaults:
+-- keep the 10 most recent tags per repository, cap the registry at
+-- 64 GiB total, no age-based pruning.
+create table if not exists registry_retention_policy (
+  id integer primary key default 1 check (id = 1),
+  keep_last_n_per_repo integer not null default 10 check (keep_last_n_per_repo >= 0),
+  max_total_bytes bigint not null default 68719476736 check (max_total_bytes >= 0),
+  keep_for_days integer not null default 0 check (keep_for_days >= 0),
+  updated_at timestamptz not null default now()
+);
+insert into registry_retention_policy (id) values (1) on conflict (id) do nothing;
+
 -- Blob upload sessions. Client posts to /v2/<name>/blobs/uploads/,
 -- gets a uuid + Location, then PATCHes chunks and PUTs to commit.
 -- content_oid is allocated on session start; chunks lowrite() into it.

@@ -1869,3 +1869,248 @@ export async function addTenantMemberByEmail(
   );
   return { ok: true, userId };
 }
+
+// ---------------------------------------------------------------------------
+// Registry retention policy + GC
+// ---------------------------------------------------------------------------
+
+export interface RegistryRetentionPolicy {
+  keepLastNPerRepo: number;
+  maxTotalBytes: number;
+  keepForDays: number;
+  updatedAt: string;
+}
+
+export interface RegistryGcStats {
+  /** Repository tags dropped this sweep (latest-of-repo is never dropped). */
+  tagsDeleted: number;
+  /** Manifests with no tag remaining → deleted. */
+  manifestsDeleted: number;
+  /** Blobs no manifest references → deleted (+ their pg_largeobject content). */
+  blobsDeleted: number;
+  /** Bytes reclaimed (sum of size_bytes of deleted blobs). */
+  bytesReclaimed: number;
+  /** Total bytes still in the registry after this sweep. */
+  totalBytesAfter: number;
+}
+
+export async function getRegistryRetentionPolicy(query: QueryFn): Promise<RegistryRetentionPolicy> {
+  const { rows } = await query(
+    `SELECT keep_last_n_per_repo, max_total_bytes, keep_for_days, updated_at
+       FROM registry_retention_policy WHERE id = 1`,
+    [],
+  );
+  if (rows.length === 0) {
+    // ensureCoreSchema seeds row 1; this branch only fires in a half-migrated
+    // setup. Fall back to the documented defaults.
+    return {
+      keepLastNPerRepo: 10,
+      maxTotalBytes: 68_719_476_736,
+      keepForDays: 0,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+  const r = rows[0];
+  return {
+    keepLastNPerRepo: Number(r.keep_last_n_per_repo),
+    maxTotalBytes: Number(r.max_total_bytes),
+    keepForDays: Number(r.keep_for_days),
+    updatedAt:
+      r.updated_at instanceof Date ? r.updated_at.toISOString() : String(r.updated_at),
+  };
+}
+
+export async function updateRegistryRetentionPolicy(
+  query: QueryFn,
+  patch: Partial<Omit<RegistryRetentionPolicy, "updatedAt">>,
+): Promise<RegistryRetentionPolicy> {
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  if (patch.keepLastNPerRepo !== undefined) {
+    vals.push(patch.keepLastNPerRepo);
+    sets.push(`keep_last_n_per_repo = $${vals.length}`);
+  }
+  if (patch.maxTotalBytes !== undefined) {
+    vals.push(patch.maxTotalBytes);
+    sets.push(`max_total_bytes = $${vals.length}`);
+  }
+  if (patch.keepForDays !== undefined) {
+    vals.push(patch.keepForDays);
+    sets.push(`keep_for_days = $${vals.length}`);
+  }
+  if (sets.length > 0) {
+    sets.push("updated_at = now()");
+    await query(
+      `UPDATE registry_retention_policy SET ${sets.join(", ")} WHERE id = 1`,
+      vals,
+    );
+  }
+  return getRegistryRetentionPolicy(query);
+}
+
+// Internal: drop manifests with no tag pointing at them, then drop blobs
+// no manifest still references, and lo_unlink their content. Returns
+// {manifestsDeleted, blobsDeleted, bytesReclaimed}.
+async function gcOrphans(
+  query: QueryFn,
+): Promise<{ manifestsDeleted: number; blobsDeleted: number; bytesReclaimed: number }> {
+  const { rows: mDel } = await query(
+    `DELETE FROM registry_manifests
+       WHERE digest NOT IN (SELECT manifest_digest FROM registry_tags)
+     RETURNING digest`,
+    [],
+  );
+  // Blobs that no remaining manifest references in any way (config /
+  // layers / referenced_manifest_digests).
+  const { rows: orphanBlobs } = await query(
+    `WITH refd AS (
+       SELECT digest AS d FROM registry_manifests
+       UNION SELECT config_digest FROM registry_manifests WHERE config_digest IS NOT NULL
+       UNION SELECT unnest(layer_digests) FROM registry_manifests
+       UNION SELECT unnest(referenced_manifest_digests) FROM registry_manifests
+     )
+     SELECT digest, content_oid, size_bytes
+       FROM registry_blobs
+      WHERE digest NOT IN (SELECT d FROM refd WHERE d IS NOT NULL)`,
+    [],
+  );
+  let bytesReclaimed = 0;
+  for (const b of orphanBlobs) {
+    await query(`SELECT lo_unlink($1)`, [b.content_oid]);
+    bytesReclaimed += Number(b.size_bytes ?? 0);
+  }
+  if (orphanBlobs.length > 0) {
+    await query(
+      `DELETE FROM registry_blobs WHERE digest = ANY($1::text[])`,
+      [orphanBlobs.map((b) => b.digest as string)],
+    );
+  }
+  return {
+    manifestsDeleted: mDel.length,
+    blobsDeleted: orphanBlobs.length,
+    bytesReclaimed,
+  };
+}
+
+/** Apply the retention policy in one sweep. Safe to call repeatedly:
+ *  (1) per-repo keep last N — older tags pruned (never the most-recent
+ *      per repo, never a tag named `latest`, never a tag updated within
+ *      keepForDays); (2) GC orphan manifests + blobs (+ their LOs);
+ *  (3) size cap — while total bytes > maxTotalBytes, drop the next
+ *      oldest tag (still respecting the per-repo "most recent" guard)
+ *      and re-GC, capped to avoid pathological loops. */
+export async function applyRegistryRetention(
+  query: QueryFn,
+  policy: Pick<RegistryRetentionPolicy, "keepLastNPerRepo" | "maxTotalBytes" | "keepForDays">,
+): Promise<RegistryGcStats> {
+  // Step 1: per-repo "keep last N".
+  let tagsDeleted = 0;
+  if (policy.keepLastNPerRepo > 0) {
+    const { rows: toDrop } = await query(
+      `WITH ranked AS (
+         SELECT repo, tag, updated_at,
+                row_number() OVER (PARTITION BY repo ORDER BY updated_at DESC, tag DESC) AS rn
+           FROM registry_tags
+          WHERE tag <> 'latest'
+       )
+       SELECT repo, tag FROM ranked
+        WHERE rn > $1
+          AND ($2 = 0 OR updated_at < now() - ($2 || ' days')::interval)`,
+      [policy.keepLastNPerRepo, policy.keepForDays],
+    );
+    for (const r of toDrop) {
+      const { rows } = await query(
+        `DELETE FROM registry_tags WHERE repo = $1 AND tag = $2 RETURNING repo`,
+        [r.repo, r.tag],
+      );
+      tagsDeleted += rows.length;
+    }
+  }
+
+  // Step 2: orphan cleanup (manifests + blobs + LOs).
+  let { manifestsDeleted, blobsDeleted, bytesReclaimed } = await gcOrphans(query);
+
+  // Step 3: size cap loop. Drop oldest non-protected tag, GC, repeat.
+  if (policy.maxTotalBytes > 0) {
+    for (let i = 0; i < 100; i++) {
+      const { rows: total } = await query(
+        `SELECT COALESCE(SUM(size_bytes), 0)::bigint AS bytes FROM registry_blobs`,
+        [],
+      );
+      if (Number(total[0].bytes) <= policy.maxTotalBytes) break;
+      const { rows: oldest } = await query(
+        `WITH ranked AS (
+           SELECT repo, tag, updated_at,
+                  row_number() OVER (PARTITION BY repo ORDER BY updated_at DESC, tag DESC) AS rn
+             FROM registry_tags
+            WHERE tag <> 'latest'
+         )
+         SELECT repo, tag FROM ranked
+          WHERE rn > 1
+          ORDER BY updated_at ASC
+          LIMIT 5`,
+        [],
+      );
+      if (oldest.length === 0) break;
+      for (const r of oldest) {
+        const { rows } = await query(
+          `DELETE FROM registry_tags WHERE repo = $1 AND tag = $2 RETURNING repo`,
+          [r.repo, r.tag],
+        );
+        tagsDeleted += rows.length;
+      }
+      const step = await gcOrphans(query);
+      manifestsDeleted += step.manifestsDeleted;
+      blobsDeleted += step.blobsDeleted;
+      bytesReclaimed += step.bytesReclaimed;
+    }
+  }
+
+  const { rows: after } = await query(
+    `SELECT COALESCE(SUM(size_bytes), 0)::bigint AS bytes FROM registry_blobs`,
+    [],
+  );
+  return {
+    tagsDeleted,
+    manifestsDeleted,
+    blobsDeleted,
+    bytesReclaimed,
+    totalBytesAfter: Number(after[0].bytes),
+  };
+}
+
+/** Read-only stats for the Settings UI: total bytes + per-repo breakdown. */
+export async function getRegistryStats(query: QueryFn): Promise<{
+  totalBytes: number;
+  totalBlobs: number;
+  repos: { repo: string; tags: number; bytes: number }[];
+}> {
+  const { rows: blobs } = await query(
+    `SELECT COALESCE(SUM(size_bytes), 0)::bigint AS bytes, COUNT(*)::bigint AS n FROM registry_blobs`,
+    [],
+  );
+  const { rows: repos } = await query(
+    `WITH mb AS (
+       SELECT m.repo, m.digest AS manifest_digest,
+              unnest(coalesce(m.layer_digests, '{}') ||
+                     CASE WHEN m.config_digest IS NOT NULL THEN ARRAY[m.config_digest] ELSE '{}' END) AS blob
+         FROM registry_manifests m
+     )
+     SELECT mb.repo,
+            (SELECT COUNT(*) FROM registry_tags t WHERE t.repo = mb.repo) AS tags,
+            COALESCE(SUM(DISTINCT rb.size_bytes), 0)::bigint AS bytes
+       FROM mb LEFT JOIN registry_blobs rb ON rb.digest = mb.blob
+      GROUP BY mb.repo
+      ORDER BY bytes DESC`,
+    [],
+  );
+  return {
+    totalBytes: Number(blobs[0].bytes),
+    totalBlobs: Number(blobs[0].n),
+    repos: repos.map((r) => ({
+      repo: String(r.repo),
+      tags: Number(r.tags),
+      bytes: Number(r.bytes),
+    })),
+  };
+}

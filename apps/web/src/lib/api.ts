@@ -331,6 +331,26 @@ export type AuthProviderEntry = {
   name: string;
 };
 
+export type RegistryRetentionPolicy = {
+  keepLastNPerRepo: number;
+  maxTotalBytes: number;
+  keepForDays: number;
+  updatedAt: string;
+};
+export type RegistryStats = {
+  totalBytes: number;
+  totalBlobs: number;
+  repos: { repo: string; tags: number; bytes: number }[];
+};
+export type RegistryRetentionResponse = { policy: RegistryRetentionPolicy; stats: RegistryStats };
+export type RegistryGcStats = {
+  tagsDeleted: number;
+  manifestsDeleted: number;
+  blobsDeleted: number;
+  bytesReclaimed: number;
+  totalBytesAfter: number;
+};
+
 export const api = {
   login: (email: string, password: string) =>
     apiFetch<{ token: string }>("/api/v1/auth/login", {
@@ -665,6 +685,16 @@ export const api = {
   /** Repositories visible to this tenant's linked GitHub App installation (GitHub REST). */
   listGithubInstallationRepos: () =>
     apiFetch<{ repos: string[] }>("/api/v1/github/installation-repositories"),
+
+  getRegistryRetention: () =>
+    apiFetch<RegistryRetentionResponse>("/api/v1/admin/registry-retention"),
+  updateRegistryRetention: (patch: Partial<Pick<RegistryRetentionPolicy, "keepLastNPerRepo" | "maxTotalBytes" | "keepForDays">>) =>
+    apiFetch<RegistryRetentionResponse>("/api/v1/admin/registry-retention", {
+      method: "PUT",
+      body: JSON.stringify(patch)
+    }),
+  runRegistryRetention: () =>
+    apiFetch<RegistryGcStats>("/api/v1/admin/registry-retention/run", { method: "POST" }),
 
   getAuthProviders: () => apiFetch<{ providers: AuthProviderEntry[] }>("/api/v1/auth/providers"),
 

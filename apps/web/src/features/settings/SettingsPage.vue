@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { Settings, Lock } from "lucide-vue-next";
-import { api, type AuthProviderEntry, type OAuthProviderConfigPayload } from "../../lib/api.js";
+import { Settings, Lock, Database } from "lucide-vue-next";
+import {
+  api,
+  type AuthProviderEntry,
+  type OAuthProviderConfigPayload,
+  type RegistryRetentionPolicy,
+  type RegistryStats,
+  type RegistryGcStats
+} from "../../lib/api.js";
 import { useAuth } from "../../lib/useAuth.js";
 
 const GOOGLE_OAUTH_DEFAULTS: Pick<
@@ -107,6 +114,68 @@ function applyGoogleDefaults() {
   oauthUserInfoUrl.value = GOOGLE_OAUTH_DEFAULTS.userInfoUrl;
   oauthScopesInput.value = GOOGLE_OAUTH_DEFAULTS.scopes.join(" ");
 }
+
+// --- Registry retention ---------------------------------------------------
+const GB = 1024 * 1024 * 1024;
+const registryPolicy = ref<RegistryRetentionPolicy | null>(null);
+const registryStats = ref<RegistryStats | null>(null);
+const registryError = ref<string | null>(null);
+const registryFormKeepN = ref(10);
+const registryFormMaxGb = ref(64);
+const registryFormDays = ref(0);
+const registrySaving = ref(false);
+const registryRunning = ref(false);
+const registryLastRun = ref<RegistryGcStats | null>(null);
+
+async function loadRegistry() {
+  try {
+    const r = await api.getRegistryRetention();
+    registryPolicy.value = r.policy;
+    registryStats.value = r.stats;
+    registryFormKeepN.value = r.policy.keepLastNPerRepo;
+    registryFormMaxGb.value = Math.round((r.policy.maxTotalBytes / GB) * 100) / 100;
+    registryFormDays.value = r.policy.keepForDays;
+  } catch (e) {
+    registryError.value = (e as Error).message;
+  }
+}
+async function saveRegistry() {
+  registrySaving.value = true;
+  registryError.value = null;
+  try {
+    const r = await api.updateRegistryRetention({
+      keepLastNPerRepo: Math.max(0, Math.floor(registryFormKeepN.value)),
+      maxTotalBytes: Math.max(0, Math.round(registryFormMaxGb.value * GB)),
+      keepForDays: Math.max(0, Math.floor(registryFormDays.value))
+    });
+    registryPolicy.value = r.policy;
+    registryStats.value = r.stats;
+  } catch (e) {
+    registryError.value = (e as Error).message;
+  } finally {
+    registrySaving.value = false;
+  }
+}
+async function runRegistry() {
+  registryRunning.value = true;
+  registryError.value = null;
+  try {
+    registryLastRun.value = await api.runRegistryRetention();
+    await loadRegistry();
+  } catch (e) {
+    registryError.value = (e as Error).message;
+  } finally {
+    registryRunning.value = false;
+  }
+}
+function fmtBytes(b: number): string {
+  if (b >= GB) return `${(b / GB).toFixed(2)} GB`;
+  if (b >= 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
+  if (b >= 1024) return `${(b / 1024).toFixed(1)} KB`;
+  return `${b} B`;
+}
+
+onMounted(loadRegistry);
 
 const sectionStyle = {
   background: "var(--color-surface)",
@@ -291,6 +360,104 @@ const labelColStyle = {
           @click="handleSubmitOAuthProvider"
         >{{ isSubmittingOAuth ? "Saving…" : "Save provider" }}</button>
       </div>
+    </div>
+
+    <div :style="sectionStyle">
+      <h3 :style="{ margin: '0 0 0.75rem', fontSize: '1rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }">
+        <Database :size="16" /> Registry retention
+      </h3>
+      <p :style="{ color: 'var(--color-text-secondary)', margin: 0, fontSize: '0.85rem' }">
+        Every kaiad build pushes an image to the built-in registry. These
+        policies cap retention so the registry doesn't grow forever — a
+        background sweep applies them every 30 minutes (and you can run
+        it now with the button below).
+      </p>
+      <div v-if="registryError" :style="{ color: 'var(--color-danger)', marginTop: '0.5rem' }">{{ registryError }}</div>
+
+      <div
+        v-if="registryStats"
+        :style="{ marginTop: '0.75rem', display: 'flex', gap: '1.25rem', flexWrap: 'wrap', fontSize: '0.85rem' }"
+      >
+        <div>
+          <div :style="{ color: 'var(--color-text-secondary)' }">Current size</div>
+          <div :style="{ fontWeight: 600 }">{{ fmtBytes(registryStats.totalBytes) }}</div>
+        </div>
+        <div>
+          <div :style="{ color: 'var(--color-text-secondary)' }">Blobs</div>
+          <div :style="{ fontWeight: 600 }">{{ registryStats.totalBlobs }}</div>
+        </div>
+        <div>
+          <div :style="{ color: 'var(--color-text-secondary)' }">Repositories</div>
+          <div :style="{ fontWeight: 600 }">{{ registryStats.repos.length }}</div>
+        </div>
+      </div>
+
+      <div :style="{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem', marginTop: '1rem', maxWidth: '780px' }">
+        <label :style="labelColStyle">
+          <span>Keep last N per repository</span>
+          <input type="number" min="0" v-model.number="registryFormKeepN" :style="inputStyle" />
+          <small :style="{ color: 'var(--color-text-secondary)' }">Older tags pruned. `latest` is always kept.</small>
+        </label>
+        <label :style="labelColStyle">
+          <span>Max total size (GB)</span>
+          <input type="number" min="0" step="1" v-model.number="registryFormMaxGb" :style="inputStyle" />
+          <small :style="{ color: 'var(--color-text-secondary)' }">Drops oldest tags until under cap. 0 = no cap.</small>
+        </label>
+        <label :style="labelColStyle">
+          <span>Keep for at least (days)</span>
+          <input type="number" min="0" v-model.number="registryFormDays" :style="inputStyle" />
+          <small :style="{ color: 'var(--color-text-secondary)' }">Protects fresh tags from "keep last N". 0 = disabled.</small>
+        </label>
+      </div>
+
+      <div :style="{ display: 'flex', gap: '0.5rem', marginTop: '0.85rem', flexWrap: 'wrap' }">
+        <button
+          :disabled="registrySaving"
+          :style="{ background: 'var(--color-primary)', color: 'var(--color-primary-foreground)', border: 'none', borderRadius: '6px', padding: '0.45rem 0.8rem', fontSize: '0.85rem', cursor: registrySaving ? 'not-allowed' : 'pointer', opacity: registrySaving ? 0.75 : 1 }"
+          @click="saveRegistry"
+        >{{ registrySaving ? "Saving…" : "Save policy" }}</button>
+        <button
+          :disabled="registryRunning"
+          :style="{ background: 'transparent', color: 'var(--color-text-primary)', border: '1px solid var(--color-border)', borderRadius: '6px', padding: '0.45rem 0.8rem', fontSize: '0.85rem', cursor: registryRunning ? 'not-allowed' : 'pointer', opacity: registryRunning ? 0.75 : 1 }"
+          @click="runRegistry"
+        >{{ registryRunning ? "Sweeping…" : "Run sweep now" }}</button>
+      </div>
+
+      <p
+        v-if="registryLastRun"
+        :style="{ marginTop: '0.55rem', fontSize: '0.8rem', color: 'var(--color-text-secondary)' }"
+      >
+        Last sweep: {{ registryLastRun.tagsDeleted }} tag(s),
+        {{ registryLastRun.manifestsDeleted }} manifest(s),
+        {{ registryLastRun.blobsDeleted }} blob(s) removed —
+        reclaimed {{ fmtBytes(registryLastRun.bytesReclaimed) }};
+        registry now {{ fmtBytes(registryLastRun.totalBytesAfter) }}.
+      </p>
+
+      <details
+        v-if="registryStats && registryStats.repos.length > 0"
+        :style="{ marginTop: '0.85rem' }"
+      >
+        <summary :style="{ cursor: 'pointer', fontSize: '0.85rem', color: 'var(--color-text-secondary)' }">
+          Per-repository breakdown
+        </summary>
+        <table :style="{ width: '100%', borderCollapse: 'collapse', marginTop: '0.45rem', fontSize: '0.82rem' }">
+          <thead>
+            <tr>
+              <th :style="{ textAlign: 'left', padding: '0.25rem 0.5rem', borderBottom: '1px solid var(--color-border)' }">Repository</th>
+              <th :style="{ textAlign: 'right', padding: '0.25rem 0.5rem', borderBottom: '1px solid var(--color-border)' }">Tags</th>
+              <th :style="{ textAlign: 'right', padding: '0.25rem 0.5rem', borderBottom: '1px solid var(--color-border)' }">Size</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="r in registryStats.repos" :key="r.repo">
+              <td :style="{ padding: '0.2rem 0.5rem' }">{{ r.repo }}</td>
+              <td :style="{ padding: '0.2rem 0.5rem', textAlign: 'right' }">{{ r.tags }}</td>
+              <td :style="{ padding: '0.2rem 0.5rem', textAlign: 'right' }">{{ fmtBytes(r.bytes) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </details>
     </div>
   </section>
 </template>

@@ -56,7 +56,10 @@ import {
   resolveEnvironment,
   hasPermission,
   permissionsForRole,
-  PERMISSIONS
+  PERMISSIONS,
+  registryRetentionResponseSchema,
+  registryGcStatsSchema,
+  updateRegistryRetentionPolicyRequestSchema
 } from "@sm/contracts";
 import { correlationIdPlugin } from "./correlationId.js";
 import {
@@ -165,6 +168,10 @@ import {
   listRunningServicesForAgent,
   popLoadBalancerStatusForAgentService,
   upsertLoadBalancerStatus,
+  getRegistryRetentionPolicy,
+  updateRegistryRetentionPolicy,
+  applyRegistryRetention,
+  getRegistryStats,
   type QueryFn,
   type LoadBalancerStatusRow
 } from "@sm/db";
@@ -2814,6 +2821,43 @@ export function buildServer(opts: BuildServerOptions = {}) {
     return { ok: true };
   });
 
+  // --- Registry retention (admin) ---
+
+  app.get("/api/v1/admin/registry-retention", async (req, reply) => {
+    const s = await authorize(req as any, reply as any, { perm: "registry:admin" });
+    if (!s) return;
+    const q = await getBuildsQuery();
+    if (!q) return reply.status(503).send(apiErrorSchema.parse({ code: "DB_UNAVAILABLE", message: "Persistence unavailable", correlationId: (req as any).correlationId }));
+    const [policy, stats] = await Promise.all([
+      getRegistryRetentionPolicy(q),
+      getRegistryStats(q)
+    ]);
+    return registryRetentionResponseSchema.parse({ policy, stats });
+  });
+
+  app.put("/api/v1/admin/registry-retention", async (req, reply) => {
+    const s = await authorize(req as any, reply as any, { perm: "registry:admin" });
+    if (!s) return;
+    const body = updateRegistryRetentionPolicyRequestSchema.parse(req.body);
+    const q = await getBuildsQuery();
+    if (!q) return reply.status(503).send(apiErrorSchema.parse({ code: "DB_UNAVAILABLE", message: "Persistence unavailable", correlationId: (req as any).correlationId }));
+    const policy = await updateRegistryRetentionPolicy(q, body);
+    const stats = await getRegistryStats(q);
+    return registryRetentionResponseSchema.parse({ policy, stats });
+  });
+
+  // Manual sweep — useful for confirming the policy is doing what the
+  // operator expects without waiting for the periodic timer.
+  app.post("/api/v1/admin/registry-retention/run", async (req, reply) => {
+    const s = await authorize(req as any, reply as any, { perm: "registry:admin" });
+    if (!s) return;
+    const q = await getBuildsQuery();
+    if (!q) return reply.status(503).send(apiErrorSchema.parse({ code: "DB_UNAVAILABLE", message: "Persistence unavailable", correlationId: (req as any).correlationId }));
+    const policy = await getRegistryRetentionPolicy(q);
+    const result = await applyRegistryRetention(q, policy);
+    return registryGcStatsSchema.parse(result);
+  });
+
   // --- Agents ---
 
   app.get("/api/v1/agents", async (req, reply) => {
@@ -4462,6 +4506,39 @@ export function buildServer(opts: BuildServerOptions = {}) {
   staleSweepTimer.unref?.();
   app.addHook("onClose", async () => {
     clearInterval(staleSweepTimer);
+  });
+
+  // Registry retention sweep — applies the policy (keep_last_n_per_repo +
+  // max_total_bytes + keep_for_days) on a timer so the registry doesn't
+  // grow forever. The policy is read from the DB each tick so UI edits
+  // take effect on the next sweep without an API restart.
+  const registryGcMs = Number(process.env.SM_REGISTRY_GC_MS) || 30 * 60 * 1000; // 30m
+  let registryGcInFlight = false;
+  const registryGcTimer = setInterval(() => {
+    if (registryGcInFlight) return;
+    registryGcInFlight = true;
+    void (async () => {
+      try {
+        const q = await getBuildsQuery();
+        if (!q) return;
+        const policy = await getRegistryRetentionPolicy(q);
+        const stats = await applyRegistryRetention(q, policy);
+        if (stats.tagsDeleted > 0 || stats.blobsDeleted > 0) {
+          app.log.info?.(
+            { event: "registry_gc.swept", ...stats, policy },
+            "registry retention sweep"
+          );
+        }
+      } catch (err) {
+        app.log.warn?.({ event: "registry_gc.failed", err: (err as Error).message });
+      } finally {
+        registryGcInFlight = false;
+      }
+    })();
+  }, registryGcMs);
+  registryGcTimer.unref?.();
+  app.addHook("onClose", async () => {
+    clearInterval(registryGcTimer);
   });
 
   app.setNotFoundHandler(async (req, reply) => {

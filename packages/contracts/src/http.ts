@@ -402,3 +402,46 @@ export type ApiCredentialMetadata = z.infer<typeof apiCredentialMetadataSchema>;
 export type CreateApiCredentialRequest = z.infer<typeof createApiCredentialRequestSchema>;
 export type CreateApiCredentialResponse = z.infer<typeof createApiCredentialResponseSchema>;
 export type ListApiCredentialsResponse = z.infer<typeof listApiCredentialsResponseSchema>;
+
+// --- Registry retention -----------------------------------------------------
+
+export const registryRetentionPolicySchema = z.object({
+  keepLastNPerRepo: z.number().int().min(0),
+  maxTotalBytes: z.number().int().min(0),
+  /** 0 = no age-based pruning (only keep-last-N + size cap apply). */
+  keepForDays: z.number().int().min(0),
+  updatedAt: z.string().datetime()
+});
+export const updateRegistryRetentionPolicyRequestSchema = z.object({
+  keepLastNPerRepo: z.number().int().min(0).optional(),
+  maxTotalBytes: z.number().int().min(0).optional(),
+  keepForDays: z.number().int().min(0).optional()
+});
+export const registryStatsSchema = z.object({
+  totalBytes: z.number().int().min(0),
+  totalBlobs: z.number().int().min(0),
+  repos: z.array(
+    z.object({
+      repo: z.string(),
+      tags: z.number().int().min(0),
+      bytes: z.number().int().min(0)
+    })
+  )
+});
+export const registryGcStatsSchema = z.object({
+  tagsDeleted: z.number().int().min(0),
+  manifestsDeleted: z.number().int().min(0),
+  blobsDeleted: z.number().int().min(0),
+  bytesReclaimed: z.number().int().min(0),
+  totalBytesAfter: z.number().int().min(0)
+});
+export const registryRetentionResponseSchema = z.object({
+  policy: registryRetentionPolicySchema,
+  stats: registryStatsSchema
+});
+
+export type RegistryRetentionPolicy = z.infer<typeof registryRetentionPolicySchema>;
+export type UpdateRegistryRetentionPolicyRequest = z.infer<typeof updateRegistryRetentionPolicyRequestSchema>;
+export type RegistryStats = z.infer<typeof registryStatsSchema>;
+export type RegistryGcStats = z.infer<typeof registryGcStatsSchema>;
+export type RegistryRetentionResponse = z.infer<typeof registryRetentionResponseSchema>;

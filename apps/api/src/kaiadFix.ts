@@ -218,10 +218,12 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
   // GIT_SSH_COMMAND noise (the key path is per-run garbage).
   const shellQuote = (s: string) => (/[^\w@%+=:,./-]/.test(s) ? `'${s.replace(/'/g, `'\\''`)}'` : s);
   const cmdLine = (bin: string, args: string[]) => [bin, ...args].map(shellQuote).join(" ");
-  // tracked runs a step's command, surfaces start/end events with the
-  // exact cmd, exit code, and trimmed output, and returns the result.
-  // step "succeeded"/"failed"/"started"/"no_changes" are status-only —
-  // not used here; "cloning" / "cli" / "committing" / "pushing" map.
+  // tracked runs a step's command and emits ONE event with the exact
+  // cmd, exit code, and trimmed output (no separate "started" event —
+  // the umbrella incident.last_fix_status carries live in-flight state
+  // via the status pill, and a duplicate start row with no output just
+  // adds noise). step "succeeded"/"failed"/"started"/"no_changes" are
+  // status-only; here it's "cloning" / "cli" / "committing" / "pushing".
   const tracked = async (
     step: FixProgressEvent["step"],
     bin: string,
@@ -229,7 +231,6 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
     opts: Parameters<typeof run>[2]
   ): Promise<{ code: number; stdout: string; stderr: string; output: string }> => {
     const cmd = cmdLine(bin, args);
-    emit({ step, cmd });
     const r = await run(bin, args, opts);
     const output = (r.stdout + r.stderr).replace(/\s+$/, "");
     emit({
@@ -237,7 +238,9 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       ok: r.code === 0,
       cmd,
       code: r.code,
-      output: output.slice(0, OUTPUT_HEAD),
+      // Render "(no output)" when the command genuinely produced none,
+      // instead of an empty <details> in the UI.
+      output: output.length > 0 ? output.slice(0, OUTPUT_HEAD) : "(no output)",
       message: r.code === 0 ? undefined : snippet(output)
     });
     return { ...r, output };
@@ -295,7 +298,6 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       cliGid = FIX_GID;
     }
     const cliCmd = cmdLine(bin, args);
-    emit({ step: "cli", message: p.executor, cmd: cliCmd });
     const cli = await runCli(bin, args, {
       cwd: repoDir,
       env: cliEnv,
@@ -318,13 +320,14 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       contextTail: p.contextLines.slice(-12),
       cliOutHead: cliOut.slice(0, 2500)
     });
+    const cliOutForUi = cliOut.length > 0 ? cliOut.slice(0, OUTPUT_HEAD) : "(no output)";
     if (cli.code !== 0) {
       emit({
         step: "cli",
         ok: false,
         cmd: cliCmd,
         code: cli.code,
-        output: cliOut.slice(0, OUTPUT_HEAD),
+        output: cliOutForUi,
         message: snippet(cliOut) || `${p.executor} exited ${cli.code}`
       });
       return { ok: false, reason: "cli_failed", output: `${p.executor} failed:\n${cliOut}` };
@@ -334,7 +337,7 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       ok: true,
       cmd: cliCmd,
       code: cli.code,
-      output: cliOut.slice(0, OUTPUT_HEAD)
+      output: cliOutForUi
     });
 
     const status = await run("git", ["status", "--porcelain"], {

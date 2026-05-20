@@ -335,7 +335,11 @@ const btnStyle = {
                           v-if="ev.cmd"
                           :style="{ display: 'block', fontSize: '0.72rem', color: 'var(--color-text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }"
                         >$ {{ ev.cmd }}</code>
-                        <details v-if="ev.output" :style="{ marginTop: '0.1rem' }">
+                        <span
+                          v-if="ev.output === '(no output)'"
+                          :style="{ fontSize: '0.72rem', color: 'var(--color-text-secondary)', fontStyle: 'italic' }"
+                        >(no output)</span>
+                        <details v-else-if="ev.output" :style="{ marginTop: '0.1rem' }">
                           <summary :style="{ cursor: 'pointer', fontSize: '0.72rem', color: 'var(--color-text-secondary)' }">output ({{ ev.output.length }} chars)</summary>
                           <pre
                             :style="{

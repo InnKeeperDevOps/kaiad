@@ -67,11 +67,11 @@ export interface KaiadFixResult {
   output: string;
 }
 
-// Per-CLI-attempt timeout. With the retry loop (default 3 attempts)
-// the total fix budget is 3× this. 5 min × 3 = 15 min worst case
-// felt sluggish on the Incidents page when the CLI silently hung; 90s
-// surfaces failures fast while still leaving headroom for a real fix.
-const DEFAULT_TIMEOUT_MS = Number(process.env.SM_EXECUTOR_TIMEOUT_MS) || 90 * 1000;
+// Per-CLI-attempt timeout. Measured: a real claude fix on the aibe
+// repo (clone → tool-use loop → edit → exit) takes ~3 minutes. Set the
+// budget to 4 min so a successful fix has headroom; the retry loop
+// caps total at 3× this. SM_EXECUTOR_TIMEOUT_MS still tunes it.
+const DEFAULT_TIMEOUT_MS = Number(process.env.SM_EXECUTOR_TIMEOUT_MS) || 4 * 60 * 1000;
 
 // The AI CLIs refuse to run as root ("--dangerously-skip-permissions /
 // bypassPermissions cannot be used with root"). The kaiad container

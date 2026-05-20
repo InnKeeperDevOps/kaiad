@@ -274,17 +274,53 @@ export async function recordFixProgress(
     sets.push(`last_fix_events = COALESCE(last_fix_events, '[]'::jsonb) || $${values.length}::jsonb`);
   }
   if (sets.length === 0) return;
+  // Update the most recent incident for this (tenant, service,
+  // fingerprint) regardless of status. The runner's own finalize step
+  // fires AFTER resolveIncidentByFingerprint has flipped the incident
+  // to 'resolved'; an `status IN ('open','acknowledged')` filter here
+  // silently dropped that final patch and stuck last_fix_status at
+  // "running" forever. Manual operator resolve mid-run had the same
+  // effect. The progress timeline is tied to the incident's lifetime,
+  // not its current status, so always target it by id.
   await query(
     `UPDATE incidents SET ${sets.join(", ")}
-       WHERE tenant_id = $1 AND service_id = $2 AND fingerprint = $3
-         AND id = (
-           SELECT id FROM incidents
-           WHERE tenant_id = $1 AND service_id = $2 AND fingerprint = $3
-             AND status IN ('open','acknowledged')
-           ORDER BY last_seen_at DESC LIMIT 1
-         )`,
+       WHERE id = (
+         SELECT id FROM incidents
+         WHERE tenant_id = $1 AND service_id = $2 AND fingerprint = $3
+         ORDER BY last_seen_at DESC LIMIT 1
+       )`,
     values,
   );
+}
+
+/** Mark any in-kaiad fix that has been "running"/cloning/cli/committing/
+ *  pushing for longer than `olderThanMs` as failed (the runner is gone
+ *  — container restart, crash, hung child). Appends a synthetic event
+ *  so the UI shows why and frees the timeline for a fresh attempt.
+ *  Returns the number of incidents reaped. */
+export async function reapStuckFixAttempts(
+  query: QueryFn,
+  olderThanMs: number,
+): Promise<number> {
+  const cutoff = new Date(Date.now() - olderThanMs).toISOString();
+  const event = {
+    at: new Date().toISOString(),
+    step: "failed",
+    ok: false,
+    message: `fix attempt timed out after ${Math.round(olderThanMs / 60000)} min — runner went away`
+  };
+  const { rows } = await query(
+    `UPDATE incidents
+        SET last_fix_status = 'failed',
+            last_fix_finished_at = now(),
+            last_fix_events = COALESCE(last_fix_events, '[]'::jsonb) || $2::jsonb
+      WHERE last_fix_status IN ('running','cloning','cli','committing','pushing')
+        AND last_fix_started_at IS NOT NULL
+        AND last_fix_started_at < $1::timestamptz
+      RETURNING id`,
+    [cutoff, JSON.stringify(event)],
+  );
+  return rows.length;
 }
 
 /** Resolve any open/acknowledged incident for this service+fingerprint

@@ -172,6 +172,7 @@ import {
   updateRegistryRetentionPolicy,
   applyRegistryRetention,
   getRegistryStats,
+  reapStuckFixAttempts,
   type QueryFn,
   type LoadBalancerStatusRow
 } from "@sm/db";
@@ -4612,6 +4613,39 @@ export function buildServer(opts: BuildServerOptions = {}) {
   registryGcTimer.unref?.();
   app.addHook("onClose", async () => {
     clearInterval(registryGcTimer);
+  });
+
+  // Stuck-fix reaper — flip any incident whose last_fix_status has been
+  // in a running-ish state past the reaper window to "failed". Handles
+  // runner crashes / container restarts / hung child processes that
+  // would otherwise freeze the Incidents UI on "Fix running…".
+  const stuckFixMs = Number(process.env.SM_FIX_STUCK_MS) || 20 * 60 * 1000; // 20m
+  const stuckFixSweepMs = Number(process.env.SM_FIX_STUCK_SWEEP_MS) || 2 * 60 * 1000; // 2m
+  let stuckFixInFlight = false;
+  const stuckFixTimer = setInterval(() => {
+    if (stuckFixInFlight) return;
+    stuckFixInFlight = true;
+    void (async () => {
+      try {
+        const q = await getBuildsQuery();
+        if (!q) return;
+        const n = await reapStuckFixAttempts(q, stuckFixMs);
+        if (n > 0) {
+          app.log.info?.(
+            { event: "stuck_fix.reaped", count: n, stuckMs: stuckFixMs },
+            "reaped stuck fix attempts"
+          );
+        }
+      } catch (err) {
+        app.log.warn?.({ event: "stuck_fix.failed", err: (err as Error).message });
+      } finally {
+        stuckFixInFlight = false;
+      }
+    })();
+  }, stuckFixSweepMs);
+  stuckFixTimer.unref?.();
+  app.addHook("onClose", async () => {
+    clearInterval(stuckFixTimer);
   });
 
   app.setNotFoundHandler(async (req, reply) => {

@@ -21,7 +21,7 @@ import Badge from "../../components/Badge.vue";
 import Button from "../../components/Button.vue";
 import Card from "../../components/Card.vue";
 import { useTelemetryStream } from "./useTelemetryStream.js";
-import ServicesForAgentSection from "./ServicesForAgentSection.vue";
+import AgentServicesSection from "./AgentServicesSection.vue";
 import ErrorGroupsSection from "./ErrorGroupsSection.vue";
 import ComponentLogViewer from "./ComponentLogViewer.vue";
 import {
@@ -241,16 +241,6 @@ const cellValue: CSSProperties = {
   fontSize: "1.05rem",
   fontWeight: 600
 };
-
-const tdStyle: CSSProperties = { padding: "0.5rem", verticalAlign: "top" };
-const thStyle: CSSProperties = {
-  textAlign: "left",
-  padding: "0.5rem",
-  borderBottom: "2px solid var(--color-border)",
-  color: "var(--color-text-secondary)",
-  fontSize: "0.8rem",
-  fontWeight: 600
-};
 </script>
 
 <template>
@@ -355,78 +345,8 @@ const thStyle: CSSProperties = {
         role="alert"
       >{{ actionError }}</p>
 
-      <!-- Identity / config card -->
-      <Card title="Identity" :style="{ marginBottom: '1rem' }">
-        <div
-          :style="{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-            gap: '1rem',
-            fontSize: '0.85rem'
-          }"
-        >
-          <div>
-            <div :style="cellTitle">Environment</div>
-            <select
-              v-if="!isViewer"
-              :value="merged.environment"
-              :disabled="saving"
-              :style="{
-                padding: '0.25rem 0.45rem',
-                fontSize: '0.9rem',
-                background: 'var(--color-surface)',
-                color: 'var(--color-text-primary)',
-                border: '1px solid var(--color-border)',
-                borderRadius: '4px'
-              }"
-              @change="onEnvironmentChange(($event.target as HTMLSelectElement).value)"
-            >
-              <option value="development">development</option>
-              <option value="staging">staging</option>
-              <option value="production">production</option>
-              <option
-                v-if="!['development','staging','production'].includes(merged.environment)"
-                :value="merged.environment"
-              >{{ merged.environment }}</option>
-            </select>
-            <span v-else :style="cellValue">{{ merged.environment }}</span>
-          </div>
-          <div>
-            <div :style="cellTitle">Runtime</div>
-            <div :style="cellValue">{{ formatRuntimeBackend(merged.runtimeBackend) }}</div>
-          </div>
-          <div>
-            <div :style="cellTitle">Version</div>
-            <div :style="cellValue">{{ merged.version ?? "—" }}</div>
-          </div>
-          <div>
-            <div :style="cellTitle">Last seen</div>
-            <div :style="cellValue" :title="merged.lastSeenAt ?? undefined">
-              {{ formatRelativeTime(merged.lastSeenAt) }}
-            </div>
-          </div>
-          <div>
-            <div :style="cellTitle">Cert fingerprint</div>
-            <div
-              :style="{ ...cellValue, fontFamily: 'ui-monospace, monospace', fontSize: '0.85rem' }"
-              :title="merged.certFingerprint ?? undefined"
-            >{{ truncateFingerprint(merged.certFingerprint ?? null, 28) }}</div>
-          </div>
-          <div :style="{ gridColumn: '1 / -1' }">
-            <div :style="cellTitle">Capabilities</div>
-            <div
-              v-if="merged.allowedCapabilities && merged.allowedCapabilities.length > 0"
-              :style="{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap' }"
-            >
-              <Badge v-for="c in merged.allowedCapabilities" :key="c" variant="muted">{{ c }}</Badge>
-            </div>
-            <div v-else :style="{ color: 'var(--color-text-secondary)' }">none granted</div>
-          </div>
-        </div>
-      </Card>
-
-      <!-- Host telemetry card -->
-      <Card title="Host telemetry" :style="{ marginBottom: '1rem' }">
+      <!-- Metrics on top: host telemetry is the first thing on the page. -->
+      <Card title="Host metrics" :style="{ marginBottom: '1rem' }">
         <div
           :style="{
             display: 'grid',
@@ -524,89 +444,15 @@ const thStyle: CSSProperties = {
         </div>
       </Card>
 
-      <!-- Bound services + running version -->
+      <!-- Services: each bound service with its running version + containers. -->
       <Card title="Services" :style="{ marginBottom: '1rem' }">
-        <ServicesForAgentSection
+        <AgentServicesSection
           :agent-id="merged.id"
           :all-services="services"
+          :apps="apps"
           :disabled="isViewer"
           @change="fetchData"
         />
-      </Card>
-
-      <!-- Apps (per-container telemetry) -->
-      <Card title="Apps" :style="{ marginBottom: '1rem' }">
-        <p
-          v-if="apps.length === 0"
-          :style="{ margin: 0, fontSize: '0.85rem', color: 'var(--color-text-secondary)' }"
-        >
-          No managed apps yet. Telemetry is only reported for apps the agent manages
-          (Docker containers from sync_desired_state). Attach services to this agent or
-          push a desired-state update to populate this table.
-        </p>
-        <div v-else :style="{ overflowX: 'auto' }">
-          <table :style="{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem', minWidth: '720px' }">
-            <thead>
-              <tr>
-                <th :style="thStyle">Container</th>
-                <th :style="thStyle">Image</th>
-                <th :style="thStyle">State</th>
-                <th :style="thStyle">CPU</th>
-                <th :style="thStyle">Memory</th>
-                <th :style="thStyle">Net RX</th>
-                <th :style="thStyle">Net TX</th>
-                <th :style="thStyle">Sampled</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="app in [...apps].sort((x, y) => (x.name ?? x.containerId).localeCompare(y.name ?? y.containerId))"
-                :key="app.containerId"
-                :style="{ borderTop: '1px solid var(--color-border)' }"
-              >
-                <td :style="tdStyle">
-                  <div :style="{ fontWeight: 600 }">{{ app.name ?? app.containerId.slice(0, 12) }}</div>
-                  <div
-                    :style="{
-                      fontSize: '0.7rem',
-                      color: 'var(--color-text-secondary)',
-                      fontFamily: 'ui-monospace, monospace'
-                    }"
-                  >{{ app.containerId.slice(0, 12) }}</div>
-                </td>
-                <td :style="{ ...tdStyle, fontSize: '0.78rem' }" :title="app.image">
-                  {{ app.image ? app.image.split("@")[0] : "—" }}
-                </td>
-                <td :style="tdStyle">
-                  <Badge :variant="app.state === 'running' ? 'success' : 'muted'">
-                    {{ app.state ?? "—" }}
-                  </Badge>
-                </td>
-                <td :style="tdStyle">{{ formatPercent(app.cpuPercent) }}</td>
-                <td :style="tdStyle">
-                  <template v-if="app.memPercent !== undefined">
-                    <div>{{ formatPercent(app.memPercent) }}</div>
-                    <div
-                      v-if="app.memUsedBytes !== undefined && app.memLimitBytes !== undefined"
-                      :style="{ fontSize: '0.7rem', color: 'var(--color-text-secondary)' }"
-                    >
-                      {{ formatBytes(app.memUsedBytes) }} / {{ formatBytes(app.memLimitBytes) }}
-                    </div>
-                  </template>
-                  <template v-else-if="app.memUsedBytes !== undefined">
-                    {{ formatBytes(app.memUsedBytes) }}
-                  </template>
-                  <template v-else>—</template>
-                </td>
-                <td :style="tdStyle">{{ formatBytesPerSec(app.netRxBytesPerSec) }}</td>
-                <td :style="tdStyle">{{ formatBytesPerSec(app.netTxBytesPerSec) }}</td>
-                <td :style="{ ...tdStyle, fontSize: '0.7rem', color: 'var(--color-text-secondary)' }">
-                  {{ new Date(app.ts).toLocaleTimeString() }}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
       </Card>
 
       <Card title="Error groups (auto-fix)">
@@ -615,6 +461,76 @@ const thStyle: CSSProperties = {
 
       <Card title="Agent logs" :style="{ marginTop: '1rem' }">
         <ComponentLogViewer kind="agent" :agent-id="merged.id" />
+      </Card>
+
+      <!-- Identity / config — agent metadata, kept below the service view. -->
+      <Card title="Identity" :style="{ marginTop: '1rem' }">
+        <div
+          :style="{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+            gap: '1rem',
+            fontSize: '0.85rem'
+          }"
+        >
+          <div>
+            <div :style="cellTitle">Environment</div>
+            <select
+              v-if="!isViewer"
+              :value="merged.environment"
+              :disabled="saving"
+              :style="{
+                padding: '0.25rem 0.45rem',
+                fontSize: '0.9rem',
+                background: 'var(--color-surface)',
+                color: 'var(--color-text-primary)',
+                border: '1px solid var(--color-border)',
+                borderRadius: '4px'
+              }"
+              @change="onEnvironmentChange(($event.target as HTMLSelectElement).value)"
+            >
+              <option value="development">development</option>
+              <option value="staging">staging</option>
+              <option value="production">production</option>
+              <option
+                v-if="!['development','staging','production'].includes(merged.environment)"
+                :value="merged.environment"
+              >{{ merged.environment }}</option>
+            </select>
+            <span v-else :style="cellValue">{{ merged.environment }}</span>
+          </div>
+          <div>
+            <div :style="cellTitle">Runtime</div>
+            <div :style="cellValue">{{ formatRuntimeBackend(merged.runtimeBackend) }}</div>
+          </div>
+          <div>
+            <div :style="cellTitle">Version</div>
+            <div :style="cellValue">{{ merged.version ?? "—" }}</div>
+          </div>
+          <div>
+            <div :style="cellTitle">Last seen</div>
+            <div :style="cellValue" :title="merged.lastSeenAt ?? undefined">
+              {{ formatRelativeTime(merged.lastSeenAt) }}
+            </div>
+          </div>
+          <div>
+            <div :style="cellTitle">Cert fingerprint</div>
+            <div
+              :style="{ ...cellValue, fontFamily: 'ui-monospace, monospace', fontSize: '0.85rem' }"
+              :title="merged.certFingerprint ?? undefined"
+            >{{ truncateFingerprint(merged.certFingerprint ?? null, 28) }}</div>
+          </div>
+          <div :style="{ gridColumn: '1 / -1' }">
+            <div :style="cellTitle">Capabilities</div>
+            <div
+              v-if="merged.allowedCapabilities && merged.allowedCapabilities.length > 0"
+              :style="{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap' }"
+            >
+              <Badge v-for="c in merged.allowedCapabilities" :key="c" variant="muted">{{ c }}</Badge>
+            </div>
+            <div v-else :style="{ color: 'var(--color-text-secondary)' }">none granted</div>
+          </div>
+        </div>
       </Card>
     </template>
   </section>

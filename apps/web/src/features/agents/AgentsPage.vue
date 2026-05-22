@@ -78,7 +78,7 @@ onUnmounted(() => {
 });
 
 // Number of services bound to each agent — keeps the list informative
-// without rendering the full ServicesForAgentSection inline.
+// without rendering the full AgentServicesSection inline.
 const serviceCountByAgent = computed(() => {
   const m = new Map<string, number>();
   for (const s of services.value) {

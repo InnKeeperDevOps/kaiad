@@ -29,7 +29,7 @@ creation time — nothing more.
 | Scope | Unlocks |
 |---|---|
 | `enrollment-tokens.create` | `POST /api/v1/agents/enrollment-tokens` — mint short-TTL enrollment tokens for new agents. |
-| `agents.read` | `GET /api/v1/agents`, `GET /api/v1/agents/:id` — for status polling. |
+| `agents.read` | `GET /api/v1/agents`, `GET /api/v1/agents/:id` — status polling; the scope the kaiad operator credential needs. |
 
 The scope set is intentionally narrow and grows by deliberate addition.
 If you need an action a machine integration can't perform today, open an
@@ -39,6 +39,17 @@ issue rather than minting a session and storing it as a service account
 ## Mint a credential
 
 Owner or admin session required.
+
+### From the panel
+
+**Settings → API Credentials** is the easiest path. Enter a name, tick
+the scopes the integration needs, and select **Create credential**. The
+token appears once in a highlighted box with a copy button — copy it
+before navigating away. The table below the form lists every credential
+with its status, creation time, and last-used time, each with a
+**Revoke** action.
+
+### With the API
 
 ```bash
 curl -fsS -X POST $KAIAD_BASE_URL/api/v1/admin/api-credentials \
@@ -85,10 +96,38 @@ curl -fsS -X POST $KAIAD_BASE_URL/api/v1/agents/enrollment-tokens \
   -d '{"ttlSeconds": 300}'
 ```
 
+## The kaiad operator
+
+The [Kaiad agent operator]({% link agent/kubernetes.md %}) consumes an
+API credential through the `KAIAD_API_CREDENTIAL` environment variable on
+its Deployment, paired with `KAIAD_API_BASE_URL`. With **both** set, the
+operator:
+
+- polls `GET /api/v1/agents/:id` to enrich each KaiadAgent's `Ready`
+  condition with control-plane status;
+- compares the agent version the control plane ships against the image
+  pinned in the CR and auto-bumps `spec.image` when it has fallen behind;
+- ships its own process logs to the panel (`POST /api/v1/operator/logs`).
+
+A credential with the `agents.read` scope covers all of this. Without
+`KAIAD_API_CREDENTIAL` the operator still reconciles, but `Ready`
+reflects pod readiness only and operator logs are not shipped.
+
+Wire it after minting:
+
+```bash
+kubectl -n kaiad-system set env deploy/kaiad-operator \
+  KAIAD_API_CREDENTIAL=kop_...
+```
+
+The `set env` rolls the operator pod; it comes up with `statusPolling`
+enabled.
+
 ## List and revoke
 
-Owner or admin session required for both. The list endpoint **never
-returns the plaintext token** — only the metadata.
+Owner or admin session required for both. **Settings → API Credentials**
+in the panel lists and revokes credentials directly. The list endpoint
+**never returns the plaintext token** — only the metadata.
 
 ```bash
 curl -fsS $KAIAD_BASE_URL/api/v1/admin/api-credentials \

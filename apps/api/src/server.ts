@@ -1528,13 +1528,18 @@ export function buildServer(opts: BuildServerOptions = {}) {
           if (!tenantId) {
             // No tenant binding yet — drop silently; agent will resend later.
           } else if (isProbablyUserInputError(msg.message)) {
-            // User-input errors are not auto-fix candidates. We still log
-            // for visibility but do not create an error group.
+            // User-input errors are not auto-fix candidates — no error
+            // group, no incident. The Fastify logger is a no-op in prod,
+            // so log via console too: a dropped error otherwise leaves
+            // zero trace and looks like incident tracking is broken.
             req.log?.info?.({
               event: "auto_fix.skip_user_input",
               serviceId: msg.serviceId,
               message: msg.message
             });
+            console.log(
+              `[app_log_error] skipped as user-input (no incident) service=${msg.serviceId}: ${msg.message}`
+            );
           } else {
             ensureRegistered(msg.agentId);
             const upsert = errorGroups.upsert({

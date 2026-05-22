@@ -46,6 +46,9 @@ describe("normalizeErrorMessage", () => {
 describe("isProbablyUserInputError", () => {
   it("filters 4xx-style messages", () => {
     expect(isProbablyUserInputError("HTTP 400 bad request")).toBe(true);
+    expect(isProbablyUserInputError("HTTP/1.1 404 Not Found")).toBe(true);
+    expect(isProbablyUserInputError("request failed with status: 403")).toBe(true);
+    expect(isProbablyUserInputError("statusCode=401")).toBe(true);
     expect(isProbablyUserInputError("validation failed: email is required")).toBe(true);
     expect(isProbablyUserInputError("invalid input: id must be a string")).toBe(true);
     expect(isProbablyUserInputError("Unauthorized")).toBe(true);
@@ -57,6 +60,19 @@ describe("isProbablyUserInputError", () => {
     expect(isProbablyUserInputError("TypeError: cannot read property foo of null")).toBe(false);
     expect(isProbablyUserInputError("Internal server error: db connection lost")).toBe(false);
     expect(isProbablyUserInputError("uncaught exception in worker")).toBe(false);
+  });
+
+  it("does NOT filter a bare 4xx number that isn't an HTTP status", () => {
+    // Regression: an upstream/outbound 4xx the service itself hit is a
+    // service bug, not user input. A bare "401" must not be swallowed.
+    expect(
+      isProbablyUserInputError(
+        "ClaudeExecutionException: Claude CLI returned is_error: " +
+          "Failed to authenticate. API Error: 401 Invalid authentication credentials"
+      )
+    ).toBe(false);
+    expect(isProbablyUserInputError("request completed in 437ms")).toBe(false);
+    expect(isProbablyUserInputError("processed 412 records")).toBe(false);
   });
 });
 

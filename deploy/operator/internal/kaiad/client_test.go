@@ -3,7 +3,6 @@ package kaiad
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,58 +11,25 @@ import (
 	"time"
 )
 
-func TestMintEnrollmentToken_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/agents/enrollment-tokens" || r.Method != http.MethodPost {
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
-		if got := r.Header.Get("Authorization"); got != "Bearer cred-1" {
-			t.Errorf("auth header: %q", got)
-		}
-		body, _ := io.ReadAll(r.Body)
-		var parsed map[string]int
-		_ = json.Unmarshal(body, &parsed)
-		if parsed["ttlSeconds"] != 300 {
-			t.Errorf("ttlSeconds: %d", parsed["ttlSeconds"])
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"id":        "tok-1",
-			"token":     "enroll-secret",
-			"expiresAt": "2026-05-08T20:14:02Z",
-			"agentId":   "agt-future-1",
-		})
-	}))
-	defer srv.Close()
+// GetAgent is the only call the operator makes; these exercise the shared
+// do() retry policy through it.
 
-	c := NewClient(srv.URL, "cred-1")
-	tok, err := c.MintEnrollmentToken(context.Background(), 300)
-	if err != nil {
-		t.Fatalf("mint: %v", err)
-	}
-	if tok.Token != "enroll-secret" || tok.ID != "tok-1" || tok.AgentID != "agt-future-1" {
-		t.Errorf("token decoded wrong: %+v", tok)
-	}
-}
-
-func TestMintEnrollmentToken_RetriesOn5xx(t *testing.T) {
+func TestGetAgent_RetriesOn5xx(t *testing.T) {
 	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		n := atomic.AddInt32(&calls, 1)
 		if n < 3 {
 			http.Error(w, "boom", http.StatusBadGateway)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"id": "tok-1", "token": "x", "expiresAt": "2026-05-08T00:00:00Z",
-		})
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "agt-1", "status": "online"})
 	}))
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "cred", WithMaxRetries(5))
 	c.httpClient.Timeout = 2 * time.Second
-	if _, err := c.MintEnrollmentToken(context.Background(), 300); err != nil {
+	if _, err := c.GetAgent(context.Background(), "agt-1"); err != nil {
 		t.Fatalf("expected eventual success, got %v", err)
 	}
 	if got := atomic.LoadInt32(&calls); got != 3 {
@@ -71,16 +37,16 @@ func TestMintEnrollmentToken_RetriesOn5xx(t *testing.T) {
 	}
 }
 
-func TestMintEnrollmentToken_DoesNotRetry4xx(t *testing.T) {
+func TestGetAgent_DoesNotRetry4xx(t *testing.T) {
 	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&calls, 1)
 		http.Error(w, `{"code":"FORBIDDEN","message":"missing scope"}`, http.StatusForbidden)
 	}))
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "cred", WithMaxRetries(5))
-	_, err := c.MintEnrollmentToken(context.Background(), 300)
+	_, err := c.GetAgent(context.Background(), "agt-1")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -122,6 +88,7 @@ func TestGetAgent_Success(t *testing.T) {
 			"status":             "online",
 			"websocketConnected": true,
 			"lastSeenAt":         "2026-05-08T20:00:00Z",
+			"latestAgentVersion": "0.1.21",
 		})
 	}))
 	defer srv.Close()
@@ -134,11 +101,7 @@ func TestGetAgent_Success(t *testing.T) {
 	if info.Status != "online" || !info.WebsocketConnected {
 		t.Errorf("agent decoded wrong: %+v", info)
 	}
-}
-
-func TestMintEnrollmentToken_ValidatesTTL(t *testing.T) {
-	c := NewClient("http://localhost", "cred")
-	if _, err := c.MintEnrollmentToken(context.Background(), 0); err == nil {
-		t.Error("expected error for ttl=0")
+	if info.LatestAgentVersion != "0.1.21" {
+		t.Errorf("LatestAgentVersion = %q, want 0.1.21", info.LatestAgentVersion)
 	}
 }

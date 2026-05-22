@@ -6,6 +6,7 @@ import type {
   MonitoredService,
   SshKey
 } from "@sm/contracts";
+import type { ComponentLogInput, ComponentLogRow, ComponentLogSource } from "@sm/db";
 
 export type DomainStore = {
   listIncidents(tenantId: string): Promise<Incident[]>;
@@ -125,6 +126,16 @@ export type DomainStore = {
   attachServiceToAgent(tenantId: string, agentId: string, serviceId: string): Promise<boolean>;
   detachServiceFromAgent(tenantId: string, agentId: string, serviceId: string): Promise<boolean>;
   listServicesForAgent(tenantId: string, agentId: string): Promise<MonitoredService[]>;
+
+  // Agent / operator self-logs (their own process output, surfaced in the panel).
+  appendComponentLogs(tenantId: string, entries: ComponentLogInput[]): Promise<void>;
+  listComponentLogs(
+    tenantId: string,
+    filter: { source: ComponentLogSource; sourceId: string },
+    opts: { limit: number; afterId?: string }
+  ): Promise<ComponentLogRow[]>;
+  /** Retention sweep — drops component log lines older than `cutoff`. */
+  pruneComponentLogs(cutoff: Date): Promise<void>;
 };
 
 const incidents = new Map<string, Incident>();
@@ -151,6 +162,9 @@ function bindingsForService(serviceId: string): { agentId: string }[] {
 function withAgents(svc: MonitoredService): MonitoredService {
   return { ...svc, agents: bindingsForService(svc.id) };
 }
+/** In-memory component_logs companion (dev/test store). Capped per tenant. */
+const componentLogs = new Map<string, ComponentLogRow[]>();
+let componentLogSeq = 0;
 const sshKeys = new Map<string, SshKey>();
 /** In-memory companion to `sshKeys`: holds the raw private key value (only
  *  populated when a caller created an `uploaded` key). The value is intentionally
@@ -485,6 +499,36 @@ export function createMemoryDomainStore(): DomainStore {
         if (svc && svc.tenantId === tenantId) out.push(withAgents(svc));
       }
       return out;
+    },
+    async appendComponentLogs(tenantId, entries) {
+      const list = componentLogs.get(tenantId) ?? [];
+      for (const e of entries) {
+        componentLogSeq += 1;
+        list.push({
+          id: String(componentLogSeq),
+          source: e.source,
+          sourceId: e.sourceId,
+          level: e.level,
+          message: e.message,
+          ts: e.ts
+        });
+      }
+      if (list.length > 5000) list.splice(0, list.length - 5000);
+      componentLogs.set(tenantId, list);
+    },
+    async listComponentLogs(tenantId, filter, opts) {
+      const all = (componentLogs.get(tenantId) ?? []).filter(
+        (l) => l.source === filter.source && l.sourceId === filter.sourceId
+      );
+      if (opts.afterId) {
+        const after = Number(opts.afterId);
+        return all.filter((l) => Number(l.id) > after).slice(0, opts.limit);
+      }
+      return all.slice(-opts.limit);
+    },
+    async pruneComponentLogs() {
+      // The memory store is bounded by process lifetime (and the per-tenant
+      // cap in appendComponentLogs); nothing to prune.
     }
   };
 }

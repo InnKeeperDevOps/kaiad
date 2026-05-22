@@ -19,7 +19,6 @@ func TestKaiadAgentJSONRoundTrip(t *testing.T) {
 			ControlPlane: ControlPlaneSpec{RealtimeURL: "wss://panel.example.com/realtime"},
 			Enrollment: EnrollmentSpec{
 				SecretRef: &SecretKeyRef{Name: "kaiad-enrollment", Key: "token"},
-				AutoMint:  false,
 			},
 			ServiceID: "svc-api-1",
 			Image:     "ghcr.io/innkeeperdevops/kaiad-agent:v1.2.3",
@@ -61,7 +60,7 @@ func TestKaiadAgentDeepCopyDecouplesSlicesAndMaps(t *testing.T) {
 	original := &KaiadAgent{
 		Spec: KaiadAgentSpec{
 			ControlPlane: ControlPlaneSpec{RealtimeURL: "wss://x"},
-			Enrollment:   EnrollmentSpec{AutoMint: true},
+			Enrollment:   EnrollmentSpec{SecretRef: &SecretKeyRef{Name: "enroll"}},
 			Image:        "img:1",
 			NodeSelector: map[string]string{"role": "edge"},
 			Tolerations:  []corev1.Toleration{{Key: "foo", Operator: corev1.TolerationOpEqual, Value: "bar"}},
@@ -89,13 +88,10 @@ func TestKaiadAgentDeepCopyDecouplesSlicesAndMaps(t *testing.T) {
 }
 
 func TestEnrollmentSpecValidationGuidance(t *testing.T) {
-	// Sanity: zero value is the "neither" case the operator must reject when
-	// reconciling, not at marshal time. The CRD validation marker is on
-	// AutoMint defaulting to false, so an empty struct round-trips cleanly.
+	// Sanity: the zero value has no SecretRef — the "missing enrollment"
+	// case the operator rejects at reconcile time (resolveEnrollment), not
+	// at marshal time, so an empty struct still round-trips cleanly.
 	e := EnrollmentSpec{}
-	if e.AutoMint {
-		t.Error("AutoMint should default to false")
-	}
 	if e.SecretRef != nil {
 		t.Error("SecretRef should default to nil")
 	}

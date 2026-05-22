@@ -184,3 +184,20 @@ func (c *Client) GetAgent(ctx context.Context, agentID string) (AgentInfo, error
 		LatestAgentVersion: resp.LatestAgentVersion,
 	}, nil
 }
+
+// OperatorLogLine is one line of the operator's own log output.
+type OperatorLogLine struct {
+	Ts      string `json:"ts"`
+	Level   string `json:"level"`
+	Message string `json:"message"`
+}
+
+// PostOperatorLogs ships a batch of the operator's own log lines to the
+// Kaiad API (POST /api/v1/operator/logs) so they surface in the panel.
+func (c *Client) PostOperatorLogs(ctx context.Context, lines []OperatorLogLine) error {
+	if len(lines) == 0 {
+		return nil
+	}
+	return c.do(ctx, http.MethodPost, "/api/v1/operator/logs",
+		map[string]any{"lines": lines}, nil)
+}

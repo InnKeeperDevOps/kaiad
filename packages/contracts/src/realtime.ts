@@ -162,6 +162,28 @@ export const appStatsSchema = z.object({
 
 export type AppStatsMessage = z.infer<typeof appStatsSchema>;
 
+/**
+ * agent_log carries a batch of the kaiad-agent's OWN process log lines
+ * (the agent binary's stdout — NOT monitored-service logs, which travel
+ * as log_event / app_log_error). Batched so a chatty startup doesn't
+ * emit one websocket frame per line. Surfaced in the panel.
+ */
+const agentLogSchema = z.object({
+  type: z.literal("agent_log"),
+  agentId: z.string(),
+  lines: z
+    .array(
+      z.object({
+        ts: z.string(),
+        level: z.enum(["debug", "info", "warn", "error", "fatal"]),
+        message: z.string()
+      })
+    )
+    .max(500)
+});
+
+export type AgentLogMessage = z.infer<typeof agentLogSchema>;
+
 export const agentToPlatformMessageSchema = z.discriminatedUnion("type", [
   heartbeatSchema,
   logEventSchema,
@@ -169,7 +191,8 @@ export const agentToPlatformMessageSchema = z.discriminatedUnion("type", [
   hostStatsSchema,
   appStatsSchema,
   appLogErrorSchema,
-  lbStatusReportSchema
+  lbStatusReportSchema,
+  agentLogSchema
 ]);
 
 export type LbStatusReportMessage = z.infer<typeof lbStatusReportSchema>;

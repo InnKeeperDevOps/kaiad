@@ -23,6 +23,7 @@ import Card from "../../components/Card.vue";
 import { useTelemetryStream } from "./useTelemetryStream.js";
 import ServicesForAgentSection from "./ServicesForAgentSection.vue";
 import ErrorGroupsSection from "./ErrorGroupsSection.vue";
+import ComponentLogViewer from "./ComponentLogViewer.vue";
 import {
   AGENT_STATUS_BADGE,
   badgeVariantForStatus,
@@ -610,6 +611,10 @@ const thStyle: CSSProperties = {
 
       <Card title="Error groups (auto-fix)">
         <ErrorGroupsSection :agent-id="merged.id" :live-groups="live.errorGroups" />
+      </Card>
+
+      <Card title="Agent logs" :style="{ marginTop: '1rem' }">
+        <ComponentLogViewer kind="agent" :agent-id="merged.id" />
       </Card>
     </template>
   </section>

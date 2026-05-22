@@ -97,6 +97,16 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/** One line of a kaiad agent's or operator's own process log. */
+export type ComponentLogLine = {
+  id: string;
+  source: "agent" | "operator";
+  sourceId: string;
+  level: string;
+  message: string;
+  ts: string;
+};
+
 export type Incident = {
   id: string;
   tenantId: string;
@@ -442,6 +452,18 @@ export const api = {
     apiFetch<{ status: string; output: string }>(
       `/api/v1/agents/${encodeURIComponent(agentId)}/services/${encodeURIComponent(serviceId)}/logs?tail=${tail}`,
       { method: "POST" }
+    ),
+  /** The kaiad agent's own process logs. `afterId` fetches only newer lines. */
+  fetchAgentLogs: (agentId: string, afterId?: string, limit = 300) =>
+    apiFetch<{ logs: ComponentLogLine[] }>(
+      `/api/v1/agents/${encodeURIComponent(agentId)}/logs?limit=${limit}` +
+        (afterId ? `&afterId=${encodeURIComponent(afterId)}` : "")
+    ),
+  /** The kaiad operator's own process logs. `afterId` fetches only newer lines. */
+  fetchOperatorLogs: (afterId?: string, limit = 300) =>
+    apiFetch<{ logs: ComponentLogLine[] }>(
+      `/api/v1/operator/logs?limit=${limit}` +
+        (afterId ? `&afterId=${encodeURIComponent(afterId)}` : "")
     ),
   updateAgent: (
     id: string,

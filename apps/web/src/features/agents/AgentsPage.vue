@@ -11,8 +11,10 @@ import {
 import { useAuth } from "../../lib/useAuth.js";
 import Badge from "../../components/Badge.vue";
 import Button from "../../components/Button.vue";
+import Card from "../../components/Card.vue";
 import { useTelemetryStream } from "./useTelemetryStream.js";
 import EnrollmentTokensPanel from "./EnrollmentTokensPanel.vue";
+import ComponentLogViewer from "./ComponentLogViewer.vue";
 import {
   AGENT_STATUS_BADGE,
   badgeVariantForStatus,
@@ -611,5 +613,9 @@ const summary = computed(() => {
     </div>
 
     <EnrollmentTokensPanel />
+
+    <Card title="Operator logs" :style="{ marginTop: '1rem' }">
+      <ComponentLogViewer kind="operator" />
+    </Card>
   </section>
 </template>

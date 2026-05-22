@@ -90,6 +90,96 @@ export async function deleteSshKey(
   return rows.length > 0;
 }
 
+// --- component_logs: kaiad agent / operator self-logs ---
+
+export type ComponentLogSource = "agent" | "operator";
+
+export interface ComponentLogRow {
+  /** bigint identity, serialized as a string for JSON safety. */
+  id: string;
+  source: ComponentLogSource;
+  sourceId: string;
+  level: string;
+  message: string;
+  ts: string;
+}
+
+export interface ComponentLogInput {
+  source: ComponentLogSource;
+  sourceId: string;
+  level: string;
+  message: string;
+  ts: string;
+}
+
+function mapComponentLog(r: Record<string, unknown>): ComponentLogRow {
+  return {
+    id: String(r.id),
+    source: r.source as ComponentLogSource,
+    sourceId: r.source_id as string,
+    level: r.level as string,
+    message: r.message as string,
+    ts: r.ts instanceof Date ? r.ts.toISOString() : String(r.ts),
+  };
+}
+
+/** Bulk-inserts agent/operator self-log lines for one tenant. */
+export async function appendComponentLogs(
+  query: QueryFn,
+  tenantId: string,
+  entries: ComponentLogInput[],
+): Promise<void> {
+  if (entries.length === 0) return;
+  const tuples: string[] = [];
+  const params: unknown[] = [tenantId];
+  for (const e of entries) {
+    const b = params.length;
+    tuples.push(`($1, $${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5})`);
+    params.push(e.source, e.sourceId, e.level, e.message, e.ts);
+  }
+  await query(
+    `INSERT INTO component_logs (tenant_id, source, source_id, level, message, ts)
+     VALUES ${tuples.join(", ")}`,
+    params,
+  );
+}
+
+/**
+ * Returns component log lines in ascending id order. With `afterId` it
+ * returns only newer lines (incremental UI polling); without it, the
+ * most recent `limit` lines (initial load).
+ */
+export async function listComponentLogs(
+  query: QueryFn,
+  tenantId: string,
+  filter: { source: ComponentLogSource; sourceId: string },
+  opts: { limit: number; afterId?: string },
+): Promise<ComponentLogRow[]> {
+  if (opts.afterId) {
+    const { rows } = await query(
+      `SELECT id, source, source_id, level, message, ts FROM component_logs
+       WHERE tenant_id = $1 AND source = $2 AND source_id = $3 AND id > $4
+       ORDER BY id ASC LIMIT $5`,
+      [tenantId, filter.source, filter.sourceId, opts.afterId, opts.limit],
+    );
+    return rows.map(mapComponentLog);
+  }
+  const { rows } = await query(
+    `SELECT id, source, source_id, level, message, ts FROM (
+       SELECT id, source, source_id, level, message, ts FROM component_logs
+       WHERE tenant_id = $1 AND source = $2 AND source_id = $3
+       ORDER BY id DESC LIMIT $4
+     ) recent ORDER BY id ASC`,
+    [tenantId, filter.source, filter.sourceId, opts.limit],
+  );
+  return rows.map(mapComponentLog);
+}
+
+/** Retention: drops component log lines created before `cutoff`. */
+export async function pruneComponentLogs(query: QueryFn, cutoff: Date): Promise<void> {
+  await query(`DELETE FROM component_logs WHERE created_at < $1`, [cutoff.toISOString()]);
+}
+
 // ---------------------------------------------------------------------------
 // Incidents
 // ---------------------------------------------------------------------------

@@ -568,4 +568,25 @@ create table if not exists registry_repository_visibility (
   public boolean not null default false,
   updated_at timestamptz not null default now()
 );
+
+-- Self-reported process logs from the kaiad agent and operator (their
+-- own stdout/log output — NOT monitored-service logs, which live in
+-- incidents). Surfaced in the panel so operators can inspect agent and
+-- operator behaviour without kubectl. Append-only; pruned by retention
+-- (see pruneComponentLogs). The identity id gives a stable total order
+-- for tail + incremental polling regardless of clock skew in ts.
+create table if not exists component_logs (
+  id bigint generated always as identity primary key,
+  tenant_id text not null references tenants(id) on delete cascade,
+  source text not null check (source in ('agent','operator')),
+  source_id text not null,
+  level text not null,
+  message text not null,
+  ts timestamptz not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists component_logs_lookup_idx
+  on component_logs (tenant_id, source, source_id, id);
+create index if not exists component_logs_created_at_idx
+  on component_logs (created_at);
 `;

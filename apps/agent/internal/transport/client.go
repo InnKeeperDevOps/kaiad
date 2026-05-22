@@ -286,6 +286,27 @@ func (c *Client) SendPlatformMessage(payload map[string]interface{}) error {
 	return c.activeConn.WriteMessage(websocket.TextMessage, body)
 }
 
+// AgentLogLine is one line of the agent's own process log.
+type AgentLogLine struct {
+	Ts      string `json:"ts"`
+	Level   string `json:"level"`
+	Message string `json:"message"`
+}
+
+// SendAgentLog ships a batch of the agent's OWN process log lines as an
+// `agent_log` frame. Best-effort: returns an error (no-op) when no
+// websocket is connected, which the caller re-queues.
+func (c *Client) SendAgentLog(lines []AgentLogLine) error {
+	if len(lines) == 0 {
+		return nil
+	}
+	return c.SendPlatformMessage(map[string]interface{}{
+		"type":    "agent_log",
+		"agentId": c.agentID,
+		"lines":   lines,
+	})
+}
+
 func (c *Client) protoDebug(format string, args ...interface{}) {
 	if c.protocolDebug == nil {
 		return

@@ -393,7 +393,12 @@ function createLazyDomainStore(resolve: () => Promise<DomainStore>): DomainStore
     listSshKeys: (tenantId) => get().then((s) => s.listSshKeys(tenantId)),
     createSshKey: (tenantId, data) => get().then((s) => s.createSshKey(tenantId, data)),
     deleteSshKey: (tenantId, id) => get().then((s) => s.deleteSshKey(tenantId, id)),
-    getSshKeyMaterial: (tenantId, id) => get().then((s) => s.getSshKeyMaterial(tenantId, id))
+    getSshKeyMaterial: (tenantId, id) => get().then((s) => s.getSshKeyMaterial(tenantId, id)),
+    appendComponentLogs: (tenantId, entries) =>
+      get().then((s) => s.appendComponentLogs(tenantId, entries)),
+    listComponentLogs: (tenantId, filter, opts) =>
+      get().then((s) => s.listComponentLogs(tenantId, filter, opts)),
+    pruneComponentLogs: (cutoff) => get().then((s) => s.pruneComponentLogs(cutoff))
   };
 }
 
@@ -1370,6 +1375,24 @@ export function buildServer(opts: BuildServerOptions = {}) {
               .catch(() => {});
           }
           ensureRegistered(msg.agentId);
+        }
+
+        if (msg.type === "agent_log") {
+          ensureRegistered(msg.agentId);
+          if (agentTenantId && msg.lines.length > 0) {
+            void domainStore
+              .appendComponentLogs(
+                agentTenantId,
+                msg.lines.map((l) => ({
+                  source: "agent" as const,
+                  sourceId: msg.agentId,
+                  level: l.level,
+                  message: l.message,
+                  ts: l.ts
+                }))
+              )
+              .catch(() => {});
+          }
         }
 
         if (msg.type === "host_stats") {
@@ -3013,6 +3036,85 @@ export function buildServer(opts: BuildServerOptions = {}) {
     };
   });
 
+  // --- Agent / operator self-logs (component_logs) ---
+
+  // Stable source id for the cluster's operator (one per tenant).
+  const OPERATOR_LOG_SOURCE_ID = "kaiad-operator";
+
+  // limit: lines per page. afterId enables incremental polling.
+  const parseLogLimit = (raw: string | undefined): number => {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return 200;
+    return Math.min(Math.floor(n), 1000);
+  };
+
+  app.get<{ Params: { id: string }; Querystring: { afterId?: string; limit?: string } }>(
+    "/api/v1/agents/:id/logs",
+    async (req, reply) => {
+      const session = await resolveSession(authStore, req.headers.authorization);
+      if (!session) {
+        return reply.status(401).send(apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId }));
+      }
+      const agent = await domainStore.getAgent(session.tenantId, req.params.id);
+      if (!agent) {
+        return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Agent not found", correlationId: (req as any).correlationId }));
+      }
+      const logs = await domainStore.listComponentLogs(
+        session.tenantId,
+        { source: "agent", sourceId: agent.id },
+        { limit: parseLogLimit(req.query.limit), afterId: req.query.afterId }
+      );
+      return { logs };
+    }
+  );
+
+  app.get<{ Querystring: { afterId?: string; limit?: string } }>(
+    "/api/v1/operator/logs",
+    async (req, reply) => {
+      const session = await resolveSession(authStore, req.headers.authorization);
+      if (!session) {
+        return reply.status(401).send(apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId }));
+      }
+      const logs = await domainStore.listComponentLogs(
+        session.tenantId,
+        { source: "operator", sourceId: OPERATOR_LOG_SOURCE_ID },
+        { limit: parseLogLimit(req.query.limit), afterId: req.query.afterId }
+      );
+      return { logs };
+    }
+  );
+
+  // The operator pushes its own log lines here (it has no websocket).
+  app.post("/api/v1/operator/logs", async (req, reply) => {
+    const session = await resolveSession(authStore, req.headers.authorization);
+    if (!session) {
+      return reply.status(401).send(apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId }));
+    }
+    const body = (req.body ?? {}) as { lines?: unknown };
+    const rawLines = Array.isArray(body.lines) ? body.lines : [];
+    const entries = rawLines
+      .filter(
+        (l): l is { ts: string; level: string; message: string } =>
+          !!l &&
+          typeof l === "object" &&
+          typeof (l as Record<string, unknown>).ts === "string" &&
+          typeof (l as Record<string, unknown>).level === "string" &&
+          typeof (l as Record<string, unknown>).message === "string"
+      )
+      .slice(0, 500)
+      .map((l) => ({
+        source: "operator" as const,
+        sourceId: OPERATOR_LOG_SOURCE_ID,
+        level: l.level,
+        message: l.message,
+        ts: l.ts
+      }));
+    if (entries.length > 0) {
+      await domainStore.appendComponentLogs(session.tenantId, entries);
+    }
+    return reply.status(202).send({ accepted: entries.length });
+  });
+
   app.patch<{ Params: { id: string } }>("/api/v1/agents/:id", async (req, reply) => {
     const session = await resolveSession(authStore, req.headers.authorization);
     if (!session) {
@@ -4611,6 +4713,25 @@ export function buildServer(opts: BuildServerOptions = {}) {
   staleSweepTimer.unref?.();
   app.addHook("onClose", async () => {
     clearInterval(staleSweepTimer);
+  });
+
+  // Component-log retention sweep — drops agent/operator self-log lines
+  // past the retention window so component_logs doesn't grow forever.
+  const componentLogRetentionMs =
+    Number(process.env.KAIAD_COMPONENT_LOG_RETENTION_MS) || 7 * 24 * 60 * 60 * 1000; // 7d
+  let componentLogPruneInFlight = false;
+  const componentLogPruneTimer = setInterval(() => {
+    if (componentLogPruneInFlight) return;
+    componentLogPruneInFlight = true;
+    Promise.resolve(domainStore.pruneComponentLogs(new Date(Date.now() - componentLogRetentionMs)))
+      .catch((err) => app.log.warn?.({ err: (err as Error).message }, "component-log prune failed"))
+      .finally(() => {
+        componentLogPruneInFlight = false;
+      });
+  }, 60 * 60 * 1000); // hourly
+  componentLogPruneTimer.unref?.();
+  app.addHook("onClose", async () => {
+    clearInterval(componentLogPruneTimer);
   });
 
   // Registry retention sweep — applies the policy (keep_last_n_per_repo +

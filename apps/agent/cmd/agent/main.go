@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"log"
 	"os"
 	"regexp"
@@ -25,6 +26,7 @@ import (
 	"github.com/service-monitor/agent/internal/managed"
 	"github.com/service-monitor/agent/internal/processstats"
 	"github.com/service-monitor/agent/internal/processsup"
+	"github.com/service-monitor/agent/internal/selflog"
 	"github.com/service-monitor/agent/internal/transport"
 )
 
@@ -411,6 +413,12 @@ func main() {
 	}
 
 	client = transport.NewClient(baseURL, agentID, opts...)
+
+	// Tee the agent's own log output to the control plane so it shows up
+	// in the panel, while still reaching the pod's stdout for kubectl.
+	logShipper := selflog.New(client.SendAgentLog)
+	defer logShipper.Close()
+	log.SetOutput(io.MultiWriter(os.Stderr, logShipper))
 
 	var _ docker.LogSender = client
 

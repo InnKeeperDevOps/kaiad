@@ -214,6 +214,11 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
           agents: await queries.listAgentsForService(queryFn, tenantId, svc.id)
         }))
       );
-    }
+    },
+    appendComponentLogs: (tenantId, entries) =>
+      queries.appendComponentLogs(queryFn, tenantId, entries),
+    listComponentLogs: (tenantId, filter, opts) =>
+      queries.listComponentLogs(queryFn, tenantId, filter, opts),
+    pruneComponentLogs: (cutoff) => queries.pruneComponentLogs(queryFn, cutoff)
   } as DomainStore;
 }

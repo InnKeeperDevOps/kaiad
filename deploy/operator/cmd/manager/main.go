@@ -19,6 +19,7 @@ package main
 
 import (
 	"flag"
+	"io"
 	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,6 +33,7 @@ import (
 	kaiadv1alpha1 "github.com/innkeeperdevops/kaiad/operator/api/v1alpha1"
 	"github.com/innkeeperdevops/kaiad/operator/internal/controller"
 	"github.com/innkeeperdevops/kaiad/operator/internal/kaiad"
+	"github.com/innkeeperdevops/kaiad/operator/internal/selflog"
 )
 
 var (
@@ -56,14 +58,29 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
-	logger := ctrl.Log.WithName("kaiad-operator")
-
 	apiBase := os.Getenv("KAIAD_API_BASE_URL")
 	apiCred := os.Getenv("KAIAD_API_CREDENTIAL")
-	// Both must be present together to enable status polling. Either
-	// missing → run without the API client; Ready reflects pod readiness only.
+	// Both must be present together to enable the API client. Either
+	// missing → run without it; Ready reflects pod readiness only and
+	// operator logs are not shipped to the panel.
 	statusPollEnabled := apiBase != "" && apiCred != ""
+
+	var kaiadClient *kaiad.Client
+	if statusPollEnabled {
+		kaiadClient = kaiad.NewClient(apiBase, apiCred)
+	}
+
+	// Tee operator logs to the Kaiad API so they surface in the panel,
+	// while still reaching the pod's stderr. Only when the API client is
+	// configured — otherwise there is nowhere to ship them.
+	logDest := io.Writer(os.Stderr)
+	if kaiadClient != nil {
+		sink := selflog.New(kaiadClient)
+		defer sink.Close()
+		logDest = io.MultiWriter(os.Stderr, sink)
+	}
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts), zap.WriteTo(logDest)))
+	logger := ctrl.Log.WithName("kaiad-operator")
 
 	leaderElectionNS := envOr("KAIAD_OPERATOR_NAMESPACE", "")
 
@@ -78,11 +95,6 @@ func main() {
 	if err != nil {
 		logger.Error(err, "unable to start manager")
 		os.Exit(1)
-	}
-
-	var kaiadClient *kaiad.Client
-	if statusPollEnabled {
-		kaiadClient = kaiad.NewClient(apiBase, apiCred)
 	}
 
 	if err := (&controller.KaiadAgentReconciler{

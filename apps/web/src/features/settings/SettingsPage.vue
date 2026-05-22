@@ -10,6 +10,7 @@ import {
   type RegistryGcStats
 } from "../../lib/api.js";
 import { useAuth } from "../../lib/useAuth.js";
+import ApiCredentialsPanel from "./ApiCredentialsPanel.vue";
 
 const GOOGLE_OAUTH_DEFAULTS: Pick<
   OAuthProviderConfigPayload,
@@ -459,5 +460,7 @@ const labelColStyle = {
         </table>
       </details>
     </div>
+
+    <ApiCredentialsPanel />
   </section>
 </template>

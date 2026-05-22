@@ -97,6 +97,19 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/** A tenant API credential — a long-lived bearer token for programmatic access. */
+export type ApiCredentialScope = "enrollment-tokens.create" | "agents.read";
+export type ApiCredential = {
+  id: string;
+  tenantId: string;
+  name: string;
+  scopes: string[];
+  createdAt: string;
+  createdBy: string | null;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+};
+
 /** One line of a kaiad agent's or operator's own process log. */
 export type ComponentLogLine = {
   id: string;
@@ -691,6 +704,18 @@ export const api = {
     }),
   deleteEnrollmentToken: (tokenId: string) =>
     apiFetch<void>(`/api/v1/agents/enrollment-tokens/${encodeURIComponent(tokenId)}`, {
+      method: "DELETE"
+    }),
+  /** API credentials — long-lived bearer tokens (admin only). */
+  listApiCredentials: () =>
+    apiFetch<{ credentials: ApiCredential[] }>("/api/v1/admin/api-credentials"),
+  createApiCredential: (data: { name: string; scopes: ApiCredentialScope[] }) =>
+    apiFetch<ApiCredential & { token: string }>("/api/v1/admin/api-credentials", {
+      method: "POST",
+      body: JSON.stringify(data)
+    }),
+  deleteApiCredential: (id: string) =>
+    apiFetch<void>(`/api/v1/admin/api-credentials/${encodeURIComponent(id)}`, {
       method: "DELETE"
     }),
 

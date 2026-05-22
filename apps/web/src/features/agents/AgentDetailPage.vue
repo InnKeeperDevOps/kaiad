@@ -244,7 +244,7 @@ const cellValue: CSSProperties = {
 </script>
 
 <template>
-  <section :style="{ maxWidth: '1100px' }">
+  <section :style="{ width: '100%' }">
     <a
       href="#agents"
       :style="{

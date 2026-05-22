@@ -30,6 +30,10 @@ type AgentInfo struct {
 	Status             string
 	WebsocketConnected bool
 	LastSeenAt         string
+	// LatestAgentVersion is the agent version the control plane currently
+	// ships. Empty when the API predates the auto-update feature; the
+	// reconciler treats empty as "no upgrade available".
+	LatestAgentVersion string
 }
 
 // Client wraps the Kaiad HTTP API for the operator.
@@ -159,6 +163,7 @@ type agentResponse struct {
 	Status             string `json:"status"`
 	WebsocketConnected bool   `json:"websocketConnected"`
 	LastSeenAt         string `json:"lastSeenAt"`
+	LatestAgentVersion string `json:"latestAgentVersion"`
 }
 
 // GetAgent calls GET /api/v1/agents/:id. Returns IsHTTPError(err)==404 when the
@@ -176,5 +181,6 @@ func (c *Client) GetAgent(ctx context.Context, agentID string) (AgentInfo, error
 		Status:             resp.Status,
 		WebsocketConnected: resp.WebsocketConnected,
 		LastSeenAt:         resp.LastSeenAt,
+		LatestAgentVersion: resp.LatestAgentVersion,
 	}, nil
 }

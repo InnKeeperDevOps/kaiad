@@ -573,3 +573,52 @@ func findCondition(agent *kaiadv1alpha1.KaiadAgent, condType string) *metav1.Con
 
 // Compile-time guard against unused imports in newer Go versions.
 var _ client.Client = fake.NewClientBuilder().Build()
+
+func TestNextAgentImage(t *testing.T) {
+	cases := []struct {
+		name    string
+		current string
+		latest  string
+		want    string
+		wantOK  bool
+	}{
+		{"newer patch", "panel.kaiad.dev/kaiad-agent:0.1.19", "0.1.20", "panel.kaiad.dev/kaiad-agent:0.1.20", true},
+		{"newer minor", "panel.kaiad.dev/kaiad-agent:0.1.20", "0.2.0", "panel.kaiad.dev/kaiad-agent:0.2.0", true},
+		{"already current", "panel.kaiad.dev/kaiad-agent:0.1.20", "0.1.20", "", false},
+		{"control plane older", "panel.kaiad.dev/kaiad-agent:0.1.20", "0.1.19", "", false},
+		{"latest pin untouched", "panel.kaiad.dev/kaiad-agent:latest", "0.1.20", "", false},
+		{"empty advertised version", "panel.kaiad.dev/kaiad-agent:0.1.19", "", "", false},
+		{"untagged ref", "panel.kaiad.dev/kaiad-agent", "0.1.20", "", false},
+		{"registry with port", "reg.local:5000/kaiad-agent:0.1.19", "0.1.20", "reg.local:5000/kaiad-agent:0.1.20", true},
+		{"unparseable current tag", "panel.kaiad.dev/kaiad-agent:edge", "0.1.20", "", false},
+		{"digest pin untouched", "panel.kaiad.dev/kaiad-agent@sha256:abc", "0.1.20", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := nextAgentImage(tc.current, tc.latest)
+			if got != tc.want || ok != tc.wantOK {
+				t.Fatalf("nextAgentImage(%q, %q) = (%q, %v), want (%q, %v)",
+					tc.current, tc.latest, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestVersionNewer(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"0.1.20", "0.1.9", true},   // numeric, not lexical
+		{"0.2", "0.1.20", true},     // shorter-but-larger minor wins
+		{"0.1.0", "0.1", false},     // zero-padded equality
+		{"0.1.20", "0.1.20", false}, // equal is not newer
+		{"v0.1.21", "v0.1.20", true},
+		{"0.1.20", "garbage", false}, // unparseable operand → false
+	}
+	for _, tc := range cases {
+		if got := versionNewer(tc.a, tc.b); got != tc.want {
+			t.Errorf("versionNewer(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}

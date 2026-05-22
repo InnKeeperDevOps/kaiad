@@ -3002,7 +3002,15 @@ export function buildServer(opts: BuildServerOptions = {}) {
       return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Agent not found", correlationId: (req as any).correlationId }));
     }
     const connected = realtimeManager.getConnectedAgentIds().includes(agent.id);
-    return { ...agent, websocketConnected: connected };
+    // latestAgentVersion is the agent version this control plane ships
+    // (and publishes to the registry — see ensureBundledImagesPublished).
+    // The operator compares it against the CR's pinned image tag and bumps
+    // spec.image when it has fallen behind, rolling the agent.
+    return {
+      ...agent,
+      websocketConnected: connected,
+      latestAgentVersion: process.env.KAIAD_AGENT_VERSION || "0.1.0"
+    };
   });
 
   app.patch<{ Params: { id: string } }>("/api/v1/agents/:id", async (req, reply) => {

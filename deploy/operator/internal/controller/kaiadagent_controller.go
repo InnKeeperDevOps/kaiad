@@ -6,6 +6,9 @@
 //   3. Generate scoped RBAC (ServiceAccount + Role/ClusterRole + bindings).
 //   4. Apply the agent Deployment (server-side via CreateOrUpdate).
 //   5. Update status conditions: EnrollmentValid, Reconciling, Ready.
+//   6. Auto-update: when the Kaiad API advertises a newer agent version
+//      than spec.image pins, bump spec.image so the next pass rolls the
+//      Deployment to the new image.
 //
 // Status: Ready flips to True only when (a) the Deployment reports a ready
 // replica AND (b) — when an API client is configured — the Kaiad API
@@ -16,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -142,6 +147,23 @@ func (r *KaiadAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	online, agentInfo := r.checkAgentOnline(ctx, agent)
+
+	// Auto-update: when the control plane advertises a newer agent version
+	// than the tag pinned in spec.image, bump spec.image. The Update
+	// retriggers reconcile, which re-applies the Deployment with the new
+	// image and rolls the pod. agentInfo is non-nil whenever the API call
+	// succeeded, so this runs even if the agent is not yet "online".
+	if agentInfo != nil {
+		if next, ok := nextAgentImage(agent.Spec.Image, agentInfo.LatestAgentVersion); ok {
+			logger.Info("upgrading agent image", "from", agent.Spec.Image, "to", next)
+			agent.Spec.Image = next
+			if err := r.Update(ctx, agent); err != nil {
+				return ctrl.Result{}, fmt.Errorf("bump agent image: %w", err)
+			}
+			return ctrl.Result{Requeue: true}, nil
+		}
+	}
+
 	switch {
 	case !online:
 		setCondition(agent, conditionReady, metav1.ConditionFalse, reasonAgentNotOnline, "Pod ready but control plane has not seen the agent yet")
@@ -483,20 +505,91 @@ func (r *KaiadAgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // the manifest digest under the same tag); explicit version tags use
 // IfNotPresent so node-cached images aren't redundantly fetched.
 func imagePullPolicyForImage(image string) corev1.PullPolicy {
-	colon := -1
-	for i := len(image) - 1; i >= 0; i-- {
-		if image[i] == ':' {
-			colon = i
-			break
-		}
-		if image[i] == '/' {
-			break
-		}
-	}
-	if colon < 0 || image[colon+1:] == "latest" {
+	_, tag := splitImageTag(image)
+	if tag == "" || tag == "latest" {
 		return corev1.PullAlways
 	}
 	return corev1.PullIfNotPresent
+}
+
+// splitImageTag splits an image ref into repository and tag. The tag is
+// the part after the last ':' that follows the last '/', so a registry
+// "host:port" is never mistaken for a tag. A digest-pinned or untagged
+// ref yields an empty tag.
+func splitImageTag(image string) (repo, tag string) {
+	for i := len(image) - 1; i >= 0; i-- {
+		switch image[i] {
+		case ':':
+			return image[:i], image[i+1:]
+		case '/':
+			return image, ""
+		}
+	}
+	return image, ""
+}
+
+// nextAgentImage returns the image ref the agent should roll to, and
+// true, when latestVersion is a strictly newer dotted-numeric version
+// than the tag currently pinned in `current`. A :latest pin, a
+// digest/untagged ref, or an empty/unparseable version is left alone.
+func nextAgentImage(current, latestVersion string) (string, bool) {
+	if latestVersion == "" {
+		return "", false
+	}
+	repo, tag := splitImageTag(current)
+	if tag == "" || tag == "latest" {
+		return "", false
+	}
+	if !versionNewer(latestVersion, tag) {
+		return "", false
+	}
+	return repo + ":" + latestVersion, true
+}
+
+// versionNewer reports whether dotted-numeric version a is strictly
+// greater than b (e.g. "0.1.20" > "0.1.9"). Either operand being
+// unparseable yields false, so a malformed version never triggers a
+// rewrite — the agent stays on its current image. Components are
+// zero-padded, so "0.2" outranks "0.1.20".
+func versionNewer(a, b string) bool {
+	pa, oka := parseVersion(a)
+	pb, okb := parseVersion(b)
+	if !oka || !okb {
+		return false
+	}
+	for i := 0; i < len(pa) || i < len(pb); i++ {
+		var ai, bi int
+		if i < len(pa) {
+			ai = pa[i]
+		}
+		if i < len(pb) {
+			bi = pb[i]
+		}
+		if ai != bi {
+			return ai > bi
+		}
+	}
+	return false
+}
+
+// parseVersion splits a dotted-numeric version ("0.1.20", optional "v"
+// prefix) into integer components. Any negative or non-numeric component
+// fails the parse.
+func parseVersion(v string) ([]int, bool) {
+	v = strings.TrimPrefix(v, "v")
+	if v == "" {
+		return nil, false
+	}
+	parts := strings.Split(v, ".")
+	out := make([]int, len(parts))
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return nil, false
+		}
+		out[i] = n
+	}
+	return out, true
 }
 
 // namespaceToAgents maps a Namespace event to all KaiadAgents whose selectors

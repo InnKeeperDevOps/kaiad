@@ -244,7 +244,7 @@ func signature(lines []string) string {
 // logship emits an app_log_error frame with context.
 func classifyLogLevel(line string) string {
 	upper := strings.ToUpper(line)
-	for _, kw := range []string{"ERROR", "FATAL", "EXCEPTION", "TRACEBACK"} {
+	for _, kw := range []string{"ERROR", "FATAL"} {
 		if strings.Contains(upper, kw) {
 			return "error"
 		}

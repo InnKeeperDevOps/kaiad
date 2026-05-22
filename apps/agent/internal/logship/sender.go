@@ -5,9 +5,10 @@
 // line, so emitting on the first line with only the preceding ring
 // buffer (as an earlier version did) shipped a vague "Application run
 // failed" with none of the exception → the autonomous fixer had
-// nothing to work with. Instead we accumulate the error burst (the
-// stack trace) and emit ONE frame whose message is the most specific
-// cause and whose context is pre-error lines + the full trace.
+// nothing to work with. Instead, the first ERROR/FATAL line opens a
+// burst that we hold for burstWindow while the trailing lines arrive,
+// then emit ONE frame whose message is the most specific cause and
+// whose context is the lines before the error plus those after it.
 package logship
 
 import (
@@ -24,40 +25,17 @@ import (
 // also dedupes by fingerprint).
 const incidentWindow = 2 * time.Minute
 
-// maxHold: emit a burst at the latest this long after it started even
-// if no terminating "fresh log line" arrived (quiescent crash, or the
-// process exited mid-trace). A full JVM stack prints well within this.
-const maxHold = 8 * time.Second
-
-// maxBurstLines bounds a single incident's captured trace.
-const maxBurstLines = 400
+// burstWindow: hold a burst open this long after its first ERROR/FATAL
+// line so the trailing stack trace / "Caused by:" chain has time to
+// print, then emit ONE incident frame via the flusher.
+const burstWindow = 5 * time.Second
 
 // preContextLines kept from before the first error line.
 const preContextLines = 20
 
-var continuationRe = regexp.MustCompile(
-	`^(\s+|at\s+\S|Caused by:|\.\.\.\s+\d+\s+more|Suppressed:|Traceback \(most recent call last\):|\s*File ".*", line \d+|goroutine \d+|\s*$)`,
-)
-
-// freshLogRe marks the start of a new log record (timestamp or level
-// prefix). A NON-error fresh record ends an error burst.
-var freshLogRe = regexp.MustCompile(
-	`^(\d{4}-\d{2}-\d{2}[T ]|\d{2}:\d{2}:\d{2}|\[?(?:INFO|WARN|WARNING|ERROR|DEBUG|TRACE|FATAL)\b)`,
-)
-
-func isContinuation(line string) bool {
-	if line == "" {
-		return true
-	}
-	if line[0] == ' ' || line[0] == '\t' {
-		return true
-	}
-	return continuationRe.MatchString(line)
-}
-
-func isFreshLogRecord(line string) bool {
-	return freshLogRe.MatchString(line)
-}
+// postContextLines kept from after the first error line (the error line
+// itself is always kept on top of these).
+const postContextLines = 50
 
 // pickRepresentative chooses the message that best identifies the bug:
 // the deepest "Caused by:", else the last Exception/ERROR line, else
@@ -208,23 +186,22 @@ func (s *Sender) bufferFor(serviceID string) *ringBuffer {
 }
 
 func makeEmission(serviceID string, b *burst, at time.Time) emission {
-	ctx := append(tail(b.preCtx, preContextLines), b.lines...)
 	return emission{
 		agentID:   b.agentID,
 		serviceID: serviceID,
 		message:   pickRepresentative(b.lines),
-		context:   tail(ctx, maxBurstLines),
+		context:   append(tail(b.preCtx, preContextLines), b.lines...),
 		ts:        at.UTC().Format(time.RFC3339Nano),
 	}
 }
 
-// collectAged detaches bursts past maxHold (called by the flusher).
+// collectAged detaches bursts past burstWindow (called by the flusher).
 func (s *Sender) collectAged() []emission {
 	now := s.now()
 	var out []emission
 	s.mu.Lock()
 	for svc, b := range s.pending {
-		if now.Sub(b.startedAt) >= maxHold {
+		if now.Sub(b.startedAt) >= burstWindow {
 			out = append(out, makeEmission(svc, b, now))
 			delete(s.pending, svc)
 			s.lastEmit[svc] = now
@@ -234,39 +211,24 @@ func (s *Sender) collectAged() []emission {
 	return out
 }
 
-// SendLogEvent satisfies docker.LogSender. It accumulates an error
-// burst and emits a single app_log_error carrying the full trace when
-// the burst ends (a fresh non-error log line, a size cap, or maxHold
-// via the flusher). At most one incident per service per incidentWindow.
+// SendLogEvent satisfies docker.LogSender. The first ERROR/FATAL line
+// opens a burst; the lines that follow are collected as trailing
+// context until the flusher emits the incident burstWindow later. At
+// most one incident per service per incidentWindow.
 func (s *Sender) SendLogEvent(agentID, serviceID, level, message string) error {
 	isErr := level == "error" || level == "fatal"
 	now := s.now()
 
-	var emit *emission
 	s.mu.Lock()
 	rb := s.bufferFor(serviceID)
 	if b, ok := s.pending[serviceID]; ok {
-		// Inside a burst: keep the trace together.
-		ended := !isErr && isFreshLogRecord(message) && !isContinuation(message)
-		if !ended {
-			if len(b.lines) < maxBurstLines {
-				b.lines = append(b.lines, message)
-			}
-			rb.push(message)
-			if len(b.lines) >= maxBurstLines {
-				e := makeEmission(serviceID, b, now)
-				emit = &e
-				delete(s.pending, serviceID)
-				s.lastEmit[serviceID] = now
-			}
-		} else {
-			// A normal log record resumed → the trace is complete.
-			e := makeEmission(serviceID, b, now)
-			emit = &e
-			delete(s.pending, serviceID)
-			s.lastEmit[serviceID] = now
-			rb.push(message)
+		// Inside a burst: collect up to postContextLines of trailing
+		// context (the error line itself is lines[0]). The flusher emits
+		// the frame burstWindow after the burst opened.
+		if len(b.lines) < 1+postContextLines {
+			b.lines = append(b.lines, message)
 		}
+		rb.push(message)
 	} else if isErr {
 		last, seen := s.lastEmit[serviceID]
 		if !seen || now.Sub(last) > incidentWindow {
@@ -284,9 +246,6 @@ func (s *Sender) SendLogEvent(agentID, serviceID, level, message string) error {
 	}
 	s.mu.Unlock()
 
-	if emit != nil && s.errSender != nil {
-		_ = s.errSender.SendAppLogError(emit.agentID, emit.serviceID, emit.message, emit.context, emit.ts)
-	}
 	if s.inner == nil {
 		return nil
 	}

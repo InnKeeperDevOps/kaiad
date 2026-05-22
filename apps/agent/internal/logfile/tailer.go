@@ -138,7 +138,7 @@ func (t *Tailer) run(stop <-chan struct{}, serviceID, path, agentID string) {
 // don't import the docker version because it's unexported.
 func classifyLogLevel(line string) string {
 	upper := strings.ToUpper(line)
-	for _, kw := range []string{"ERROR", "FATAL", "EXCEPTION", "TRACEBACK"} {
+	for _, kw := range []string{"ERROR", "FATAL"} {
 		if strings.Contains(upper, kw) {
 			return "error"
 		}

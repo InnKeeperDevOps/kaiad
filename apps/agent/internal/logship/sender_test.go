@@ -1,6 +1,7 @@
 package logship
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -42,13 +43,20 @@ func (f *fakeErr) count() int {
 	return len(f.errs)
 }
 
-// A fresh non-error log line ends a burst and triggers the single emit.
-const freshLine = "2026-05-19 10:00:00 INFO  Restarting AibeApplication"
+// flush drains the bursts the background flusher would have emitted by
+// now — the tests drive the fake clock, so they call this explicitly.
+func flush(s *Sender) {
+	for _, e := range s.collectAged() {
+		_ = s.errSender.SendAppLogError(e.agentID, e.serviceID, e.message, e.context, e.ts)
+	}
+}
 
 func TestSenderShipsFullStackTraceAsOneIncident(t *testing.T) {
 	inner := &fakeInner{}
 	errs := &fakeErr{}
+	clock := time.Unix(1_700_000_000, 0)
 	s := NewSender(inner, errs, 50)
+	s.now = func() time.Time { return clock }
 	defer s.Close()
 
 	// info startup, the vague first ERROR, then the exception chain —
@@ -67,10 +75,11 @@ func TestSenderShipsFullStackTraceAsOneIncident(t *testing.T) {
 		_ = s.SendLogEvent("a", "svc", l.level, l.msg)
 	}
 	if errs.count() != 0 {
-		t.Fatalf("burst should not emit until it ends; got %d", errs.count())
+		t.Fatalf("burst should not emit before burstWindow elapses; got %d", errs.count())
 	}
-	// Fresh non-error line ends the burst → single emit.
-	_ = s.SendLogEvent("a", "svc", "info", freshLine)
+	// burstWindow elapses → the flusher emits a single incident.
+	clock = clock.Add(burstWindow + time.Second)
+	flush(s)
 
 	if errs.count() != 1 {
 		t.Fatalf("want exactly 1 incident, got %d", errs.count())
@@ -98,14 +107,14 @@ func TestSenderCrashLoopReplayIsOneIncident(t *testing.T) {
 	burst := func() {
 		_ = s.SendLogEvent("a", "svc", "error", "ERROR boom")
 		_ = s.SendLogEvent("a", "svc", "error", "Caused by: java.lang.IllegalStateException: bad")
-		_ = s.SendLogEvent("a", "svc", "info", freshLine) // ends burst
+		clock = clock.Add(burstWindow + time.Second) // burstWindow elapses
+		flush(s)
 	}
 	burst()
 	if errs.count() != 1 {
 		t.Fatalf("first crash → 1 incident, got %d", errs.count())
 	}
-	clock = clock.Add(5 * time.Second) // crash-loop replay within window
-	burst()
+	burst() // crash-loop replay within incidentWindow
 	if errs.count() != 1 {
 		t.Fatalf("replay within incidentWindow must not add incidents, got %d", errs.count())
 	}
@@ -116,35 +125,68 @@ func TestSenderCrashLoopReplayIsOneIncident(t *testing.T) {
 	}
 }
 
-func TestSenderMaxHoldFlush(t *testing.T) {
+func TestSenderBurstWindowFlush(t *testing.T) {
 	errs := &fakeErr{}
 	clock := time.Unix(1_700_000_000, 0)
 	s := NewSender(&fakeInner{}, errs, 10)
 	s.now = func() time.Time { return clock }
 	defer s.Close()
 
-	_ = s.SendLogEvent("a", "svc", "error", "ERROR no trailing fresh line ever")
+	_ = s.SendLogEvent("a", "svc", "error", "ERROR no trailing context ever")
+	clock = clock.Add(burstWindow - time.Second)
+	flush(s)
 	if errs.count() != 0 {
-		t.Fatalf("not yet (burst open), got %d", errs.count())
+		t.Fatalf("not yet (within burstWindow), got %d", errs.count())
 	}
-	clock = clock.Add(maxHold + time.Second)
-	for _, e := range s.collectAged() {
-		_ = s.errSender.SendAppLogError(e.agentID, e.serviceID, e.message, e.context, e.ts)
-	}
+	clock = clock.Add(2 * time.Second) // now past burstWindow
+	flush(s)
 	if errs.count() != 1 {
-		t.Fatalf("maxHold should flush the quiescent burst, got %d", errs.count())
+		t.Fatalf("burstWindow should flush the quiescent burst, got %d", errs.count())
+	}
+}
+
+func TestSenderCapsTrailingContext(t *testing.T) {
+	errs := &fakeErr{}
+	clock := time.Unix(1_700_000_000, 0)
+	s := NewSender(&fakeInner{}, errs, 30)
+	s.now = func() time.Time { return clock }
+	defer s.Close()
+
+	_ = s.SendLogEvent("a", "svc", "error", "ERROR start")
+	for i := 0; i < 200; i++ {
+		_ = s.SendLogEvent("a", "svc", "info", fmt.Sprintf("trailing line %d", i))
+	}
+	clock = clock.Add(burstWindow + time.Second)
+	flush(s)
+
+	if errs.count() != 1 {
+		t.Fatalf("want 1 incident, got %d", errs.count())
+	}
+	ctx := errs.errs[0].contextLines
+	if len(ctx) > preContextLines+1+postContextLines {
+		t.Fatalf("context not capped: got %d lines", len(ctx))
+	}
+	joined := strings.Join(ctx, "\n")
+	if !strings.Contains(joined, "trailing line 0") {
+		t.Fatalf("trailing context should start right after the error:\n%s", joined)
+	}
+	if strings.Contains(joined, fmt.Sprintf("trailing line %d", postContextLines)) {
+		t.Fatalf("trailing context should be capped at %d lines:\n%s", postContextLines, joined)
 	}
 }
 
 func TestSenderPerServiceIsolation(t *testing.T) {
 	errs := &fakeErr{}
+	clock := time.Unix(1_700_000_000, 0)
 	s := NewSender(&fakeInner{}, errs, 20)
+	s.now = func() time.Time { return clock }
 	defer s.Close()
 
 	_ = s.SendLogEvent("a", "svcA", "info", "A boot")
 	_ = s.SendLogEvent("a", "svcB", "info", "B boot")
 	_ = s.SendLogEvent("a", "svcA", "error", "ERROR A failed")
-	_ = s.SendLogEvent("a", "svcA", "info", freshLine) // end svcA burst
+	clock = clock.Add(burstWindow + time.Second)
+	flush(s)
 
 	if errs.count() != 1 {
 		t.Fatalf("only svcA should have emitted, got %d", errs.count())

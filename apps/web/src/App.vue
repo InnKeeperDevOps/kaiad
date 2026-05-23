@@ -11,7 +11,8 @@ import {
   LogOut,
   Network,
   Settings,
-  Users
+  Users,
+  Workflow
 } from "lucide-vue-next";
 import "./tokens.css";
 import { api, meResponseToAuthUser } from "./lib/api.js";
@@ -26,6 +27,7 @@ import TenantsPage from "./features/tenants/TenantsPage.vue";
 import RegistryPage from "./features/registry/RegistryPage.vue";
 import LoadBalancersPage from "./features/load-balancers/LoadBalancersPage.vue";
 import AgentDetailPage from "./features/agents/AgentDetailPage.vue";
+import OperatorPage from "./features/operator/OperatorPage.vue";
 import SettingsPage from "./features/settings/SettingsPage.vue";
 import UsersGroupsPage from "./features/users/UsersGroupsPage.vue";
 import TenantConfigurationPage from "./features/tenants/TenantConfigurationPage.vue";
@@ -37,6 +39,7 @@ type Route =
   | "incidents"
   | "agents"
   | "agentDetail"
+  | "operator"
   | "services"
   | "sshKeys"
   | "registry"
@@ -50,6 +53,7 @@ type Route =
 const NAV_ITEMS: { route: Route; label: string; icon: Component; adminOnly?: boolean }[] = [
   { route: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { route: "agents", label: "Agents", icon: Cpu },
+  { route: "operator", label: "Operator", icon: Workflow, adminOnly: true },
   { route: "services", label: "Services", icon: Box },
   { route: "incidents", label: "Incidents", icon: AlertTriangle },
   { route: "sshKeys", label: "SSH Keys", icon: Key },
@@ -79,6 +83,7 @@ function readNavFromHash(): {
     "dashboard",
     "incidents",
     "agents",
+    "operator",
     "services",
     "sshKeys",
     "registry",
@@ -280,6 +285,7 @@ const navStyle: CSSProperties = {
         v-else-if="route === 'agentDetail' && agentDetailAgentId"
         :agent-id="agentDetailAgentId"
       />
+      <OperatorPage v-else-if="route === 'operator'" />
       <ServicesPage v-else-if="route === 'services'" />
       <SshKeysPage v-else-if="route === 'sshKeys'" />
       <RegistryPage v-else-if="route === 'registry'" />

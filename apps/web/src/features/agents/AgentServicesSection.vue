@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch, type CSSProperties } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch, type CSSProperties } from "vue";
 import { api, type AgentAppTelemetry, type MonitoredService } from "../../lib/api.js";
 import Badge from "../../components/Badge.vue";
 import { formatBytes, formatBytesPerSec, formatPercent } from "./format.js";
@@ -31,9 +31,24 @@ const pickerValue = ref("");
 const busy = ref<string | null>(null); // serviceId mid attach/detach
 const error = ref<string | null>(null);
 
+// Logs render in a modal overlay (Teleport'd to <body>); we track the
+// service id, the display name for the modal header, and the fetched
+// text. closeLogs() is wired to Escape + backdrop click below.
 const logsForSvc = ref<string | null>(null);
+const logsForSvcName = ref<string>("");
 const logsText = ref("");
 const logsLoading = ref(false);
+
+function closeLogs() {
+  logsForSvc.value = null;
+  logsForSvcName.value = "";
+  logsText.value = "";
+}
+function onEscape(e: KeyboardEvent) {
+  if (e.key === "Escape" && logsForSvc.value !== null) closeLogs();
+}
+onMounted(() => window.addEventListener("keydown", onEscape));
+onUnmounted(() => window.removeEventListener("keydown", onEscape));
 
 async function loadDetail() {
   detailLoading.value = true;
@@ -53,7 +68,7 @@ watch(
   () => props.agentId,
   () => {
     detail.value = null;
-    logsForSvc.value = null;
+    closeLogs();
     void loadDetail();
   }
 );
@@ -61,11 +76,16 @@ watch(
 // (e.g. after a redeploy completes elsewhere).
 defineExpose({ refresh: loadDetail });
 
+// Sorted alphabetically by display name so panels keep a stable order
+// across refetches (the API's natural order is insertion / id-based and
+// reshuffles rows when an agent rebinds).
+const byName = (a: MonitoredService, b: MonitoredService) =>
+  a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
 const bound = computed(() =>
-  props.allServices.filter((s) => s.agents?.some((a) => a.agentId === props.agentId))
+  props.allServices.filter((s) => s.agents?.some((a) => a.agentId === props.agentId)).sort(byName)
 );
 const unbound = computed(() =>
-  props.allServices.filter((s) => !s.agents?.some((a) => a.agentId === props.agentId))
+  props.allServices.filter((s) => !s.agents?.some((a) => a.agentId === props.agentId)).sort(byName)
 );
 const boundIds = computed(() => new Set(bound.value.map((s) => s.id)));
 
@@ -113,7 +133,7 @@ async function handleDetach(serviceId: string) {
   busy.value = serviceId;
   try {
     await api.detachServiceFromAgent(props.agentId, serviceId);
-    if (logsForSvc.value === serviceId) logsForSvc.value = null;
+    if (logsForSvc.value === serviceId) closeLogs();
     emit("change");
     await loadDetail();
   } catch (e: unknown) {
@@ -122,12 +142,9 @@ async function handleDetach(serviceId: string) {
     busy.value = null;
   }
 }
-async function openLogs(serviceId: string) {
-  if (logsForSvc.value === serviceId) {
-    logsForSvc.value = null;
-    return;
-  }
+async function openLogs(serviceId: string, serviceName: string) {
   logsForSvc.value = serviceId;
+  logsForSvcName.value = serviceName;
   logsText.value = "";
   logsLoading.value = true;
   try {
@@ -237,8 +254,8 @@ function btn(variant: "primary" | "muted" | "danger" = "muted"): CSSProperties {
             :disabled="disabled || logsLoading"
             :title="disabled ? 'Admin/owner only' : 'Fetch recent service logs'"
             :style="{ ...btn(), opacity: disabled ? 0.5 : 1 }"
-            @click="openLogs(svc.id)"
-          >{{ logsForSvc === svc.id ? "Hide logs" : "Logs" }}</button>
+            @click="openLogs(svc.id, svc.name)"
+          >Logs</button>
           <button
             v-if="!disabled"
             type="button"
@@ -346,28 +363,6 @@ function btn(variant: "primary" | "muted" | "danger" = "muted"): CSSProperties {
           </tbody>
         </table>
 
-        <!-- Inline log panel for this service. -->
-        <div v-if="logsForSvc === svc.id" :style="{ marginTop: '0.5rem' }">
-          <div v-if="logsLoading" :style="{ fontSize: '0.78rem', color: muted }">Fetching logs…</div>
-          <pre
-            v-else
-            :style="{
-              margin: 0,
-              maxHeight: '20rem',
-              overflow: 'auto',
-              padding: '0.5rem',
-              background: 'var(--color-bg)',
-              border: '1px solid var(--color-border)',
-              borderRadius: '4px',
-              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-              fontSize: '0.72rem',
-              lineHeight: 1.45,
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-all',
-              color: 'var(--color-text)'
-            }"
-          >{{ logsText }}</pre>
-        </div>
       </div>
     </div>
 
@@ -456,5 +451,84 @@ function btn(variant: "primary" | "muted" | "danger" = "muted"): CSSProperties {
       v-if="detailErr"
       :style="{ marginTop: '0.5rem', fontSize: '0.76rem', color: muted }"
     >Rollup unavailable ({{ detailErr }}) — versions and usage may be missing.</p>
+
+    <!--
+      Logs modal. Teleport'd to <body> so the overlay sits above the
+      sidebar and isn't clipped by parent overflow. Backdrop click and
+      Escape (wired in setup) both close it. .self stops clicks inside
+      the modal box from bubbling to the backdrop handler.
+    -->
+    <Teleport to="body">
+      <div
+        v-if="logsForSvc !== null"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="`Logs for ${logsForSvcName}`"
+        :style="{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(0, 0, 0, 0.55)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '2rem',
+          zIndex: 1000
+        }"
+        @click.self="closeLogs"
+      >
+        <div
+          :style="{
+            background: 'var(--color-surface)',
+            color: 'var(--color-text-primary)',
+            border: '1px solid var(--color-border)',
+            borderRadius: '8px',
+            width: 'min(960px, 100%)',
+            maxHeight: '85vh',
+            display: 'flex',
+            flexDirection: 'column',
+            boxShadow: '0 10px 40px rgba(0, 0, 0, 0.4)'
+          }"
+        >
+          <header
+            :style="{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+              padding: '0.7rem 0.9rem',
+              borderBottom: '1px solid var(--color-border)'
+            }"
+          >
+            <strong :style="{ fontSize: '0.95rem' }">Logs · {{ logsForSvcName }}</strong>
+            <span :style="{ marginLeft: 'auto' }">
+              <button
+                type="button"
+                :style="btn()"
+                aria-label="Close logs"
+                @click="closeLogs"
+              >Close</button>
+            </span>
+          </header>
+          <div v-if="logsLoading" :style="{ padding: '1rem', fontSize: '0.85rem', color: muted }">
+            Fetching logs…
+          </div>
+          <pre
+            v-else
+            :style="{
+              margin: 0,
+              flex: 1,
+              overflow: 'auto',
+              padding: '0.8rem 0.9rem',
+              background: 'var(--color-bg)',
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+              fontSize: '0.78rem',
+              lineHeight: 1.5,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-all',
+              color: 'var(--color-text)'
+            }"
+          >{{ logsText }}</pre>
+        </div>
+      </div>
+    </Teleport>
   </section>
 </template>

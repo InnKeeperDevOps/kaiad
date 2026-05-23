@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch, type CSSProperties } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch, type CSSProperties } from "vue";
 import { api, type AgentAppTelemetry, type MonitoredService } from "../../lib/api.js";
 import Badge from "../../components/Badge.vue";
 import { formatBytes, formatBytesPerSec, formatPercent } from "./format.js";
@@ -33,13 +33,32 @@ const error = ref<string | null>(null);
 
 // Logs render in a modal overlay (Teleport'd to <body>); we track the
 // service id, the display name for the modal header, and the fetched
-// text. closeLogs() is wired to Escape + backdrop click below.
+// text. While the modal is open we re-fetch every LOGS_POLL_MS to
+// keep the view live (the endpoint returns the whole tail each time;
+// the UI WS doesn't broadcast per-line log_events today, so polling
+// is the practical "live tail" path without a server change).
+// closeLogs() is wired to Escape + backdrop click below.
+const LOGS_POLL_MS = 3000;
 const logsForSvc = ref<string | null>(null);
 const logsForSvcName = ref<string>("");
 const logsText = ref("");
 const logsLoading = ref(false);
+const logsPollId = ref<ReturnType<typeof setInterval> | null>(null);
+const logsInflight = ref(false);
+// <pre> element ref — used to keep the view pinned to the bottom when
+// the user is already there, without yanking them down if they
+// scrolled up to read earlier output.
+const logsPanelRef = ref<HTMLPreElement | null>(null);
+
+function stopLogsPolling() {
+  if (logsPollId.value !== null) {
+    clearInterval(logsPollId.value);
+    logsPollId.value = null;
+  }
+}
 
 function closeLogs() {
+  stopLogsPolling();
   logsForSvc.value = null;
   logsForSvcName.value = "";
   logsText.value = "";
@@ -48,7 +67,10 @@ function onEscape(e: KeyboardEvent) {
   if (e.key === "Escape" && logsForSvc.value !== null) closeLogs();
 }
 onMounted(() => window.addEventListener("keydown", onEscape));
-onUnmounted(() => window.removeEventListener("keydown", onEscape));
+onUnmounted(() => {
+  window.removeEventListener("keydown", onEscape);
+  stopLogsPolling();
+});
 
 async function loadDetail() {
   detailLoading.value = true;
@@ -142,19 +164,51 @@ async function handleDetach(serviceId: string) {
     busy.value = null;
   }
 }
+async function fetchLogsTick() {
+  // Skip when the modal is closed or a fetch is still in flight — the
+  // endpoint round-trips the agent (dispatches kubectl/docker, awaits
+  // command_ack), so an interval shorter than the round-trip would
+  // otherwise stack concurrent fetches.
+  const svcId = logsForSvc.value;
+  if (svcId === null || logsInflight.value) return;
+  logsInflight.value = true;
+  // Capture scroll state BEFORE updating text so we know whether the
+  // user was tracking the tail. Tolerance of 40px treats "near the
+  // bottom" as "at the bottom" — small scrollback nudges don't kill
+  // auto-follow.
+  const el = logsPanelRef.value;
+  const wasAtBottom = el ? el.scrollHeight - el.scrollTop - el.clientHeight < 40 : true;
+  try {
+    const r = await api.fetchServiceLogs(props.agentId, svcId, 300);
+    // The modal may have closed (or switched services) while we waited.
+    if (logsForSvc.value !== svcId) return;
+    const next = r.output || "(no output)";
+    if (next !== logsText.value) {
+      logsText.value = next;
+      await nextTick();
+      const cur = logsPanelRef.value;
+      if (wasAtBottom && cur) cur.scrollTop = cur.scrollHeight;
+    }
+  } catch (e: unknown) {
+    if (logsForSvc.value !== svcId) return;
+    logsText.value = `Error: ${(e as Error).message}`;
+  } finally {
+    logsInflight.value = false;
+    logsLoading.value = false;
+  }
+}
+
 async function openLogs(serviceId: string, serviceName: string) {
+  stopLogsPolling();
   logsForSvc.value = serviceId;
   logsForSvcName.value = serviceName;
   logsText.value = "";
   logsLoading.value = true;
-  try {
-    const r = await api.fetchServiceLogs(props.agentId, serviceId, 300);
-    logsText.value = r.output || "(no output)";
-  } catch (e: unknown) {
-    logsText.value = `Error: ${(e as Error).message}`;
-  } finally {
-    logsLoading.value = false;
-  }
+  await fetchLogsTick();
+  // Live-tail by repolling. setInterval (rather than recursive
+  // setTimeout) means a slow round-trip is just skipped this tick,
+  // not chained — fetchLogsTick early-returns when inflight.
+  logsPollId.value = setInterval(() => void fetchLogsTick(), LOGS_POLL_MS);
 }
 
 const muted = "var(--color-text-secondary)";
@@ -499,6 +553,30 @@ function btn(variant: "primary" | "muted" | "danger" = "muted"): CSSProperties {
             }"
           >
             <strong :style="{ fontSize: '0.95rem' }">Logs · {{ logsForSvcName }}</strong>
+            <span
+              v-if="!logsLoading"
+              :title="`Auto-refreshing every ${Math.round(LOGS_POLL_MS / 1000)}s`"
+              :style="{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '0.3rem',
+                fontSize: '0.72rem',
+                color: muted
+              }"
+            >
+              <span
+                :style="{
+                  display: 'inline-block',
+                  width: '0.5rem',
+                  height: '0.5rem',
+                  borderRadius: '50%',
+                  background: logsInflight ? '#22a06b' : 'var(--color-text-secondary)',
+                  transition: 'background 0.2s'
+                }"
+                aria-hidden="true"
+              />
+              live · every {{ Math.round(LOGS_POLL_MS / 1000) }}s
+            </span>
             <span :style="{ marginLeft: 'auto' }">
               <button
                 type="button"
@@ -513,6 +591,7 @@ function btn(variant: "primary" | "muted" | "danger" = "muted"): CSSProperties {
           </div>
           <pre
             v-else
+            ref="logsPanelRef"
             :style="{
               margin: 0,
               flex: 1,

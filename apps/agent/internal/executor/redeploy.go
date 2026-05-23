@@ -934,21 +934,33 @@ func ensureNFSDirsExist(ctx context.Context, namespace, serviceID string, volume
 		jobName := "kaiad-mkdir-" + hex.EncodeToString(h[:])[:12]
 
 		// `set -e` → Job fails fast on the first path that can't be made
-		// or chmod'd. After mkdir we `chmod 0777` so service Pods with
-		// arbitrary container UIDs (image `USER`, runAsUser) can write —
-		// without this, a freshly-mkdir'd NFS dir is mode 0755 owned by
-		// whoever the export maps the Job container to (root, or
-		// nfsnobody under root_squash), and any other UID gets EACCES.
-		// 0777 mirrors the "any-UID can write" expectation of a
-		// per-service data volume and matches what an admin would
-		// hand-create. `ls -la /mnt` at the end leaves a breadcrumb in
-		// the Pod log for `kubectl logs job/<name>` if anyone investigates.
+		// or chmod'd. After mkdir we:
+		//   • `chmod 0777` so service Pods with arbitrary container UIDs
+		//     (image `USER`, runAsUser) can write — a freshly-mkdir'd
+		//     NFS dir is otherwise mode 0755 owned by whoever the export
+		//     maps the Job container to (root, or nfsnobody under
+		//     root_squash), and any other UID gets EACCES.
+		//   • `chown 1000:1000` (best-effort, `|| true`) so a service
+		//     container running as the conventional non-root UID 1000
+		//     OWNS its data dir from the start — its entrypoint's
+		//     `chown -R` becomes a no-op rather than a failure. Under
+		//     NFS root_squash the Job's effective UID maps to nobody and
+		//     can't reassign to UID 1000; the chown silently fails and
+		//     the dir stays nobody:nogroup, still writable for anyone
+		//     thanks to the 0777 above. With no_root_squash the chown
+		//     takes and the service can chown freely afterward (CAP_CHOWN
+		//     is in the default capability set).
+		// `ls -la /mnt` at the end leaves a breadcrumb in the Pod log for
+		// `kubectl logs job/<name>` if anyone investigates.
 		mkArgs := make([]string, 0, len(leaves))
 		for _, l := range leaves {
 			mkArgs = append(mkArgs, "/mnt/"+shellQuote(l))
 		}
 		joined := strings.Join(mkArgs, " ")
-		cmd := "set -e; mkdir -p " + joined + "; chmod 0777 " + joined + "; ls -la /mnt"
+		cmd := "set -e; mkdir -p " + joined +
+			"; chmod 0777 " + joined +
+			"; chown 1000:1000 " + joined + " || true" +
+			"; ls -la /mnt"
 
 		// We render and apply rather than driving the API directly:
 		// stays in the same kubectl+yaml idiom the rest of this file

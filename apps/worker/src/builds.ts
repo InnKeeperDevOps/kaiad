@@ -73,6 +73,7 @@ import {
   setBuildPipelineYaml,
   updateBuildGitSha,
   updateServicePipelineMeta,
+  upsertIncident,
   type QueryFn,
   type ServiceBuildRow
 } from "@sm/db";
@@ -531,7 +532,7 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
     const parsed = parsePipelineYaml(yamlText);
     if (!parsed.ok) {
       await appendBuildLog(query, build.id, `${parsed.reason}\n`);
-      await finishBuild(query, build.id, { status: "failed", failureReason: parsed.reason });
+      await failBuild(query, build, parsed.reason, logger);
       return;
     }
     // Multi-pipeline kaiad.yaml: pick the slice this MonitoredService is
@@ -540,7 +541,7 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
     const picked = selectPipeline(parsed, svc.pipelineName ?? null);
     if (!picked.ok) {
       await appendBuildLog(query, build.id, `${picked.reason}\n`);
-      await finishBuild(query, build.id, { status: "failed", failureReason: picked.reason });
+      await failBuild(query, build, picked.reason, logger);
       return;
     }
     let pipeline = picked.pipeline;
@@ -589,14 +590,14 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
             `unresolved template variable(s) in kaiad.yaml: {${sub.missing.join("} {")}}\n` +
             `available: ${Object.keys(vars).map((k) => "{" + k + "}").join(" ") || "(none)"}`;
           await appendBuildLog(query, build.id, `${reason}\n`);
-          await finishBuild(query, build.id, { status: "failed", failureReason: reason });
+          await failBuild(query, build, reason, logger);
           return;
         }
         pipeline = sub.pipeline;
       } catch (err) {
         if (err instanceof BuildDepsError) {
           await appendBuildLog(query, build.id, `${err.message}\n`);
-          await finishBuild(query, build.id, { status: "failed", failureReason: err.message });
+          await failBuild(query, build, err.message, logger);
           return;
         }
         throw err;
@@ -626,7 +627,7 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
         sha: build.gitSha
       });
       if (!built.ok) {
-        await finishBuild(query, build.id, { status: "failed", failureReason: built.reason });
+        await failBuild(query, build, built.reason, logger);
         return;
       }
       await appendBuildLog(query, build.id, `done in ${((Date.now() - startedAt) / 1000).toFixed(1)}s\n`);
@@ -677,7 +678,7 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
           "KAIAD_BUILDS_HOST_DIR is not set; build steps require a shared host bind mount " +
           "so the spawned container can see the workspace. Set it in the compose env.";
         await appendBuildLog(query, build.id, `${reason}\n`);
-        await finishBuild(query, build.id, { status: "failed", failureReason: reason });
+        await failBuild(query, build, reason, logger);
         return;
       }
       await appendBuildLog(query, build.id, banner(`build stage — image=${pipeline.build.image}`));
@@ -693,7 +694,7 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
         serviceName: svc.name
       });
       if (!buildOk.ok) {
-        await finishBuild(query, build.id, { status: "failed", failureReason: buildOk.reason });
+        await failBuild(query, build, buildOk.reason, logger);
         return;
       }
     }
@@ -701,7 +702,7 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
     // 4) Capture artifacts.
     const captured = await captureArtifacts(query, build.id, artifactsDir, pipeline.artifacts);
     if (!captured.ok) {
-      await finishBuild(query, build.id, { status: "failed", failureReason: captured.reason });
+      await failBuild(query, build, captured.reason, logger);
       return;
     }
 
@@ -718,7 +719,7 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
         sha: build.gitSha
       });
       if (!built.ok) {
-        await finishBuild(query, build.id, { status: "failed", failureReason: built.reason });
+        await failBuild(query, build, built.reason, logger);
         return;
       }
       imageRef = built.imageRef;
@@ -1692,10 +1693,111 @@ async function dispatchRedeployToBoundAgents(
   }
 }
 
+// Build-failure incidents — mirror what we do for runtime ERROR/FATAL
+// log frames, but the source is the build pipeline itself: every time a
+// build transitions to status=failed, raise (or bump) an incident
+// scoped to (tenant, service, failureReason-shape) with the build's
+// own log attached. Closes the gap where a service was "broken" but
+// the incident view stayed empty because no Pod was up yet to emit
+// runtime errors.
+const BUILD_INCIDENT_LOG_TAIL_BYTES = 16 * 1024;
+
+// Cheap normalizer for failure reasons — strips timestamps, hex/sha
+// tokens, multi-digit numbers, and whitespace runs so two failures with
+// the same shape (e.g. different commit SHAs) fingerprint to the same
+// group. Intentionally smaller than the full normalizeErrorMessage in
+// the API package — keeping the worker independent of @sm/api avoids
+// a dependency cycle (api ↔ worker run in the same kaiad container).
+function normalizeBuildFailureReason(reason: string): string {
+  let s = reason || "";
+  s = s.replace(
+    /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g,
+    "<TS>"
+  );
+  s = s.replace(/\b[0-9a-f]{8,}\b/gi, "<HEX>");
+  s = s.replace(/\b\d{3,}\b/g, "<N>");
+  s = s.replace(/\s+/g, " ").trim();
+  return s;
+}
+
+function buildFailureFingerprint(serviceId: string, failureReason: string): string {
+  return crypto
+    .createHash("sha1")
+    .update(`${serviceId}|build:failure|${normalizeBuildFailureReason(failureReason)}`)
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function tailBuildLog(log: string | null | undefined): string | undefined {
+  if (typeof log !== "string" || log.length === 0) return undefined;
+  if (log.length <= BUILD_INCIDENT_LOG_TAIL_BYTES) return log;
+  return (
+    `[…truncated, showing last ${BUILD_INCIDENT_LOG_TAIL_BYTES} bytes of ${log.length}]\n` +
+    log.slice(-BUILD_INCIDENT_LOG_TAIL_BYTES)
+  );
+}
+
+// Raise (or bump) an incident for a build that just transitioned to
+// status=failed. Best-effort — a DB hiccup here must not poison the
+// rest of the build worker's loop. Re-reads the build row so the log
+// attached to the incident reflects every appendBuildLog from the
+// run, not the snapshot we took at claim time.
+async function raiseBuildIncident(
+  query: QueryFn,
+  build: { id: string; tenantId: string; serviceId: string },
+  failureReason: string,
+  logger?: { warn(msg: string, fields?: Record<string, unknown>): void }
+): Promise<void> {
+  try {
+    const { rows } = await query(`SELECT log FROM service_builds WHERE id = $1`, [build.id]);
+    const log = rows.length > 0 ? (rows[0] as { log?: unknown }).log : null;
+    const fullLog = tailBuildLog(typeof log === "string" ? log : null);
+    await upsertIncident(query, build.tenantId, {
+      serviceId: build.serviceId,
+      fingerprint: buildFailureFingerprint(build.serviceId, failureReason),
+      message: `Build failed: ${failureReason}`.slice(0, 500),
+      fullLog
+    });
+  } catch (err) {
+    logger?.warn?.("raiseBuildIncident failed", {
+      buildId: build.id,
+      err: (err as Error).message
+    });
+  }
+}
+
+// Combined helper: mark the build failed in the DB AND raise an
+// incident. All sites that previously called
+//   finishBuild(query, build.id, { status: "failed", failureReason })
+// should call this so failures consistently surface on the panel.
+async function failBuild(
+  query: QueryFn,
+  build: ServiceBuildRow,
+  failureReason: string,
+  logger?: { warn(msg: string, fields?: Record<string, unknown>): void }
+): Promise<void> {
+  await finishBuild(query, build.id, { status: "failed", failureReason });
+  await raiseBuildIncident(query, build, failureReason, logger);
+}
+
 async function safelyFailBuild(query: QueryFn, buildId: string, reason: string): Promise<void> {
   try {
     await appendBuildLog(query, buildId, `\n${reason}\n`);
     await finishBuild(query, buildId, { status: "failed", failureReason: reason });
+    // Look up the build row so we can attach its tail log to the
+    // incident; without (tenant, service) we can't upsert.
+    const { rows } = await query(
+      `SELECT id, tenant_id, service_id FROM service_builds WHERE id = $1`,
+      [buildId]
+    );
+    if (rows.length > 0) {
+      const r = rows[0] as { id: unknown; tenant_id: unknown; service_id: unknown };
+      await raiseBuildIncident(
+        query,
+        { id: String(r.id), tenantId: String(r.tenant_id), serviceId: String(r.service_id) },
+        reason
+      );
+    }
   } catch {
     /* best effort */
   }

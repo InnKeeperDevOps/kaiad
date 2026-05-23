@@ -120,7 +120,7 @@ import { readConfig, writeConfig, type KaiadConfig } from "./configPersistence.j
 import { enforcePolicy } from "./policy.js";
 import { createReadinessCheckersFromEnv, type ReadinessChecker } from "./readyChecks.js";
 import { RealtimeManager, type PendingCommandRedis } from "./realtimeManager.js";
-import { ErrorGroupStore, isProbablyUserInputError } from "./errorGrouping.js";
+import { ErrorGroupStore, hasUppercaseErrorMarker, isProbablyUserInputError } from "./errorGrouping.js";
 import { dispatchAutoFix, type KaiadFixStart } from "./autoFixDispatcher.js";
 import { runKaiadFix } from "./kaiadFix.js";
 import {
@@ -1527,11 +1527,22 @@ export function buildServer(opts: BuildServerOptions = {}) {
           const tenantId = agentTenantId ?? (isDev ? "t-1" : null);
           if (!tenantId) {
             // No tenant binding yet — drop silently; agent will resend later.
-          } else if (isProbablyUserInputError(msg.message)) {
+          } else if (
+            !hasUppercaseErrorMarker(msg.message, msg.contextLines) &&
+            isProbablyUserInputError(msg.message)
+          ) {
             // User-input errors are not auto-fix candidates — no error
             // group, no incident. The Fastify logger is a no-op in prod,
             // so log via console too: a dropped error otherwise leaves
             // zero trace and looks like incident tracking is broken.
+            //
+            // The uppercase-ERROR/FATAL override above means an
+            // application that EXPLICITLY stamped this as an error log
+            // line bypasses the heuristic — its phrase patterns
+            // ("validation failed", "not found", "4xx") would otherwise
+            // false-positive on framework-emitted internal failures
+            // (Spring's `UnsatisfiedDependencyException: ... Validation
+            // failed for query for method ...` is a real bean bug).
             req.log?.info?.({
               event: "auto_fix.skip_user_input",
               serviceId: msg.serviceId,

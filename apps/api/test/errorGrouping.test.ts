@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach } from "vitest";
+import { hasUppercaseErrorMarker } from "../src/errorGrouping.js";
 import {
   normalizeErrorMessage,
   isProbablyUserInputError,
@@ -60,6 +61,19 @@ describe("isProbablyUserInputError", () => {
     expect(isProbablyUserInputError("TypeError: cannot read property foo of null")).toBe(false);
     expect(isProbablyUserInputError("Internal server error: db connection lost")).toBe(false);
     expect(isProbablyUserInputError("uncaught exception in worker")).toBe(false);
+  });
+
+  // The companion uppercase-marker override (server.ts uses it to
+  // bypass this filter) — keep it tested alongside so a regression in
+  // either side is obvious.
+  it("hasUppercaseErrorMarker only matches word-boundaried uppercase tokens", () => {
+    expect(hasUppercaseErrorMarker("2026-05-23 ERROR com.foo.Bar - boom")).toBe(true);
+    expect(hasUppercaseErrorMarker("[FATAL] startup aborted")).toBe(true);
+    expect(hasUppercaseErrorMarker(undefined, ["2026 ERROR boom", "trace"])).toBe(true);
+    // Mixed-case symbols must NOT trip the override.
+    expect(hasUppercaseErrorMarker("OutOfMemoryError: heap")).toBe(false);
+    expect(hasUppercaseErrorMarker("RecommendationController failed")).toBe(false);
+    expect(hasUppercaseErrorMarker("validation error: bad input")).toBe(false);
   });
 
   it("does NOT filter a bare 4xx number that isn't an HTTP status", () => {

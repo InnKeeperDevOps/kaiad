@@ -933,15 +933,22 @@ func ensureNFSDirsExist(ctx context.Context, namespace, serviceID string, volume
 		h := sha1.Sum([]byte(serviceID + "|" + server + "|" + g.parentMount))
 		jobName := "kaiad-mkdir-" + hex.EncodeToString(h[:])[:12]
 
-		// `set -e` + sequenced `mkdir -p` → Job fails fast on the first
-		// path it can't create. `ls -la /mnt` at the end leaves a tiny
-		// breadcrumb in the Pod log for `kubectl logs job/<name>` if
-		// anyone investigates a failure.
+		// `set -e` → Job fails fast on the first path that can't be made
+		// or chmod'd. After mkdir we `chmod 0777` so service Pods with
+		// arbitrary container UIDs (image `USER`, runAsUser) can write —
+		// without this, a freshly-mkdir'd NFS dir is mode 0755 owned by
+		// whoever the export maps the Job container to (root, or
+		// nfsnobody under root_squash), and any other UID gets EACCES.
+		// 0777 mirrors the "any-UID can write" expectation of a
+		// per-service data volume and matches what an admin would
+		// hand-create. `ls -la /mnt` at the end leaves a breadcrumb in
+		// the Pod log for `kubectl logs job/<name>` if anyone investigates.
 		mkArgs := make([]string, 0, len(leaves))
 		for _, l := range leaves {
 			mkArgs = append(mkArgs, "/mnt/"+shellQuote(l))
 		}
-		cmd := "set -e; mkdir -p " + strings.Join(mkArgs, " ") + "; ls -la /mnt"
+		joined := strings.Join(mkArgs, " ")
+		cmd := "set -e; mkdir -p " + joined + "; chmod 0777 " + joined + "; ls -la /mnt"
 
 		// We render and apply rather than driving the API directly:
 		// stays in the same kubectl+yaml idiom the rest of this file

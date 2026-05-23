@@ -138,6 +138,44 @@ function handleEdit(svc: MonitoredService) {
   showForm.value = true;
 }
 
+// Pick a fresh name like "<original> (copy)", "<original> (copy 2)", …
+// for a clone. Walks the current list rather than the server: cheap,
+// and we'll surface the conflict via the API error if a parallel
+// session also cloned in the meantime.
+function uniqueCopyName(base: string): string {
+  const existing = new Set(services.value.map((s) => s.name));
+  const candidate = `${base} (copy)`;
+  if (!existing.has(candidate)) return candidate;
+  for (let n = 2; n < 1000; n += 1) {
+    const c = `${base} (copy ${n})`;
+    if (!existing.has(c)) return c;
+  }
+  return `${base} (copy ${Date.now()})`;
+}
+
+// Clone a service: same git/branch/pipeline/exec/docker config, fresh
+// name, NO agent bindings (cloning is "give me the same definition"
+// — where it runs is a deployment concern the operator picks after).
+async function handleClone(svc: MonitoredService) {
+  const newName = uniqueCopyName(svc.name);
+  if (!window.confirm(`Clone "${svc.name}" as "${newName}"?`)) return;
+  try {
+    const clone = await api.createService({
+      name: newName,
+      gitRepoUrl: svc.gitRepoUrl,
+      sshKeyId: svc.sshKeyId ?? undefined,
+      branch: svc.branch,
+      dockerImage: svc.dockerImage ?? undefined,
+      composePath: svc.composePath ?? undefined,
+      pipelineName: svc.pipelineName ?? undefined,
+      fixExecutor: svc.fixExecutor ?? "claude"
+    });
+    services.value = [...services.value, clone];
+  } catch (e: unknown) {
+    error.value = (e as Error).message;
+  }
+}
+
 async function handleDelete(svc: MonitoredService) {
   if (!window.confirm(`Delete service "${svc.name}"? This will also remove its runs and incidents.`)) return;
   try {
@@ -426,6 +464,19 @@ function togglePipeline(id: string) {
                   }"
                   @click="handleEdit(svc)"
                 >Edit</button>
+                <button
+                  title="Create a copy of this service (same repo/branch/pipeline, fresh name, no agent bindings)"
+                  :style="{
+                    background: 'var(--color-surface)',
+                    border: '1px solid var(--color-border)',
+                    padding: '0.2rem 0.5rem',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    fontSize: '0.8rem',
+                    color: 'var(--color-text-primary)'
+                  }"
+                  @click="handleClone(svc)"
+                >Clone</button>
                 <button
                   :style="{
                     background: 'var(--color-surface)',

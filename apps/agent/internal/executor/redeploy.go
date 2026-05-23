@@ -18,11 +18,14 @@ package executor
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -851,6 +854,196 @@ func ensureKubectlCreate(ctx context.Context, kind, namespace, name string, crea
 	}
 }
 
+// ensureNFSDirsExist runs a short-lived Job per (NFS server, parent
+// path) referenced by the service's volume set, mkdir-p'ing each leaf
+// directory inside the parent BEFORE the Deployment is applied.
+//
+// Why a Job and not an initContainer on the target Deployment: NFS
+// volumes are mounted by the kubelet at the POD level, before any
+// container (init or main) starts. A missing leaf on the NFS server
+// therefore fails the Pod's setup outright — initContainers never get
+// a chance to run. A separate Job that mounts only the parent (which
+// IS exported and exists) is the only way to create the leaf from
+// inside the cluster.
+//
+// Best-effort: errors here log and proceed. The kubectl apply that
+// follows still attempts the deploy; if the prep didn't take, the Pod
+// will surface the same FailedMount in events as before.
+func ensureNFSDirsExist(ctx context.Context, namespace, serviceID string, volumes []volumeSpec) {
+	type group struct {
+		parentMount string              // path to mount in the Job pod, e.g. "/data/"
+		leaves      map[string]struct{} // leaf dir names to mkdir within parentMount
+	}
+	// Group by (server, parent) — typically every volume on a service
+	// hangs off the same NFS server + parent dir, so this collapses to
+	// one Job. Multiple servers → one Job each.
+	groups := map[string]*group{}
+	keys := []string{} // deterministic order for the loop below
+
+	for _, v := range volumes {
+		if v.nfsServer == "" || v.nfsPath == "" {
+			continue
+		}
+		// path.Dir/Base use forward-slash semantics regardless of host OS
+		// (the agent's host is Linux, but NFS paths are POSIX either way).
+		// Trim trailing slash so Base("/data/foo/") gives "foo", not "".
+		p := strings.TrimRight(v.nfsPath, "/")
+		if p == "" || !strings.HasPrefix(p, "/") {
+			continue
+		}
+		parent := path.Dir(p)
+		leaf := path.Base(p)
+		// `/data` → parent="/", leaf="data". We refuse to mount "/" as
+		// the parent (the NFS server almost certainly doesn't export root)
+		// and we don't try to mkdir at the export root itself — that
+		// directory's existence is the user's problem to provision.
+		if parent == "" || parent == "/" || leaf == "" || leaf == "/" || leaf == "." {
+			continue
+		}
+		parentMount := parent + "/"
+		key := v.nfsServer + "|" + parentMount
+		g, ok := groups[key]
+		if !ok {
+			g = &group{parentMount: parentMount, leaves: map[string]struct{}{}}
+			groups[key] = g
+			keys = append(keys, key)
+		}
+		g.leaves[leaf] = struct{}{}
+	}
+	if len(groups) == 0 {
+		return
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		g := groups[key]
+		server := strings.SplitN(key, "|", 2)[0]
+
+		leaves := make([]string, 0, len(g.leaves))
+		for l := range g.leaves {
+			leaves = append(leaves, l)
+		}
+		sort.Strings(leaves)
+
+		// Deterministic 63-char-safe Job name. Hashing (serviceID, server,
+		// parent) keeps concurrent mkdir Jobs for distinct services in the
+		// same ns from colliding while letting retries of the same service
+		// land on the same Job (delete+recreate below makes the retry
+		// path idempotent).
+		h := sha1.Sum([]byte(serviceID + "|" + server + "|" + g.parentMount))
+		jobName := "kaiad-mkdir-" + hex.EncodeToString(h[:])[:12]
+
+		// `set -e` + sequenced `mkdir -p` → Job fails fast on the first
+		// path it can't create. `ls -la /mnt` at the end leaves a tiny
+		// breadcrumb in the Pod log for `kubectl logs job/<name>` if
+		// anyone investigates a failure.
+		mkArgs := make([]string, 0, len(leaves))
+		for _, l := range leaves {
+			mkArgs = append(mkArgs, "/mnt/"+shellQuote(l))
+		}
+		cmd := "set -e; mkdir -p " + strings.Join(mkArgs, " ") + "; ls -la /mnt"
+
+		// We render and apply rather than driving the API directly:
+		// stays in the same kubectl+yaml idiom the rest of this file
+		// uses, no extra k8s.io client dependency.
+		yamlText := fmt.Sprintf(`apiVersion: batch/v1
+kind: Job
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    kaiad.dev/service-id: %q
+    kaiad.dev/purpose: nfs-mkdir
+spec:
+  ttlSecondsAfterFinished: 60
+  backoffLimit: 0
+  completions: 1
+  template:
+    metadata:
+      labels:
+        kaiad.dev/purpose: nfs-mkdir
+        kaiad.dev/service-id: %q
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: mkdir
+        image: busybox:1.36
+        command: ["sh", "-c", %q]
+        volumeMounts:
+        - name: nfs-root
+          mountPath: /mnt
+      volumes:
+      - name: nfs-root
+        nfs:
+          server: %q
+          path: %q
+`,
+			jobName, namespace, serviceID, serviceID, cmd, server, g.parentMount,
+		)
+
+		// Pre-delete a stale Job with the same name (`--wait` so the
+		// re-create below isn't racing the old Job's finalizers).
+		dctx, dcancel := context.WithTimeout(ctx, 15*time.Second)
+		_ = exec.CommandContext(dctx, "kubectl", "delete", "job", jobName,
+			"-n", namespace,
+			"--ignore-not-found=true",
+			"--wait=true",
+			"--timeout=10s",
+		).Run()
+		dcancel()
+
+		// Stage + apply.
+		dir, err := os.MkdirTemp("", "kaiad-mkdir-")
+		if err != nil {
+			log.Printf("[agent:redeploy:k8s] nfs mkdir tmpdir err service=%s: %v", serviceID, err)
+			continue
+		}
+		mp := filepath.Join(dir, "mkdir-job.yaml")
+		if err := os.WriteFile(mp, []byte(yamlText), 0o600); err != nil {
+			log.Printf("[agent:redeploy:k8s] nfs mkdir write err service=%s: %v", serviceID, err)
+			os.RemoveAll(dir)
+			continue
+		}
+		actx, acancel := context.WithTimeout(ctx, 20*time.Second)
+		aout, aerr := exec.CommandContext(actx, "kubectl", "apply",
+			"-n", namespace, "-f", mp,
+		).CombinedOutput()
+		acancel()
+		os.RemoveAll(dir)
+		if aerr != nil {
+			log.Printf("[agent:redeploy:k8s] nfs mkdir apply FAILED ns=%q job=%q: %v: %s",
+				namespace, jobName, aerr, strings.TrimSpace(string(aout)))
+			continue
+		}
+
+		// Wait for the Job to reach `condition=complete`. mkdir -p over
+		// NFS is fast; 60s covers cold-start image pull on the node.
+		wctx, wcancel := context.WithTimeout(ctx, 90*time.Second)
+		wout, werr := exec.CommandContext(wctx, "kubectl", "wait",
+			"--for=condition=complete",
+			"--timeout=60s",
+			"-n", namespace,
+			"job/"+jobName,
+		).CombinedOutput()
+		wcancel()
+		if werr != nil {
+			log.Printf("[agent:redeploy:k8s] nfs mkdir wait FAILED ns=%q job=%q server=%s leaves=%v: %v: %s",
+				namespace, jobName, server, leaves, werr, strings.TrimSpace(string(wout)))
+			continue
+		}
+		log.Printf("[agent:redeploy:k8s] nfs mkdir OK ns=%q job=%q server=%s parent=%s leaves=%v",
+			namespace, jobName, server, g.parentMount, leaves)
+	}
+}
+
+// shellQuote wraps s in single quotes so a path containing spaces or
+// shell metacharacters can be passed safely to `sh -c`. Service /
+// directory names in practice are kebab-case, but defending against a
+// surprise is cheap.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 func (e *Executor) redeployKubernetes(ctx context.Context, in redeployInput) CommandResult {
 	if _, err := exec.LookPath("kubectl"); err != nil {
 		return CommandResult{
@@ -914,6 +1107,19 @@ func (e *Executor) redeployKubernetes(ctx context.Context, in redeployInput) Com
 				"--docker-password=" + pass},
 			[]string{"delete", "secret", ps, "-n", namespace, "--ignore-not-found=true"})
 	}
+
+	// Pre-flight NFS leaf-directory creation. A Deployment whose Pod
+	// references an NFS volume `path: /data/<svc>/` won't even reach the
+	// initContainer stage if `/data/<svc>` doesn't exist on the NFS
+	// server — the kubelet's pod-level mount fails with
+	// `mount.nfs: ... reason given by server: No such file or directory`
+	// and the Pod sits in ContainerCreating until someone creates it on
+	// the NAS. Run a one-shot Job per NFS server that mounts the parent
+	// path read-write and `mkdir -p`s every leaf this Deployment will
+	// need. Idempotent (mkdir -p is a no-op on existing dirs); failure
+	// here logs and proceeds (the kubectl apply that follows still
+	// surfaces the underlying mount error if the prep didn't work).
+	ensureNFSDirsExist(ctx, namespace, in.serviceID, in.volumes)
 
 	yaml := renderK8sManifests(in, namespace)
 

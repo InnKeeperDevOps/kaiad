@@ -202,7 +202,16 @@ function buildKaiadAgentManifest(opts: {
     // cluster Secrets.
     "    - apiGroups: [\"\"]",
     "      resources: [\"secrets\"]",
-    "      verbs: [\"create\", \"delete\"]"
+    "      verbs: [\"create\", \"delete\"]",
+    // batch/jobs — the agent runs short-lived Jobs to mkdir NFS leaf
+    // directories on the storage server before applying a Deployment
+    // that mounts them. Without create+delete+watch here, those Pods
+    // hang in ContainerCreating because the kubelet's pod-level NFS
+    // mount fails with "No such file or directory" before any container
+    // (incl. initContainers) can run.
+    "    - apiGroups: [\"batch\"]",
+    "      resources: [\"jobs\"]",
+    "      verbs: [\"get\", \"list\", \"watch\", \"create\", \"delete\"]"
   ];
   return lines.join("\n") + "\n";
 }

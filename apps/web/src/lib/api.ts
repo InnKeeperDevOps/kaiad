@@ -98,7 +98,11 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 /** A tenant API credential — a long-lived bearer token for programmatic access. */
-export type ApiCredentialScope = "enrollment-tokens.create" | "agents.read";
+export type ApiCredentialScope =
+  | "enrollment-tokens.create"
+  | "agents.read"
+  | "registry.pull"
+  | "registry.push";
 export type ApiCredential = {
   id: string;
   tenantId: string;

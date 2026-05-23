@@ -175,3 +175,67 @@ describe("api-credential bearer in resolveSession", () => {
     expect(res.statusCode).toBe(403);
   });
 });
+
+// /registry/token is the docker-bearer flow: clients hit it with Basic
+// auth where the password is the kaiad token. For api-credential
+// bearers we gate on the new registry.pull / registry.push scopes
+// instead of the user-session "is owner/admin?" check.
+describe("api-credential scopes at /registry/token", () => {
+  function basic(token: string): string {
+    return "Basic " + Buffer.from(`kaiad:${token}`).toString("base64");
+  }
+  function decodeAccess(jwt: string): Array<{ type: string; name: string; actions: string[] }> {
+    const payload = JSON.parse(
+      Buffer.from(jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString(
+        "utf8"
+      )
+    );
+    return payload.access ?? [];
+  }
+  async function mintCred(scopes: string[]): Promise<string> {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/api-credentials",
+      headers: { authorization: ownerAuth() },
+      payload: { name: `s-${scopes.join("+")}`, scopes }
+    });
+    return (created.json() as { token: string }).token;
+  }
+
+  it("registry.pull issues a pull-only access claim, no push", async () => {
+    const token = await mintCred(["registry.pull"]);
+    const res = await app.inject({
+      method: "GET",
+      url: "/registry/token?service=kaiad-registry&scope=repository:tenant-app:pull,push",
+      headers: { authorization: basic(token) }
+    });
+    expect(res.statusCode).toBe(200);
+    expect(decodeAccess(res.json().token)).toEqual([
+      { type: "repository", name: "tenant-app", actions: ["pull"] }
+    ]);
+  });
+
+  it("registry.push issues pull+push (push implies pull)", async () => {
+    const token = await mintCred(["registry.push"]);
+    const res = await app.inject({
+      method: "GET",
+      url: "/registry/token?service=kaiad-registry&scope=repository:tenant-app:pull,push",
+      headers: { authorization: basic(token) }
+    });
+    expect(res.statusCode).toBe(200);
+    expect(decodeAccess(res.json().token)).toEqual([
+      { type: "repository", name: "tenant-app", actions: ["pull", "push"] }
+    ]);
+  });
+
+  it("a credential without registry scopes can't even pull a non-public repo", async () => {
+    const token = await mintCred(["enrollment-tokens.create"]);
+    const res = await app.inject({
+      method: "GET",
+      url: "/registry/token?service=kaiad-registry&scope=repository:tenant-app:pull",
+      headers: { authorization: basic(token) }
+    });
+    // Falls through to anonymous-pull path; the repo isn't public → 401.
+    expect(res.statusCode).toBe(401);
+  });
+});

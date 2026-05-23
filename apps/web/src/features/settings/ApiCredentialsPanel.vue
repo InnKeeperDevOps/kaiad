@@ -12,7 +12,12 @@ const SCOPES: { value: ApiCredentialScope; label: string }[] = [
     value: "agents.read",
     label: "Read agents — status & versions (operator status polling + auto-update)"
   },
-  { value: "enrollment-tokens.create", label: "Create agent enrollment tokens" }
+  { value: "enrollment-tokens.create", label: "Create agent enrollment tokens" },
+  { value: "registry.pull", label: "Registry pull — pull images from the built-in OCI registry" },
+  {
+    value: "registry.push",
+    label: "Registry push — push (and pull) images to the built-in OCI registry"
+  }
 ];
 
 const credentials = ref<ApiCredential[]>([]);

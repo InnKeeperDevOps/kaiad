@@ -838,22 +838,35 @@ export function buildServer(opts: BuildServerOptions = {}) {
 
     const requested = parseScopes(scope);
 
-    // Resolve credential. Try kaiad session first (admin-class push),
-    // then a (peeked) enrollment token. Skipped entirely when no Basic
-    // auth was sent — anonymous callers can still get a public-pull
-    // token below.
-    type Grant = { subject: string; canPush: boolean };
+    // Resolve credential. Try kaiad session first (admin-class push,
+    // OR an API credential with explicit registry.pull / registry.push
+    // scopes), then a (peeked) enrollment token. Skipped entirely when
+    // no Basic auth was sent — anonymous callers can still get a
+    // public-pull token below.
+    type Grant = { subject: string; canPull: boolean; canPush: boolean };
     let grant: Grant | null = null;
     if (password) {
       const session = await resolveSession(authStore, `Bearer ${password}`);
       if (session) {
-        const adminLike = session.role === "owner" || session.role === "admin";
-        grant = { subject: session.id, canPush: adminLike };
+        if (session.kind === "apiCredential") {
+          // API credentials are scope-gated. Push implies pull (you
+          // can't push an image without also being able to read its
+          // layers back). A credential with neither scope is rejected
+          // here — fall through to enrollment-token / anonymous-pull.
+          const canPush = hasScope(session, "registry.push");
+          const canPull = canPush || hasScope(session, "registry.pull");
+          if (canPull || canPush) {
+            grant = { subject: session.id, canPull, canPush };
+          }
+        } else {
+          const adminLike = session.role === "owner" || session.role === "admin";
+          grant = { subject: session.id, canPull: true, canPush: adminLike };
+        }
       }
       if (!grant) {
         const enroll = await peekEnrollmentToken(password);
         if (enroll) {
-          grant = { subject: `enrollment:${enroll.tokenId}`, canPush: false };
+          grant = { subject: `enrollment:${enroll.tokenId}`, canPull: true, canPush: false };
         }
       }
     }
@@ -873,7 +886,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
         pullOnlyRepos &&
         (await Promise.all(requested.map((r) => isRepoPubliclyPullable(r.name)))).every(Boolean);
       if (allPublic) {
-        grant = { subject: "anonymous", canPush: false };
+        grant = { subject: "anonymous", canPull: true, canPush: false };
       }
     }
 
@@ -898,7 +911,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
         : filterAllowedActions(requested, (req) => {
             if (req.type !== "repository") return [];
             return req.actions.filter((action) => {
-              if (action === "pull") return true;
+              if (action === "pull") return grant.canPull;
               if (action === "push" || action === "*") return grant.canPush;
               return false;
             });

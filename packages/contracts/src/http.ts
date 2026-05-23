@@ -376,7 +376,14 @@ export type OAuthCallbackResponse = z.infer<typeof oauthCallbackResponseSchema>;
 export type AuthProviderEntry = z.infer<typeof authProviderEntrySchema>;
 export type ListAuthProvidersResponse = z.infer<typeof listAuthProvidersResponseSchema>;
 
-export const apiCredentialScopeSchema = z.enum(["enrollment-tokens.create", "agents.read"]);
+export const apiCredentialScopeSchema = z.enum([
+  "enrollment-tokens.create",
+  "agents.read",
+  // OCI registry access for machine callers (CI, mirrors, custom
+  // tooling). `registry.push` implies `registry.pull` server-side.
+  "registry.pull",
+  "registry.push"
+]);
 
 export const apiCredentialMetadataSchema = z.object({
   id: z.string(),

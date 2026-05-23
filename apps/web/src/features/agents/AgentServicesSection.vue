@@ -482,8 +482,8 @@ function btn(variant: "primary" | "muted" | "danger" = "muted"): CSSProperties {
             color: 'var(--color-text-primary)',
             border: '1px solid var(--color-border)',
             borderRadius: '8px',
-            width: 'min(960px, 100%)',
-            maxHeight: '85vh',
+            width: '95vw',
+            maxHeight: '90vh',
             display: 'flex',
             flexDirection: 'column',
             boxShadow: '0 10px 40px rgba(0, 0, 0, 0.4)'

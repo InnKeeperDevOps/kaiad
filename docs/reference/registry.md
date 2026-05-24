@@ -286,6 +286,7 @@ Used by both the API (verifier) and the build worker (signer):
 | `REGISTRY_AUTH_ISSUER` | `kaiad` | JWT `iss` claim. |
 | `REGISTRY_AUTH_SERVICE` | `kaiad-registry` | JWT `aud` claim. |
 | `REGISTRY_AUTH_TOKEN_TTL_SECONDS` | `3600` | Token lifetime. |
+| `KAIAD_REGISTRY_MAX_UPLOAD_BYTES` | `1073741824` (1 GiB) | Cap for a single `POST`/`PUT`/`PATCH` to `/v2/*`. Applied both as the Fastify route bodyLimit and the `application/octet-stream` parser's bodyLimit, so a large layer push fails the same way in either path. Raise for fat ML / model layers; lower if you want to defend pg_largeobject against runaway clients. |
 
 The dev and prod compose files under `env/` show the full wiring.
 

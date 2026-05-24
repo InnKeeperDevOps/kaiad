@@ -102,11 +102,31 @@ export type RegistryRoutesDeps = {
   isPubliclyPullable?: (repo: string) => Promise<boolean>;
 };
 
+/**
+ * Max bytes accepted on the /v2/* upload routes (POST/PUT/PATCH).
+ * Gates both the Fastify route-level Content-Length check AND the
+ * application/octet-stream content-type parser, so both paths refuse
+ * the request the same way instead of one tripping in mysterious ways.
+ *
+ * Default 1 GiB — large enough for nearly every real-world image layer
+ * (most are under 200 MB) without letting a runaway client tie up
+ * pg_largeobject space. Tune via env if you push fatter layers
+ * (ML model weights, fat composer trees, …).
+ */
+const DEFAULT_REGISTRY_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024; // 1 GiB
+function registryMaxUploadBytes(): number {
+  const raw = process.env.KAIAD_REGISTRY_MAX_UPLOAD_BYTES?.trim();
+  if (!raw) return DEFAULT_REGISTRY_MAX_UPLOAD_BYTES;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_REGISTRY_MAX_UPLOAD_BYTES;
+}
+
 export function registerRegistryRoutes(
   app: FastifyInstance,
   deps: RegistryRoutesDeps
 ): void {
   const service = deps.service ?? deps.authConfig.service;
+  const maxUploadBytes = registryMaxUploadBytes();
 
   // ── Content-type parsers for write routes ──────────────────────────
   // Fastify's default JSON parser would mutate manifest bytes (e.g.
@@ -133,11 +153,14 @@ export function registerRegistryRoutes(
     }
   }
   // Pass-through parser for blob upload bodies. Handler reads req.body
-  // (the raw stream) directly. bodyLimit doesn't apply when we hand
-  // back the stream as-is.
+  // (the raw stream) directly. Setting bodyLimit explicitly here AND on
+  // the routes belt-and-suspenders the same ceiling — without it
+  // Fastify falls back to its 1 MiB server default for the parser's
+  // length check and rejects every real layer push.
   if (!app.hasContentTypeParser("application/octet-stream")) {
     app.addContentTypeParser(
       "application/octet-stream",
+      { bodyLimit: maxUploadBytes },
       (_req, payload, done) => done(null, payload)
     );
   }
@@ -313,7 +336,7 @@ export function registerRegistryRoutes(
   app.route({
     method: "POST",
     url: "/v2/*",
-    bodyLimit: 64 * 1024 * 1024 * 1024, // 64GB monolithic-upload ceiling
+    bodyLimit: maxUploadBytes,
     handler: async (req, reply) => {
       const op = parseOrError(req, reply);
       if (!op) return reply;
@@ -327,7 +350,7 @@ export function registerRegistryRoutes(
   app.route({
     method: "PUT",
     url: "/v2/*",
-    bodyLimit: 64 * 1024 * 1024 * 1024,
+    bodyLimit: maxUploadBytes,
     handler: async (req, reply) => {
       const op = parseOrError(req, reply);
       if (!op) return reply;
@@ -341,7 +364,7 @@ export function registerRegistryRoutes(
   app.route({
     method: "PATCH",
     url: "/v2/*",
-    bodyLimit: 64 * 1024 * 1024 * 1024,
+    bodyLimit: maxUploadBytes,
     handler: async (req, reply) => {
       const op = parseOrError(req, reply);
       if (!op) return reply;

@@ -72,14 +72,26 @@ shortcuts the round trip by signing its own JWT in-process.
 `/v2/*` request. The shape matches the docker/distribution token spec
 (RS256, libtrust `kid`, `iss` / `aud` / `access` claims).
 
-Callers present **Basic auth** on the token request. Three credential
-classes are recognised:
+Callers present **Basic auth** on the token request. The recognised
+credential classes — the password is what's checked; the username is
+ignored except for the enrollment-token convention noted below:
 
-| Credential | Granted access |
-|-----------|----------------|
-| Owner / admin kaiad session token | `pull,push,*` on any repository. |
-| Enrollment token | `pull` only on any repository. |
-| Anything else | 401 — no token issued. |
+| Credential (password) | Granted access | Conventional username |
+|-----------------------|----------------|-----------------------|
+| Owner / admin kaiad session token | `pull,push,*` on any repository. | anything |
+| API credential w/ `registry.push` scope (`kop_…`) | `pull,push` on any repository. | anything |
+| API credential w/ `registry.pull` scope (`kop_…`) | `pull` only on any repository. | anything |
+| Enrollment token | `pull` only on any repository. | `kaiad-agent` |
+| Anonymous (no Basic auth) | `pull` only, and only when every requested repo is default-public (the `kaiad-agent` repo). | – |
+| Anything else | 401 — no token issued. | – |
+
+API credentials with no registry scope fall through to the
+anonymous-pull path — so they get a token only when the request is
+pull-only against a default-public repo, otherwise 401. See
+[API credentials]({% link admin/api-credentials.md %}#available-scopes)
+for how to mint one with `registry.pull` / `registry.push`, and
+[Using the registry]({% link getting-started/using-the-registry.md %})
+for the end-user `docker login` / `docker pull` / `docker push` flow.
 
 ### `WWW-Authenticate` challenge
 
@@ -159,15 +171,22 @@ hosts. Push from an enrollment token is rejected.
 
 ### Operator (`docker push`)
 
+The preferred path for any programmatic / scripted push is an [API
+credential]({% link admin/api-credentials.md %}) minted with the
+`registry.push` scope (push implies pull, so one credential covers
+both):
+
 ```sh
-# Outside the kaiad container — uses the public realm.
-echo $KAIAD_OWNER_TOKEN | docker login panel.kaiad.dev -u admin --password-stdin
+echo "kop_<your-push-token>" | docker login panel.kaiad.dev -u kaiad --password-stdin
 docker push panel.kaiad.dev/my-image:latest
 ```
 
-The owner / admin token comes from your kaiad session (visible in the
-panel under **API Credentials** for long-lived programmatic access —
-see [API credentials]({% link admin/api-credentials.md %})).
+The username is ignored when the password resolves to an API
+credential — pick anything. A short-lived owner / admin session token
+also works (same `pull,push,*` grant), but it expires in 24 h and
+isn't safe to store. See [Using the registry]({% link
+getting-started/using-the-registry.md %}#pushing) for the full flow,
+including how to mint the credential.
 
 ### CI
 

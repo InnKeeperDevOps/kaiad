@@ -174,6 +174,32 @@ export const agentBindingSchema = z.object({
   agentId: z.string()
 });
 
+/**
+ * HTTP readiness check. Used both as a kaiad.yaml block (
+ *   services:
+ *     my-service:
+ *       healthcheck:
+ *         path: /healthz
+ *         port: 8080
+ *         initialDelaySeconds: 5
+ *         periodSeconds: 5
+ *         timeoutSeconds: 3
+ *         failureThreshold: 3
+ * ) and as a panel-editable per-service override stored on
+ * MonitoredService.healthcheck. The redeploy_service realtime command
+ * carries the resolved value through to the agent's renderer.
+ */
+export const healthcheckSchema = z.object({
+  path: z.string().min(1),
+  port: z.number().int().min(1).max(65535),
+  initialDelaySeconds: z.number().int().min(0).max(600).default(0),
+  periodSeconds: z.number().int().min(1).max(600).default(10),
+  timeoutSeconds: z.number().int().min(1).max(120).default(3),
+  failureThreshold: z.number().int().min(1).max(60).default(3),
+  successThreshold: z.number().int().min(1).max(10).default(1)
+});
+export type Healthcheck = z.infer<typeof healthcheckSchema>;
+
 export const monitoredServiceSchema = z.object({
   id: z.string(),
   tenantId: z.string(),
@@ -195,6 +221,15 @@ export const monitoredServiceSchema = z.object({
    * this service throws an error kaiad can see. Defaults to claude.
    */
   fixExecutor: z.enum(["claude", "cursor"]).default("claude"),
+  /**
+   * HTTP readiness check used by the agent's rolling deploy. When set,
+   * the rendered Deployment carries a readinessProbe so a new replica
+   * gets no traffic until /<path>:<port> returns 2xx, and the strategy
+   * holds the old replica until the new one is Ready (maxUnavailable=0,
+   * maxSurge=1). Editable from the service detail page; falls back to
+   * the kaiad.yaml healthcheck block when wired through the pipeline.
+   */
+  healthcheck: healthcheckSchema.nullable().optional(),
   /** Agents currently bound to this service. Empty until at least one is attached. */
   agents: z.array(agentBindingSchema).default([])
 });
@@ -209,7 +244,8 @@ export const createMonitoredServiceRequestSchema = z.object({
   dockerImage: z.string().min(1).optional(),
   composePath: z.string().min(1).optional(),
   pipelineName: z.string().min(1).nullable().optional(),
-  fixExecutor: z.enum(["claude", "cursor"]).optional()
+  fixExecutor: z.enum(["claude", "cursor"]).optional(),
+  healthcheck: healthcheckSchema.nullable().optional()
 });
 
 export const updateMonitoredServiceRequestSchema = z.object({
@@ -226,7 +262,8 @@ export const updateMonitoredServiceRequestSchema = z.object({
   dockerImage: z.string().min(1).optional(),
   composePath: z.string().min(1).optional(),
   pipelineName: z.string().min(1).nullable().optional(),
-  fixExecutor: z.enum(["claude", "cursor"]).optional()
+  fixExecutor: z.enum(["claude", "cursor"]).optional(),
+  healthcheck: healthcheckSchema.nullable().optional()
 });
 
 export const listMonitoredServicesResponseSchema = z.object({

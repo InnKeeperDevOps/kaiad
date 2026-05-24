@@ -141,7 +141,8 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
         dockerImage: data.dockerImage,
         composePath: data.composePath,
         pipelineName: data.pipelineName,
-        fixExecutor: data.fixExecutor
+        fixExecutor: data.fixExecutor,
+        healthcheck: data.healthcheck ?? null
       });
       if (data.agentIds && data.agentIds.length > 0) {
         await queries.setAgentBindings(queryFn, tenantId, row.id, data.agentIds);
@@ -164,6 +165,20 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
       if (patch.composePath !== undefined) push("compose_path", patch.composePath);
       if (patch.pipelineName !== undefined) push("pipeline_name", patch.pipelineName);
       if (patch.fixExecutor !== undefined) push("fix_executor", patch.fixExecutor);
+      // Healthcheck patch: null clears every column (back to "no probe");
+      // an object replaces all seven fields atomically. Undefined leaves
+      // them alone. We don't allow per-field patches — the form sends a
+      // whole healthcheck or nothing, which keeps the wire schema tidy.
+      if (patch.healthcheck !== undefined) {
+        const hc = patch.healthcheck;
+        push("healthcheck_path", hc?.path ?? null);
+        push("healthcheck_port", hc?.port ?? null);
+        push("healthcheck_initial_delay_seconds", hc?.initialDelaySeconds ?? null);
+        push("healthcheck_period_seconds", hc?.periodSeconds ?? null);
+        push("healthcheck_timeout_seconds", hc?.timeoutSeconds ?? null);
+        push("healthcheck_failure_threshold", hc?.failureThreshold ?? null);
+        push("healthcheck_success_threshold", hc?.successThreshold ?? null);
+      }
       if (assignments.length > 0) {
         values.push(id, tenantId);
         const { rows } = await queryFn(

@@ -538,7 +538,28 @@ const redeployServiceCommandSchema = z.object({
         optional: z.boolean().optional()
       })
     )
-    .default([])
+    .default([]),
+  /**
+   * Resolved HTTP healthcheck (kaiad.yaml or the per-service override).
+   * When present the agent renders a readinessProbe on the container so
+   * a new replica gets no traffic until /<path>:<port> returns 2xx — and
+   * sets the Deployment strategy to `RollingUpdate, maxUnavailable: 0,
+   * maxSurge: 1` so the old replica stays up until the new one is
+   * Ready. Null/absent → no probe, but the renderer still emits the
+   * stricter rollout strategy.
+   */
+  healthcheck: z
+    .object({
+      path: z.string().min(1),
+      port: z.number().int().min(1).max(65535),
+      initialDelaySeconds: z.number().int().min(0).max(600).default(0),
+      periodSeconds: z.number().int().min(1).max(600).default(10),
+      timeoutSeconds: z.number().int().min(1).max(120).default(3),
+      failureThreshold: z.number().int().min(1).max(60).default(3),
+      successThreshold: z.number().int().min(1).max(10).default(1)
+    })
+    .nullable()
+    .default(null)
 });
 
 /**

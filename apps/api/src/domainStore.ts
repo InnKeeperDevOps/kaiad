@@ -98,6 +98,7 @@ export type DomainStore = {
       composePath?: string;
       pipelineName?: string | null;
       fixExecutor?: "claude" | "cursor";
+      healthcheck?: MonitoredService["healthcheck"] | null;
     }
   ): Promise<MonitoredService>;
   updateService(
@@ -118,6 +119,8 @@ export type DomainStore = {
       composePath?: string;
       pipelineName?: string | null;
       fixExecutor?: "claude" | "cursor";
+      /** null clears the probe; an object replaces it whole. */
+      healthcheck?: MonitoredService["healthcheck"] | null;
     }
   ): Promise<MonitoredService | undefined>;
   deleteService(tenantId: string, id: string): Promise<boolean>;
@@ -429,6 +432,7 @@ export function createMemoryDomainStore(): DomainStore {
         composePath: data.composePath ?? null,
         pipelineName: data.pipelineName ?? null,
         fixExecutor: data.fixExecutor ?? "claude",
+        healthcheck: data.healthcheck ?? null,
         agents: []
       };
       services.set(svc.id, svc);
@@ -448,6 +452,7 @@ export function createMemoryDomainStore(): DomainStore {
       if (patch.composePath !== undefined) svc.composePath = patch.composePath;
       if (patch.pipelineName !== undefined) svc.pipelineName = patch.pipelineName;
       if (patch.fixExecutor !== undefined) svc.fixExecutor = patch.fixExecutor;
+      if (patch.healthcheck !== undefined) svc.healthcheck = patch.healthcheck;
       if (patch.agentIds !== undefined) {
         // Replace the full set: drop bindings for this service that aren't in the
         // desired list, then add any missing ones.

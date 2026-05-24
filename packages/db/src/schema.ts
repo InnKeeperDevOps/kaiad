@@ -199,6 +199,21 @@ create index if not exists monitored_services_depends_on_gin on monitored_servic
 -- pipeline_yaml so reconcile/deploy use it too.
 alter table monitored_services add column if not exists pipeline_override text;
 
+-- HTTP readiness check. When healthcheck_path + healthcheck_port are
+-- both set the redeploy renders a readinessProbe on the container so a
+-- new replica gets no traffic until /<path>:<port> returns 2xx, and the
+-- Deployment strategy holds the old replica until the new one is Ready
+-- (maxUnavailable=0, maxSurge=1). Stored as discrete columns rather
+-- than jsonb so the schema is queryable and a partial override (just
+-- path/port, defaults for the rest) is natural to write.
+alter table monitored_services add column if not exists healthcheck_path text;
+alter table monitored_services add column if not exists healthcheck_port int;
+alter table monitored_services add column if not exists healthcheck_initial_delay_seconds int;
+alter table monitored_services add column if not exists healthcheck_period_seconds int;
+alter table monitored_services add column if not exists healthcheck_timeout_seconds int;
+alter table monitored_services add column if not exists healthcheck_failure_threshold int;
+alter table monitored_services add column if not exists healthcheck_success_threshold int;
+
 -- Repo-scoped kaiad.yaml override (the default scope). Keyed by
 -- (tenant, git_repo_url, branch) so all services from that repo+branch
 -- pick it up. A service's own pipeline_override (above) overrides this.

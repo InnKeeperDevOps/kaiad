@@ -651,6 +651,16 @@ export async function deleteAgent(
 // Monitored Services
 // ---------------------------------------------------------------------------
 
+export interface HealthcheckSpec {
+  path: string;
+  port: number;
+  initialDelaySeconds: number;
+  periodSeconds: number;
+  timeoutSeconds: number;
+  failureThreshold: number;
+  successThreshold: number;
+}
+
 export interface ServiceRow {
   id: string;
   tenantId: string;
@@ -665,6 +675,40 @@ export interface ServiceRow {
   pipelineOverride?: string | null;
   /** AI CLI for autonomous fixes. */
   fixExecutor: "claude" | "cursor";
+  /**
+   * HTTP readiness check (resolved from kaiad.yaml or the panel form).
+   * Null when neither path nor port is set — the agent then renders no
+   * probe, but still uses the stricter RollingUpdate strategy.
+   */
+  healthcheck: HealthcheckSpec | null;
+}
+
+// Healthcheck defaults — kept in sync with the zod defaults on
+// healthcheckSchema in packages/contracts/src/http.ts. The DB stores
+// each value as its own nullable int; missing → fall back to default.
+const HEALTHCHECK_DEFAULTS: Omit<HealthcheckSpec, "path" | "port"> = {
+  initialDelaySeconds: 0,
+  periodSeconds: 10,
+  timeoutSeconds: 3,
+  failureThreshold: 3,
+  successThreshold: 1
+};
+
+function mapHealthcheck(r: Record<string, unknown>): HealthcheckSpec | null {
+  // The healthcheck is meaningful only when BOTH the http path and port
+  // are set; everything else has a sensible default.
+  if (r.healthcheck_path == null || r.healthcheck_port == null) return null;
+  const num = (v: unknown, fallback: number): number =>
+    typeof v === "number" ? v : v == null ? fallback : Number(v);
+  return {
+    path: String(r.healthcheck_path),
+    port: Number(r.healthcheck_port),
+    initialDelaySeconds: num(r.healthcheck_initial_delay_seconds, HEALTHCHECK_DEFAULTS.initialDelaySeconds),
+    periodSeconds: num(r.healthcheck_period_seconds, HEALTHCHECK_DEFAULTS.periodSeconds),
+    timeoutSeconds: num(r.healthcheck_timeout_seconds, HEALTHCHECK_DEFAULTS.timeoutSeconds),
+    failureThreshold: num(r.healthcheck_failure_threshold, HEALTHCHECK_DEFAULTS.failureThreshold),
+    successThreshold: num(r.healthcheck_success_threshold, HEALTHCHECK_DEFAULTS.successThreshold)
+  };
 }
 
 function mapService(r: Record<string, unknown>): ServiceRow {
@@ -680,7 +724,31 @@ function mapService(r: Record<string, unknown>): ServiceRow {
     pipelineName: r.pipeline_name == null ? null : String(r.pipeline_name),
     pipelineOverride: r.pipeline_override == null ? null : String(r.pipeline_override),
     fixExecutor: r.fix_executor === "cursor" ? "cursor" : "claude",
+    healthcheck: mapHealthcheck(r)
   };
+}
+
+/**
+ * Read just the healthcheck (or null) for a service. Used by every
+ * redeploy_service dispatch site to attach the resolved probe to the
+ * realtime message — without this the wire schema's `healthcheck:
+ * null` default strips the probe.
+ */
+export async function getServiceHealthcheck(
+  query: QueryFn,
+  serviceId: string
+): Promise<HealthcheckSpec | null> {
+  const { rows } = await query(
+    `SELECT healthcheck_path, healthcheck_port,
+            healthcheck_initial_delay_seconds, healthcheck_period_seconds,
+            healthcheck_timeout_seconds, healthcheck_failure_threshold,
+            healthcheck_success_threshold
+       FROM monitored_services
+      WHERE id = $1`,
+    [serviceId]
+  );
+  if (rows.length === 0) return null;
+  return mapHealthcheck(rows[0]);
 }
 
 /** Read just the pipeline override (or null) for a service. */
@@ -811,14 +879,41 @@ export async function createService(
     composePath?: string;
     pipelineName?: string | null;
     fixExecutor?: string | null;
+    healthcheck?: HealthcheckSpec | null;
   },
 ): Promise<ServiceRow> {
   const id = crypto.randomUUID();
+  const hc = data.healthcheck ?? null;
   const { rows } = await query(
-    `INSERT INTO monitored_services (id, tenant_id, name, git_repo_url, ssh_key_id, branch, docker_image, compose_path, pipeline_name, fix_executor)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    `INSERT INTO monitored_services (
+       id, tenant_id, name, git_repo_url, ssh_key_id, branch,
+       docker_image, compose_path, pipeline_name, fix_executor,
+       healthcheck_path, healthcheck_port,
+       healthcheck_initial_delay_seconds, healthcheck_period_seconds,
+       healthcheck_timeout_seconds, healthcheck_failure_threshold,
+       healthcheck_success_threshold
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
      RETURNING *`,
-    [id, tenantId, data.name, data.gitRepoUrl, data.sshKeyId ?? null, data.branch, data.dockerImage ?? null, data.composePath ?? null, data.pipelineName ?? null, data.fixExecutor ?? "claude"],
+    [
+      id,
+      tenantId,
+      data.name,
+      data.gitRepoUrl,
+      data.sshKeyId ?? null,
+      data.branch,
+      data.dockerImage ?? null,
+      data.composePath ?? null,
+      data.pipelineName ?? null,
+      data.fixExecutor ?? "claude",
+      hc?.path ?? null,
+      hc?.port ?? null,
+      hc?.initialDelaySeconds ?? null,
+      hc?.periodSeconds ?? null,
+      hc?.timeoutSeconds ?? null,
+      hc?.failureThreshold ?? null,
+      hc?.successThreshold ?? null
+    ],
   );
   return mapService(rows[0]);
 }

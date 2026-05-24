@@ -76,6 +76,13 @@ type redeployInput struct {
 	// secretEnv are env vars sourced from existing k8s Secrets,
 	// rendered as container env valueFrom.secretKeyRef.
 	secretEnv []secretEnvSpec
+	// healthcheck is the resolved HTTP readiness check (kaiad.yaml or
+	// panel-form). When set, the renderer emits a readinessProbe on
+	// the container so a new replica gets no traffic until /<path>:<port>
+	// returns 2xx. The renderer ALSO emits a stricter rollout strategy
+	// (maxUnavailable=0, maxSurge=1) unconditionally — that's safe
+	// without a probe too, just less effective.
+	healthcheck healthcheckSpec
 }
 
 type domainSpec struct {
@@ -106,6 +113,22 @@ type volumeSpec struct {
 	pvcClaim    string
 	mounts      []volumeMountSpec
 }
+// healthcheckSpec mirrors the realtime contract's healthcheck block.
+// `set=false` means the redeploy command carried no healthcheck → the
+// renderer skips the readinessProbe but still uses the stricter
+// RollingUpdate strategy (no traffic to old until new is at least
+// Started).
+type healthcheckSpec struct {
+	set                  bool
+	path                 string
+	port                 int
+	initialDelaySeconds  int
+	periodSeconds        int
+	timeoutSeconds       int
+	failureThreshold     int
+	successThreshold     int
+}
+
 type loadBalancerSpec struct {
 	typ             string            // "none" | "k8s" | "metallb" | "nginx"
 	annotations     map[string]string // type=k8s
@@ -218,6 +241,36 @@ func parseRedeployPayload(payload map[string]interface{}) (redeployInput, error)
 			if se.name != "" && se.secret != "" && se.key != "" {
 				in.secretEnv = append(in.secretEnv, se)
 			}
+		}
+	}
+	// healthcheck is optional (null/absent → no probe).
+	if raw, ok := payload["healthcheck"].(map[string]interface{}); ok {
+		hc := healthcheckSpec{}
+		hc.path, _ = raw["path"].(string)
+		if n, ok := raw["port"].(float64); ok {
+			hc.port = int(n)
+		}
+		if n, ok := raw["initialDelaySeconds"].(float64); ok {
+			hc.initialDelaySeconds = int(n)
+		}
+		if n, ok := raw["periodSeconds"].(float64); ok {
+			hc.periodSeconds = int(n)
+		}
+		if n, ok := raw["timeoutSeconds"].(float64); ok {
+			hc.timeoutSeconds = int(n)
+		}
+		if n, ok := raw["failureThreshold"].(float64); ok {
+			hc.failureThreshold = int(n)
+		}
+		if n, ok := raw["successThreshold"].(float64); ok {
+			hc.successThreshold = int(n)
+		}
+		// Only enable the probe when BOTH path + port are present.
+		// Defaults for everything else live in the renderer to avoid
+		// hand-converting null/zero ambiguity here.
+		if hc.path != "" && hc.port > 0 {
+			hc.set = true
+			in.healthcheck = hc
 		}
 	}
 	if raw, ok := payload["domains"].([]interface{}); ok {
@@ -1372,6 +1425,16 @@ func renderK8sManifests(in redeployInput, namespace string) string {
 		name, namespace, labelStr, in.instances)
 	fmt.Fprintf(&b, "  selector:\n    matchLabels:\n      %s: %q\n      kaiad.dev/environment: %q\n",
 		LabelServiceID, in.serviceID, in.environment)
+	// Rollout strategy: keep the OLD replica serving until the NEW one
+	// is Ready. The k8s default (RollingUpdate with maxUnavailable=25%)
+	// can take old pods down too eagerly on small replica counts. Pair
+	// this with the readinessProbe emitted below so "Ready" means
+	// "container's /<path>:<port> returned 2xx", not just "started" —
+	// without the probe, k8s treats a started container as Ready
+	// immediately and the LoadBalancer Service starts routing to it
+	// before the app is actually serving. maxSurge=1 caps the blast
+	// radius of a failing rollout to one extra replica.
+	b.WriteString("  strategy:\n    type: RollingUpdate\n    rollingUpdate:\n      maxUnavailable: 0\n      maxSurge: 1\n")
 	fmt.Fprintf(&b, "  template:\n    metadata:\n      labels:\n        %s\n",
 		labelStr,
 	)
@@ -1420,6 +1483,59 @@ func renderK8sManifests(in redeployInput, namespace string) string {
 				}
 			}
 		}
+	}
+	if in.healthcheck.set {
+		// Defaults match the zod schema in
+		// packages/contracts/src/http.ts so an agent that came up
+		// before the panel persisted explicit values still gets sane
+		// behaviour. Wrap in a small helper for the period/timeout/
+		// threshold guard so a zero stored value falls back to the
+		// default instead of becoming an invalid `0s` in the YAML.
+		num := func(v, fallback int) int {
+			if v <= 0 {
+				return fallback
+			}
+			return v
+		}
+		hc := in.healthcheck
+		period := num(hc.periodSeconds, 10)
+		timeout := num(hc.timeoutSeconds, 3)
+		failThresh := num(hc.failureThreshold, 3)
+		successThresh := num(hc.successThreshold, 1)
+		initialDelay := hc.initialDelaySeconds // 0 is a valid value
+		if initialDelay < 0 {
+			initialDelay = 0
+		}
+
+		// readinessProbe drives whether a NEW pod gets Service traffic
+		// — a pod whose probe is still failing is left out of the
+		// Endpoints list, so the old pod keeps serving 100% of
+		// requests until the new one passes.
+		fmt.Fprintf(&b, "          readinessProbe:\n")
+		fmt.Fprintf(&b, "            httpGet:\n              path: %q\n              port: %d\n", hc.path, hc.port)
+		fmt.Fprintf(&b, "            initialDelaySeconds: %d\n            periodSeconds: %d\n            timeoutSeconds: %d\n",
+			initialDelay, period, timeout)
+		fmt.Fprintf(&b, "            failureThreshold: %d\n            successThreshold: %d\n",
+			failThresh, successThresh)
+
+		// startupProbe gives slow JVM/Node cold-starts more wall time
+		// without forcing operators to bump every readinessProbe's
+		// initialDelay. failureThreshold*periodSeconds bounds the
+		// app's allowed startup window; we widen them past the
+		// readiness numbers so a long startup doesn't get killed by
+		// the readiness gauntlet kicking in mid-boot.
+		startPeriod := period
+		if startPeriod < 5 {
+			startPeriod = 5
+		}
+		startFail := failThresh * 6
+		if startFail < 30 {
+			startFail = 30
+		}
+		fmt.Fprintf(&b, "          startupProbe:\n")
+		fmt.Fprintf(&b, "            httpGet:\n              path: %q\n              port: %d\n", hc.path, hc.port)
+		fmt.Fprintf(&b, "            periodSeconds: %d\n            timeoutSeconds: %d\n            failureThreshold: %d\n",
+			startPeriod, timeout, startFail)
 	}
 	if len(in.volumes) > 0 {
 		b.WriteString("      volumes:\n")

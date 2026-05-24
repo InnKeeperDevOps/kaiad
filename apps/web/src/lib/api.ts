@@ -252,6 +252,22 @@ export type Agent = {
  */
 export type AgentBinding = { agentId: string };
 
+/**
+ * HTTP readiness check shared between kaiad.yaml, the panel form, and
+ * the redeploy_service wire schema. When set on a service, the agent
+ * renders a readinessProbe + startupProbe and the Deployment strategy
+ * holds the old replica until the new one is Ready.
+ */
+export type Healthcheck = {
+  path: string;
+  port: number;
+  initialDelaySeconds?: number;
+  periodSeconds?: number;
+  timeoutSeconds?: number;
+  failureThreshold?: number;
+  successThreshold?: number;
+};
+
 export type MonitoredService = {
   id: string;
   tenantId: string;
@@ -270,6 +286,8 @@ export type MonitoredService = {
   pipelineName?: string | null;
   /** AI CLI kaiad spins up to autonomously fix this service. Defaults to claude. */
   fixExecutor?: "claude" | "cursor";
+  /** Null/absent = no probe; the rolling-update strategy still applies. */
+  healthcheck?: Healthcheck | null;
 };
 
 /** Matches server OAuth provider registration (POST /api/v1/settings/oauth-providers). */
@@ -512,6 +530,7 @@ export const api = {
     /** Required when the repo's kaiad.yaml is multi-pipeline. */
     pipelineName?: string | null;
     fixExecutor?: "claude" | "cursor";
+    healthcheck?: Healthcheck | null;
   }) =>
     apiFetch<MonitoredService>("/api/v1/services", {
       method: "POST",
@@ -533,6 +552,8 @@ export const api = {
      */
     pipelineName?: string | null;
     fixExecutor?: "claude" | "cursor";
+    /** null clears the probe; an object replaces it whole. */
+    healthcheck?: Healthcheck | null;
   }) =>
     apiFetch<MonitoredService>(`/api/v1/services/${encodeURIComponent(id)}`, {
       method: "PATCH",

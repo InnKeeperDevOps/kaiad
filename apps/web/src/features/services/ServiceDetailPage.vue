@@ -131,6 +131,9 @@ const totalContainers = computed(() =>
 
 // ─── Edit mode ─────────────────────────────────────────────────────
 const editing = ref(false);
+// Healthcheck inputs are kept as strings in the form so an empty field
+// (= "don't set") is distinguishable from `0`. We coerce to numbers at
+// submit time and null out the whole probe when path or port is blank.
 const form = ref({
   name: "",
   gitRepoUrl: "",
@@ -140,13 +143,21 @@ const form = ref({
   composePath: "",
   pipelineName: "",
   fixExecutor: "claude" as "claude" | "cursor",
-  agentIds: [] as string[]
+  agentIds: [] as string[],
+  healthcheckPath: "",
+  healthcheckPort: "",
+  healthcheckInitialDelaySeconds: "",
+  healthcheckPeriodSeconds: "",
+  healthcheckTimeoutSeconds: "",
+  healthcheckFailureThreshold: "",
+  healthcheckSuccessThreshold: ""
 });
 const saving = ref(false);
 
 function startEdit() {
   const svc = service.value;
   if (!svc) return;
+  const hc = svc.healthcheck;
   form.value = {
     name: svc.name,
     gitRepoUrl: svc.gitRepoUrl,
@@ -156,7 +167,17 @@ function startEdit() {
     composePath: svc.composePath ?? "",
     pipelineName: svc.pipelineName ?? "",
     fixExecutor: svc.fixExecutor === "cursor" ? "cursor" : "claude",
-    agentIds: (svc.agents ?? []).map((b) => b.agentId)
+    agentIds: (svc.agents ?? []).map((b) => b.agentId),
+    healthcheckPath: hc?.path ?? "",
+    healthcheckPort: hc?.port != null ? String(hc.port) : "",
+    healthcheckInitialDelaySeconds:
+      hc?.initialDelaySeconds != null ? String(hc.initialDelaySeconds) : "",
+    healthcheckPeriodSeconds: hc?.periodSeconds != null ? String(hc.periodSeconds) : "",
+    healthcheckTimeoutSeconds: hc?.timeoutSeconds != null ? String(hc.timeoutSeconds) : "",
+    healthcheckFailureThreshold:
+      hc?.failureThreshold != null ? String(hc.failureThreshold) : "",
+    healthcheckSuccessThreshold:
+      hc?.successThreshold != null ? String(hc.successThreshold) : ""
   };
   editing.value = true;
   actionError.value = null;
@@ -169,6 +190,29 @@ function toggleAgentBinding(agentId: string) {
   form.value.agentIds = form.value.agentIds.includes(agentId)
     ? form.value.agentIds.filter((a) => a !== agentId)
     : [...form.value.agentIds, agentId];
+}
+function buildHealthcheckPatch(): NonNullable<MonitoredService["healthcheck"]> | null {
+  const path = form.value.healthcheckPath.trim();
+  const port = parseInt(form.value.healthcheckPort, 10);
+  // Healthcheck is on iff BOTH path and a valid port are supplied. An
+  // explicit clear (blank path or port) sends null so the server drops
+  // every column.
+  if (!path || !Number.isFinite(port) || port <= 0) return null;
+  const numOrUndef = (s: string): number | undefined => {
+    const t = s.trim();
+    if (!t) return undefined;
+    const n = parseInt(t, 10);
+    return Number.isFinite(n) && n >= 0 ? n : undefined;
+  };
+  return {
+    path,
+    port,
+    initialDelaySeconds: numOrUndef(form.value.healthcheckInitialDelaySeconds),
+    periodSeconds: numOrUndef(form.value.healthcheckPeriodSeconds),
+    timeoutSeconds: numOrUndef(form.value.healthcheckTimeoutSeconds),
+    failureThreshold: numOrUndef(form.value.healthcheckFailureThreshold),
+    successThreshold: numOrUndef(form.value.healthcheckSuccessThreshold)
+  };
 }
 async function saveEdit() {
   if (!service.value) return;
@@ -186,7 +230,8 @@ async function saveEdit() {
       // empty string → null clears (revert to single-pipeline default)
       pipelineName: pipelineTrim || null,
       fixExecutor: form.value.fixExecutor,
-      agentIds: form.value.agentIds
+      agentIds: form.value.agentIds,
+      healthcheck: buildHealthcheckPatch()
     });
     service.value = updated;
     editing.value = false;
@@ -458,6 +503,107 @@ function sshKeyName(id: string | null | undefined): string {
             }"
           >
             <legend :style="{ padding: '0 0.4rem', fontSize: '0.8rem', color: muted }">
+              Healthcheck <span>(optional; blank path or port = no probe)</span>
+            </legend>
+            <p :style="{ margin: '0 0 0.4rem', fontSize: '0.78rem', color: muted }">
+              When set, the rolling deploy holds the old replica until the new one
+              answers <code>GET /&lt;path&gt;:&lt;port&gt;</code> with 2xx — and Service
+              traffic only routes to Ready pods. Defaults are reasonable for most
+              HTTP services; tune for slow-starting JVM/Python apps.
+            </p>
+            <div
+              :style="{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+                gap: '0.5rem 0.75rem',
+                fontSize: '0.85rem'
+              }"
+            >
+              <label>
+                Path
+                <input
+                  v-model="form.healthcheckPath"
+                  placeholder="/healthz"
+                  :style="inputStyle"
+                />
+              </label>
+              <label>
+                Port
+                <input
+                  v-model="form.healthcheckPort"
+                  type="number"
+                  min="1"
+                  max="65535"
+                  placeholder="8080"
+                  :style="inputStyle"
+                />
+              </label>
+              <label>
+                Initial delay (s)
+                <input
+                  v-model="form.healthcheckInitialDelaySeconds"
+                  type="number"
+                  min="0"
+                  max="600"
+                  placeholder="0"
+                  :style="inputStyle"
+                />
+              </label>
+              <label>
+                Period (s)
+                <input
+                  v-model="form.healthcheckPeriodSeconds"
+                  type="number"
+                  min="1"
+                  max="600"
+                  placeholder="10"
+                  :style="inputStyle"
+                />
+              </label>
+              <label>
+                Timeout (s)
+                <input
+                  v-model="form.healthcheckTimeoutSeconds"
+                  type="number"
+                  min="1"
+                  max="120"
+                  placeholder="3"
+                  :style="inputStyle"
+                />
+              </label>
+              <label>
+                Failure threshold
+                <input
+                  v-model="form.healthcheckFailureThreshold"
+                  type="number"
+                  min="1"
+                  max="60"
+                  placeholder="3"
+                  :style="inputStyle"
+                />
+              </label>
+              <label>
+                Success threshold
+                <input
+                  v-model="form.healthcheckSuccessThreshold"
+                  type="number"
+                  min="1"
+                  max="10"
+                  placeholder="1"
+                  :style="inputStyle"
+                />
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset
+            :style="{
+              border: '1px solid var(--color-border)',
+              borderRadius: '6px',
+              padding: '0.5rem 0.75rem'
+            }"
+          >
+            <legend :style="{ padding: '0 0.4rem', fontSize: '0.8rem', color: muted }">
               Bound agents <span>(many-to-many; pick zero or more)</span>
             </legend>
             <p
@@ -532,6 +678,59 @@ function sshKeyName(id: string | null | undefined): string {
             <div :style="{ ...cellValue, ...monoStyle, fontSize: '0.85rem' }">
               {{ service.composePath }}
             </div>
+          </div>
+        </div>
+      </Card>
+
+      <!-- Healthcheck — explicit so the rolling-deploy behaviour is visible -->
+      <Card title="Healthcheck" :style="{ marginBottom: '1rem' }">
+        <p
+          v-if="!service.healthcheck"
+          :style="{ margin: 0, fontSize: '0.85rem', color: muted }"
+        >
+          No probe configured. The agent still uses a strict rolling
+          update (<code>maxUnavailable: 0, maxSurge: 1</code>), but
+          without a readiness check the Service starts routing to a
+          new pod as soon as the container reports Started — set a
+          path + port below to gate on
+          <code>GET /&lt;path&gt;:&lt;port&gt;</code> returning 2xx.
+        </p>
+        <div
+          v-else
+          :style="{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+            gap: '1rem',
+            fontSize: '0.85rem'
+          }"
+        >
+          <div>
+            <div :style="cellTitle">Path</div>
+            <div :style="{ ...cellValue, ...monoStyle, fontSize: '0.9rem' }">{{ service.healthcheck.path }}</div>
+          </div>
+          <div>
+            <div :style="cellTitle">Port</div>
+            <div :style="cellValue">{{ service.healthcheck.port }}</div>
+          </div>
+          <div>
+            <div :style="cellTitle">Initial delay</div>
+            <div :style="cellValue">{{ service.healthcheck.initialDelaySeconds ?? 0 }}s</div>
+          </div>
+          <div>
+            <div :style="cellTitle">Period</div>
+            <div :style="cellValue">{{ service.healthcheck.periodSeconds ?? 10 }}s</div>
+          </div>
+          <div>
+            <div :style="cellTitle">Timeout</div>
+            <div :style="cellValue">{{ service.healthcheck.timeoutSeconds ?? 3 }}s</div>
+          </div>
+          <div>
+            <div :style="cellTitle">Failure threshold</div>
+            <div :style="cellValue">{{ service.healthcheck.failureThreshold ?? 3 }}</div>
+          </div>
+          <div>
+            <div :style="cellTitle">Success threshold</div>
+            <div :style="cellValue">{{ service.healthcheck.successThreshold ?? 1 }}</div>
           </div>
         </div>
       </Card>

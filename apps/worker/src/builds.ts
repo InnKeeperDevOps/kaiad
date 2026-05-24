@@ -69,6 +69,7 @@ import {
   getRepoPipelineOverride,
   listAllServicesForPoller,
   listServicesDependingOn,
+  getServiceHealthcheck,
   recordBuildArtifact,
   setBuildPipelineYaml,
   updateBuildGitSha,
@@ -1622,6 +1623,10 @@ async function dispatchRedeployToBoundAgents(
     banner(`redeploy_service → ${rows.length} bound agent(s)`)
   );
 
+  // Healthcheck is per-service, not per-env — fetch once outside the
+  // per-agent loop so a many-agent fanout doesn't repeat the query.
+  const healthcheck = await getServiceHealthcheck(query, serviceId);
+
   for (const row of rows) {
     const agentId = String(row.agent_id);
     const agentEnv = String(row.environment ?? "development");
@@ -1647,7 +1652,8 @@ async function dispatchRedeployToBoundAgents(
         namespace: resolved.namespace,
         env: resolved.env,
         volumes: resolved.volumes,
-        secretEnv: resolved.secretEnv
+        secretEnv: resolved.secretEnv,
+        healthcheck
       }
     };
     try {

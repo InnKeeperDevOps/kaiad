@@ -1,54 +1,24 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { Box } from "lucide-vue-next";
-import { api, type Agent, type MonitoredService, type SshKey } from "../../lib/api.js";
+import { api, type Agent, type AgentBinding, type MonitoredService, type SshKey } from "../../lib/api.js";
 import { useAuth } from "../../lib/useAuth.js";
-import BuildsForServiceSection from "./BuildsForServiceSection.vue";
-import PipelineOverrideEditor from "./PipelineOverrideEditor.vue";
 import ServiceWizard from "./ServiceWizard.vue";
 
-type ServiceForm = {
-  name: string;
-  gitRepoUrl: string;
-  sshKeyId: string;
-  branch: string;
-  dockerImage: string;
-  composePath: string;
-  pipelineName: string;
-  fixExecutor: "claude" | "cursor";
-  agentIds: string[];
-};
-
-const emptyForm = (): ServiceForm => ({
-  name: "",
-  gitRepoUrl: "",
-  sshKeyId: "",
-  branch: "main",
-  dockerImage: "",
-  composePath: "",
-  pipelineName: "",
-  fixExecutor: "claude",
-  agentIds: []
-});
-
+// Slim list page: name + repo + branch + agent count. Everything else
+// (identity edit, builds, pipeline override, clone/delete, the agents
+// that run a service plus their containers) lives on the per-service
+// detail page (#service/<id>) — open by clicking a row.
 const services = ref<MonitoredService[]>([]);
 const sshKeys = ref<SshKey[]>([]);
 const agents = ref<Agent[]>([]);
 const error = ref<string | null>(null);
-const showForm = ref(false);
 const showWizard = ref(false);
-const editingId = ref<string | null>(null);
-
-function onWizardCreated(svc: MonitoredService) {
-  services.value = [...services.value, svc];
-  showWizard.value = false;
-}
-const form = reactive<ServiceForm>(emptyForm());
 
 const auth = useAuth();
 const canManage = computed(() => auth.value.isAdmin);
 
-onMounted(async () => {
+async function load() {
   try {
     const r = await api.listServices();
     services.value = r.services;
@@ -67,135 +37,30 @@ onMounted(async () => {
   } catch {
     /* ignore */
   }
-});
-
-function resetForm() {
-  Object.assign(form, emptyForm());
 }
+onMounted(load);
 
-function toggleAgent(agentId: string) {
-  if (form.agentIds.includes(agentId)) {
-    form.agentIds = form.agentIds.filter((a) => a !== agentId);
-  } else {
-    form.agentIds = [...form.agentIds, agentId];
-  }
-}
-
-async function handleSubmit(ev: Event) {
-  ev.preventDefault();
-  try {
-    // PATCH: null clears the field; undefined leaves it unchanged. The
-    // form's empty string means "clear it" on edit (revert to single-
-    // pipeline default).
-    const trimmedPipeline = form.pipelineName.trim();
-    if (editingId.value) {
-      const svc = await api.updateService(editingId.value, {
-        name: form.name,
-        gitRepoUrl: form.gitRepoUrl,
-        sshKeyId: form.sshKeyId || null,
-        branch: form.branch,
-        dockerImage: form.dockerImage.trim() || undefined,
-        composePath: form.composePath.trim() || undefined,
-        pipelineName: trimmedPipeline || null,
-        fixExecutor: form.fixExecutor,
-        agentIds: form.agentIds
-      });
-      services.value = services.value.map((s) => (s.id === editingId.value ? svc : s));
-    } else {
-      const svc = await api.createService({
-        name: form.name,
-        gitRepoUrl: form.gitRepoUrl,
-        sshKeyId: form.sshKeyId || undefined,
-        branch: form.branch,
-        dockerImage: form.dockerImage.trim() || undefined,
-        composePath: form.composePath.trim() || undefined,
-        pipelineName: trimmedPipeline || undefined,
-        fixExecutor: form.fixExecutor,
-        agentIds: form.agentIds
-      });
-      services.value = [...services.value, svc];
-    }
-    showForm.value = false;
-    editingId.value = null;
-    resetForm();
-  } catch (e: unknown) {
-    error.value = (e as Error).message;
-  }
-}
-
-function handleEdit(svc: MonitoredService) {
-  form.name = svc.name;
-  form.gitRepoUrl = svc.gitRepoUrl;
-  form.sshKeyId = svc.sshKeyId || "";
-  form.branch = svc.branch;
-  form.dockerImage = svc.dockerImage || "";
-  form.composePath = svc.composePath || "";
-  form.pipelineName = svc.pipelineName || "";
-  form.fixExecutor = svc.fixExecutor === "cursor" ? "cursor" : "claude";
-  form.agentIds = (svc.agents ?? []).map((b) => b.agentId);
-  editingId.value = svc.id;
+function onWizardCreated(svc: MonitoredService) {
+  services.value = [...services.value, svc];
   showWizard.value = false;
-  showForm.value = true;
+  // Send the user to the new service's detail page — that's where the
+  // post-create steps (bind agents, edit the pipeline) live now.
+  window.location.hash = `service/${encodeURIComponent(svc.id)}`;
 }
 
-// Pick a fresh name like "<original> (copy)", "<original> (copy 2)", …
-// for a clone. Walks the current list rather than the server: cheap,
-// and we'll surface the conflict via the API error if a parallel
-// session also cloned in the meantime.
-function uniqueCopyName(base: string): string {
-  const existing = new Set(services.value.map((s) => s.name));
-  const candidate = `${base} (copy)`;
-  if (!existing.has(candidate)) return candidate;
-  for (let n = 2; n < 1000; n += 1) {
-    const c = `${base} (copy ${n})`;
-    if (!existing.has(c)) return c;
-  }
-  return `${base} (copy ${Date.now()})`;
+function agentCount(svc: MonitoredService): number {
+  return (svc.agents ?? []).length;
+}
+// Eagerly stringify bindings → names for tooltip + secondary text.
+function agentNames(bindings: AgentBinding[] | undefined): string {
+  if (!bindings?.length) return "";
+  const byId = new Map(agents.value.map((a) => [a.id, a] as const));
+  return bindings
+    .map((b) => byId.get(b.agentId)?.name?.trim() || b.agentId)
+    .join(", ");
 }
 
-// Clone a service: same git/branch/pipeline/exec/docker config, fresh
-// name, NO agent bindings (cloning is "give me the same definition"
-// — where it runs is a deployment concern the operator picks after).
-async function handleClone(svc: MonitoredService) {
-  const newName = uniqueCopyName(svc.name);
-  if (!window.confirm(`Clone "${svc.name}" as "${newName}"?`)) return;
-  try {
-    const clone = await api.createService({
-      name: newName,
-      gitRepoUrl: svc.gitRepoUrl,
-      sshKeyId: svc.sshKeyId ?? undefined,
-      branch: svc.branch,
-      dockerImage: svc.dockerImage ?? undefined,
-      composePath: svc.composePath ?? undefined,
-      pipelineName: svc.pipelineName ?? undefined,
-      fixExecutor: svc.fixExecutor ?? "claude"
-    });
-    services.value = [...services.value, clone];
-  } catch (e: unknown) {
-    error.value = (e as Error).message;
-  }
-}
-
-async function handleDelete(svc: MonitoredService) {
-  if (!window.confirm(`Delete service "${svc.name}"? This will also remove its runs and incidents.`)) return;
-  try {
-    await api.deleteService(svc.id);
-    services.value = services.value.filter((s) => s.id !== svc.id);
-    if (editingId.value === svc.id) {
-      editingId.value = null;
-      showForm.value = false;
-      resetForm();
-    }
-  } catch (e: unknown) {
-    error.value = (e as Error).message;
-  }
-}
-
-function renderAgents(svc: MonitoredService): string {
-  const ids = (svc.agents ?? []).map((b) => b.agentId);
-  if (ids.length === 0) return "—";
-  return ids.join(", ");
-}
+const noKey = computed(() => services.value.some((s) => !s.sshKeyId));
 
 const primaryBtn = {
   background: "var(--color-primary)",
@@ -206,51 +71,31 @@ const primaryBtn = {
   cursor: "pointer",
   fontSize: "0.85rem"
 };
-
-const inputStyle = {
-  display: "block",
-  width: "100%",
-  padding: "0.35rem 0.5rem",
-  border: "1px solid var(--color-border)",
-  borderRadius: "6px",
-  marginTop: "0.2rem",
-  boxSizing: "border-box"
-} as const;
-
-const noKey = computed(() => services.value.some((s) => !s.sshKeyId));
-
-// Set of service IDs whose Builds row is expanded.
-const buildsOpen = ref<Set<string>>(new Set());
-
-function toggleBuilds(id: string) {
-  const next = new Set(buildsOpen.value);
-  if (next.has(id)) next.delete(id);
-  else next.add(id);
-  buildsOpen.value = next;
-}
-
-const pipelineOpen = ref<Set<string>>(new Set());
-function togglePipeline(id: string) {
-  const next = new Set(pipelineOpen.value);
-  if (next.has(id)) next.delete(id);
-  else next.add(id);
-  pipelineOpen.value = next;
-}
+const linkRowStyle = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "0.4rem",
+  color: "var(--color-text-primary)",
+  textDecoration: "none",
+  fontWeight: 600
+};
 </script>
 
 <template>
   <section>
-    <div :style="{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }">
+    <div
+      :style="{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: '1rem'
+      }"
+    >
       <h2 :style="{ margin: 0 }">Monitored Services</h2>
       <button
         v-if="canManage"
         :style="primaryBtn"
-        @click="
-          showWizard = !showWizard;
-          showForm = false;
-          editingId = null;
-          resetForm();
-        "
+        @click="showWizard = !showWizard"
       >
         {{ showWizard ? "Cancel" : "Add Service" }}
       </button>
@@ -272,7 +117,7 @@ function togglePipeline(id: string) {
       }"
     >
       <strong>Auto-fix is disabled for some services.</strong> Services without an SSH key can still be monitored,
-      but Kaiad cannot push fix commits to their repos. Edit the service and assign an SSH key to enable the
+      but Kaiad cannot push fix commits to their repos. Open the service and assign an SSH key to enable the
       automated error → fix loop.
     </div>
 
@@ -284,110 +129,10 @@ function togglePipeline(id: string) {
       @cancel="showWizard = false"
     />
 
-    <form
-      v-if="canManage && showForm && editingId"
-      :style="{
-        background: 'var(--color-surface)',
-        border: '1px solid var(--color-border)',
-        borderRadius: '10px',
-        padding: '1rem',
-        marginBottom: '1rem',
-        display: 'grid',
-        gap: '0.5rem'
-      }"
-      @submit="handleSubmit"
+    <p
+      v-if="services.length === 0 && !showWizard"
+      :style="{ color: 'var(--color-text-secondary)' }"
     >
-      <label>
-        Name
-        <input v-model="form.name" required :style="inputStyle" />
-      </label>
-      <label>
-        Git Repository URL
-        <input
-          v-model="form.gitRepoUrl"
-          required
-          placeholder="e.g. git@github.com:acme/app.git"
-          :style="inputStyle"
-        />
-      </label>
-      <label>
-        SSH Key
-        <span :style="{ color: 'var(--color-text-secondary)', fontSize: '0.8rem' }">(required if SSH URL)</span>
-        <select v-model="form.sshKeyId" :style="{ ...inputStyle, background: 'var(--color-surface)' }">
-          <option value="">— None (HTTPS public) —</option>
-          <option v-for="k in sshKeys" :key="k.id" :value="k.id">{{ k.name }}</option>
-        </select>
-      </label>
-      <label>
-        Branch
-        <input v-model="form.branch" required :style="inputStyle" />
-      </label>
-      <label>
-        Docker Image
-        <span :style="{ color: 'var(--color-text-secondary)', fontSize: '0.8rem' }">(optional)</span>
-        <input v-model="form.dockerImage" placeholder="e.g. myorg/myapp:latest" :style="inputStyle" />
-      </label>
-      <label>
-        Compose Path
-        <span :style="{ color: 'var(--color-text-secondary)', fontSize: '0.8rem' }">(optional)</span>
-        <input v-model="form.composePath" placeholder="e.g. docker-compose.yml" :style="inputStyle" />
-      </label>
-      <label>
-        Pipeline Name
-        <span :style="{ color: 'var(--color-text-secondary)', fontSize: '0.8rem' }">
-          (only when kaiad.yaml is multi-pipeline)
-        </span>
-        <input
-          v-model="form.pipelineName"
-          placeholder="e.g. php (matches services.<name> in kaiad.yaml)"
-          :style="inputStyle"
-        />
-      </label>
-      <label>
-        Auto-fix executor
-        <span :style="{ color: 'var(--color-text-secondary)', fontSize: '0.8rem' }">
-          (which AI CLI kaiad spins up to fix this service's errors)
-        </span>
-        <select v-model="form.fixExecutor" :style="{ ...inputStyle, background: 'var(--color-surface)' }">
-          <option value="claude">Claude</option>
-          <option value="cursor">Cursor</option>
-        </select>
-      </label>
-      <fieldset
-        :style="{
-          border: '1px solid var(--color-border)',
-          borderRadius: '6px',
-          padding: '0.5rem 0.75rem'
-        }"
-      >
-        <legend :style="{ padding: '0 0.4rem', fontSize: '0.8rem', color: 'var(--color-text-secondary)' }">
-          Bound agents <span>(many-to-many; pick zero or more)</span>
-        </legend>
-        <p
-          v-if="agents.length === 0"
-          :style="{ margin: 0, color: 'var(--color-text-secondary)', fontSize: '0.82rem' }"
-        >
-          No agents enrolled yet. Bind agents from the Agents page after they appear.
-        </p>
-        <div v-else :style="{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem 1rem' }">
-          <label
-            v-for="a in agents"
-            :key="a.id"
-            :style="{ display: 'inline-flex', gap: '0.3rem', alignItems: 'center', fontSize: '0.85rem' }"
-          >
-            <input
-              type="checkbox"
-              :checked="form.agentIds.includes(a.id)"
-              @change="toggleAgent(a.id)"
-            />
-            {{ a.name?.trim() || a.id }}
-          </label>
-        </div>
-      </fieldset>
-      <button type="submit" :style="primaryBtn">{{ editingId ? "Save Changes" : "Create" }}</button>
-    </form>
-
-    <p v-if="services.length === 0 && !showForm && !showWizard" :style="{ color: 'var(--color-text-secondary)' }">
       No services configured yet.
     </p>
 
@@ -395,7 +140,7 @@ function togglePipeline(id: string) {
       <thead>
         <tr>
           <th
-            v-for="h in ['Name', 'Repository', 'Branch', 'Agents', 'Detectors', 'Actions']"
+            v-for="h in ['Name', 'Repository', 'Branch', 'Agents']"
             :key="h"
             :style="{
               textAlign: 'left',
@@ -410,100 +155,25 @@ function togglePipeline(id: string) {
         </tr>
       </thead>
       <tbody>
-        <template v-for="(svc, idx) in services" :key="svc.id || idx">
-        <tr>
+        <tr
+          v-for="svc in services"
+          :key="svc.id"
+          :style="{ borderTop: '1px solid var(--color-border)' }"
+        >
           <td :style="{ padding: '0.5rem' }">
-            <span :style="{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }">
+            <a :href="`#service/${encodeURIComponent(svc.id)}`" :style="linkRowStyle">
               <Box :size="14" /> {{ svc.name }}
-            </span>
+            </a>
           </td>
           <td :style="{ padding: '0.5rem', fontSize: '0.85rem' }">{{ svc.gitRepoUrl }}</td>
           <td :style="{ padding: '0.5rem', fontSize: '0.85rem' }">{{ svc.branch }}</td>
-          <td :style="{ padding: '0.5rem', fontSize: '0.85rem', color: 'var(--color-text-secondary)' }">
-            {{ renderAgents(svc) }}
-          </td>
-          <td :style="{ padding: '0.5rem', fontSize: '0.85rem', color: 'var(--color-text-secondary)' }">Default</td>
-          <td :style="{ padding: '0.5rem', fontSize: '0.85rem' }">
-            <div :style="{ display: 'inline-flex', gap: '0.3rem' }">
-              <button
-                :style="{
-                  background: buildsOpen.has(svc.id)
-                    ? 'var(--color-bg)'
-                    : 'var(--color-surface)',
-                  border: '1px solid var(--color-border)',
-                  padding: '0.2rem 0.5rem',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                  fontSize: '0.8rem',
-                  color: 'var(--color-text-primary)'
-                }"
-                @click="toggleBuilds(svc.id)"
-              >{{ buildsOpen.has(svc.id) ? 'Hide builds' : 'Builds' }}</button>
-              <button
-                :style="{
-                  background: pipelineOpen.has(svc.id) ? 'var(--color-bg)' : 'var(--color-surface)',
-                  border: '1px solid var(--color-border)',
-                  padding: '0.2rem 0.5rem',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                  fontSize: '0.8rem',
-                  color: 'var(--color-text-primary)'
-                }"
-                @click="togglePipeline(svc.id)"
-              >{{ pipelineOpen.has(svc.id) ? 'Hide pipeline' : 'Pipeline' }}</button>
-              <template v-if="canManage">
-                <button
-                  :style="{
-                    background: 'var(--color-surface)',
-                    border: '1px solid var(--color-border)',
-                    padding: '0.2rem 0.5rem',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '0.8rem',
-                    color: 'var(--color-text-primary)'
-                  }"
-                  @click="handleEdit(svc)"
-                >Edit</button>
-                <button
-                  title="Create a copy of this service (same repo/branch/pipeline, fresh name, no agent bindings)"
-                  :style="{
-                    background: 'var(--color-surface)',
-                    border: '1px solid var(--color-border)',
-                    padding: '0.2rem 0.5rem',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '0.8rem',
-                    color: 'var(--color-text-primary)'
-                  }"
-                  @click="handleClone(svc)"
-                >Clone</button>
-                <button
-                  :style="{
-                    background: 'var(--color-surface)',
-                    border: '1px solid var(--color-border)',
-                    padding: '0.2rem 0.5rem',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '0.8rem',
-                    color: 'var(--color-danger)'
-                  }"
-                  @click="handleDelete(svc)"
-                >Delete</button>
-              </template>
-            </div>
+          <td
+            :style="{ padding: '0.5rem', fontSize: '0.85rem', color: 'var(--color-text-secondary)' }"
+            :title="agentNames(svc.agents)"
+          >
+            {{ agentCount(svc) }}
           </td>
         </tr>
-        <tr v-if="buildsOpen.has(svc.id)">
-          <td colspan="6" :style="{ padding: '0 0.5rem 0.5rem' }">
-            <BuildsForServiceSection :service-id="svc.id" :service-name="svc.name" />
-          </td>
-        </tr>
-        <tr v-if="pipelineOpen.has(svc.id)">
-          <td colspan="6" :style="{ padding: '0 0.5rem 0.5rem' }">
-            <PipelineOverrideEditor :service-id="svc.id" :service-name="svc.name" />
-          </td>
-        </tr>
-        </template>
       </tbody>
     </table>
   </section>

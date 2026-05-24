@@ -1,0 +1,684 @@
+<script setup lang="ts">
+import { computed, onMounted, ref, watch, type CSSProperties } from "vue";
+import {
+  ArrowLeft,
+  Box,
+  Check,
+  Copy,
+  Cpu,
+  Pencil,
+  RefreshCw,
+  Trash2,
+  X
+} from "lucide-vue-next";
+import {
+  api,
+  type Agent,
+  type AgentAppTelemetry,
+  type MonitoredService,
+  type SshKey
+} from "../../lib/api.js";
+import { useAuth } from "../../lib/useAuth.js";
+import Badge from "../../components/Badge.vue";
+import Button from "../../components/Button.vue";
+import Card from "../../components/Card.vue";
+import { useTelemetryStream } from "../agents/useTelemetryStream.js";
+import {
+  badgeVariantForStatus,
+  formatBytes,
+  formatBytesPerSec,
+  formatPercent,
+  formatRelativeTime,
+  formatRuntimeBackend
+} from "../agents/format.js";
+import BuildsForServiceSection from "./BuildsForServiceSection.vue";
+import PipelineOverrideEditor from "./PipelineOverrideEditor.vue";
+
+// One page per service: identity + agents running it (with their live
+// container telemetry) + builds + pipeline override + admin actions.
+// Replaces the inline expansions that used to live on ServicesPage.
+const props = defineProps<{ serviceId: string }>();
+
+const auth = useAuth();
+const canManage = computed(() => auth.value.isAdmin);
+const isViewer = computed(() => auth.value.isViewer);
+
+const service = ref<MonitoredService | null>(null);
+const allServices = ref<MonitoredService[]>([]); // for unique-name validation on clone
+const agents = ref<Agent[]>([]);
+const sshKeys = ref<SshKey[]>([]);
+const loading = ref(true);
+const error = ref<string | null>(null);
+const actionError = ref<string | null>(null);
+
+const live = useTelemetryStream(() => true);
+
+async function fetchAll() {
+  error.value = null;
+  try {
+    const [svcRes, agentRes, keyRes] = await Promise.all([
+      api.listServices(),
+      api.listAgents().catch(() => ({ agents: [] as Agent[] })),
+      api.listSshKeys().catch(() => ({ keys: [] as SshKey[] }))
+    ]);
+    allServices.value = svcRes.services;
+    service.value = svcRes.services.find((s) => s.id === props.serviceId) ?? null;
+    agents.value = agentRes.agents;
+    sshKeys.value = keyRes.keys;
+  } catch (e: unknown) {
+    error.value = (e as Error).message;
+  } finally {
+    loading.value = false;
+  }
+}
+
+onMounted(() => void fetchAll());
+watch(
+  () => props.serviceId,
+  () => {
+    service.value = null;
+    loading.value = true;
+    void fetchAll();
+  }
+);
+
+// ─── Bound agents + their containers ───────────────────────────────
+// `service.agents` is the binding list (agentId → "this agent is
+// observing this service"). We hydrate each binding with the live
+// Agent row from listAgents and the live per-container telemetry from
+// the WS stream — both are reactive, so changes appear without a
+// refetch.
+type BoundAgentRow = {
+  agent: Agent | null;
+  agentId: string;
+  websocketConnected: boolean;
+  containers: AgentAppTelemetry[];
+};
+const boundAgents = computed<BoundAgentRow[]>(() => {
+  const svc = service.value;
+  if (!svc) return [];
+  const byId = new Map(agents.value.map((a) => [a.id, a] as const));
+  return (svc.agents ?? [])
+    .map((b) => {
+      const agent = byId.get(b.agentId) ?? null;
+      const livePresence = live.presence[b.agentId];
+      const websocketConnected =
+        livePresence !== undefined ? livePresence : agent?.websocketConnected ?? false;
+      // Live apps override the stored snapshot for the current frame.
+      // Containers belong to this service iff their serviceId matches.
+      const liveApps = live.apps[b.agentId];
+      const liveContainers: AgentAppTelemetry[] = liveApps
+        ? Object.values(liveApps).filter((c) => c.serviceId === props.serviceId)
+        : (agent?.apps ?? []).filter((c) => c.serviceId === props.serviceId);
+      return {
+        agent,
+        agentId: b.agentId,
+        websocketConnected,
+        containers: liveContainers.sort((x, y) =>
+          (x.name ?? x.containerId).localeCompare(y.name ?? y.containerId)
+        )
+      };
+    })
+    .sort((a, b) => {
+      const an = (a.agent?.name?.trim() || a.agentId).toLowerCase();
+      const bn = (b.agent?.name?.trim() || b.agentId).toLowerCase();
+      return an.localeCompare(bn);
+    });
+});
+const totalContainers = computed(() =>
+  boundAgents.value.reduce((n, b) => n + b.containers.length, 0)
+);
+
+// ─── Edit mode ─────────────────────────────────────────────────────
+const editing = ref(false);
+const form = ref({
+  name: "",
+  gitRepoUrl: "",
+  sshKeyId: "",
+  branch: "main",
+  dockerImage: "",
+  composePath: "",
+  pipelineName: "",
+  fixExecutor: "claude" as "claude" | "cursor",
+  agentIds: [] as string[]
+});
+const saving = ref(false);
+
+function startEdit() {
+  const svc = service.value;
+  if (!svc) return;
+  form.value = {
+    name: svc.name,
+    gitRepoUrl: svc.gitRepoUrl,
+    sshKeyId: svc.sshKeyId ?? "",
+    branch: svc.branch,
+    dockerImage: svc.dockerImage ?? "",
+    composePath: svc.composePath ?? "",
+    pipelineName: svc.pipelineName ?? "",
+    fixExecutor: svc.fixExecutor === "cursor" ? "cursor" : "claude",
+    agentIds: (svc.agents ?? []).map((b) => b.agentId)
+  };
+  editing.value = true;
+  actionError.value = null;
+}
+function cancelEdit() {
+  editing.value = false;
+  actionError.value = null;
+}
+function toggleAgentBinding(agentId: string) {
+  form.value.agentIds = form.value.agentIds.includes(agentId)
+    ? form.value.agentIds.filter((a) => a !== agentId)
+    : [...form.value.agentIds, agentId];
+}
+async function saveEdit() {
+  if (!service.value) return;
+  saving.value = true;
+  actionError.value = null;
+  try {
+    const pipelineTrim = form.value.pipelineName.trim();
+    const updated = await api.updateService(service.value.id, {
+      name: form.value.name,
+      gitRepoUrl: form.value.gitRepoUrl,
+      sshKeyId: form.value.sshKeyId || null,
+      branch: form.value.branch,
+      dockerImage: form.value.dockerImage.trim() || undefined,
+      composePath: form.value.composePath.trim() || undefined,
+      // empty string → null clears (revert to single-pipeline default)
+      pipelineName: pipelineTrim || null,
+      fixExecutor: form.value.fixExecutor,
+      agentIds: form.value.agentIds
+    });
+    service.value = updated;
+    editing.value = false;
+  } catch (e: unknown) {
+    actionError.value = (e as Error).message;
+  } finally {
+    saving.value = false;
+  }
+}
+
+// ─── Clone ────────────────────────────────────────────────────────
+function uniqueCopyName(base: string): string {
+  const existing = new Set(allServices.value.map((s) => s.name));
+  const c = `${base} (copy)`;
+  if (!existing.has(c)) return c;
+  for (let n = 2; n < 1000; n += 1) {
+    const cn = `${base} (copy ${n})`;
+    if (!existing.has(cn)) return cn;
+  }
+  return `${base} (copy ${Date.now()})`;
+}
+async function handleClone() {
+  const svc = service.value;
+  if (!svc) return;
+  const newName = uniqueCopyName(svc.name);
+  if (!window.confirm(`Clone "${svc.name}" as "${newName}"?`)) return;
+  actionError.value = null;
+  try {
+    const clone = await api.createService({
+      name: newName,
+      gitRepoUrl: svc.gitRepoUrl,
+      sshKeyId: svc.sshKeyId ?? undefined,
+      branch: svc.branch,
+      dockerImage: svc.dockerImage ?? undefined,
+      composePath: svc.composePath ?? undefined,
+      pipelineName: svc.pipelineName ?? undefined,
+      fixExecutor: svc.fixExecutor ?? "claude"
+    });
+    // Navigate to the new service's detail page so the user lands on
+    // their clone instead of staring at the original they just copied.
+    window.location.hash = `service/${encodeURIComponent(clone.id)}`;
+  } catch (e: unknown) {
+    actionError.value = (e as Error).message;
+  }
+}
+
+// ─── Delete ───────────────────────────────────────────────────────
+async function handleDelete() {
+  const svc = service.value;
+  if (!svc) return;
+  if (
+    !window.confirm(
+      `Delete service "${svc.name}"? This will also remove its runs and incidents.`
+    )
+  )
+    return;
+  actionError.value = null;
+  try {
+    await api.deleteService(svc.id);
+    window.location.hash = "services";
+  } catch (e: unknown) {
+    actionError.value = (e as Error).message;
+  }
+}
+
+// ─── Style helpers ────────────────────────────────────────────────
+const muted = "var(--color-text-secondary)";
+const cellTitle: CSSProperties = {
+  fontSize: "0.75rem",
+  color: muted,
+  textTransform: "uppercase",
+  letterSpacing: "0.04em",
+  marginBottom: "0.2rem"
+};
+const cellValue: CSSProperties = { fontSize: "1.05rem", fontWeight: 600 };
+const inputStyle: CSSProperties = {
+  display: "block",
+  width: "100%",
+  padding: "0.35rem 0.5rem",
+  border: "1px solid var(--color-border)",
+  borderRadius: "6px",
+  marginTop: "0.2rem",
+  boxSizing: "border-box"
+};
+const thStyle: CSSProperties = {
+  textAlign: "left",
+  padding: "0.4rem 0.5rem",
+  borderBottom: "1px solid var(--color-border)",
+  color: muted,
+  fontSize: "0.72rem",
+  fontWeight: 600,
+  textTransform: "uppercase",
+  letterSpacing: "0.03em"
+};
+const tdStyle: CSSProperties = { padding: "0.4rem 0.5rem", fontSize: "0.82rem" };
+const monoStyle: CSSProperties = { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" };
+
+function sshKeyName(id: string | null | undefined): string {
+  if (!id) return "— None —";
+  const k = sshKeys.value.find((x) => x.id === id);
+  return k?.name ?? id;
+}
+</script>
+
+<template>
+  <section :style="{ width: '100%' }">
+    <a
+      href="#services"
+      :style="{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '0.3rem',
+        color: muted,
+        textDecoration: 'none',
+        fontSize: '0.85rem',
+        marginBottom: '0.75rem'
+      }"
+    >
+      <ArrowLeft :size="14" /> Back to Services
+    </a>
+
+    <p v-if="loading" :style="{ color: muted }">Loading…</p>
+
+    <Card v-if="error" :style="{ borderColor: 'var(--color-danger)', marginBottom: '1rem' }">
+      <p :style="{ color: 'var(--color-danger)', margin: 0 }">{{ error }}</p>
+    </Card>
+
+    <Card v-if="!loading && !service">
+      <p :style="{ color: muted, margin: 0 }">
+        Service <code>{{ serviceId }}</code> wasn't found in this tenant.
+      </p>
+    </Card>
+
+    <template v-if="service">
+      <header
+        :style="{
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: '0.75rem',
+          marginBottom: '1rem',
+          flexWrap: 'wrap'
+        }"
+      >
+        <Box :size="22" :style="{ marginTop: '0.4rem' }" />
+        <div :style="{ flex: 1, minWidth: '300px' }">
+          <h2 :style="{ margin: 0 }">{{ service.name }}</h2>
+          <div
+            :style="{
+              fontSize: '0.85rem',
+              color: muted,
+              marginTop: '0.2rem',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '0.6rem',
+              alignItems: 'center'
+            }"
+          >
+            <span>{{ service.gitRepoUrl }}</span>
+            <span aria-hidden="true">·</span>
+            <span>branch {{ service.branch }}</span>
+            <span aria-hidden="true">·</span>
+            <Badge variant="muted">{{ boundAgents.length }} agent{{ boundAgents.length === 1 ? "" : "s" }}</Badge>
+            <Badge :variant="totalContainers > 0 ? 'success' : 'muted'">
+              {{ totalContainers }} container{{ totalContainers === 1 ? "" : "s" }} running
+            </Badge>
+          </div>
+        </div>
+        <div v-if="canManage" :style="{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }">
+          <Button v-if="!editing" size="sm" variant="ghost" @click="startEdit">
+            <Pencil :size="14" /> Edit
+          </Button>
+          <Button size="sm" variant="ghost" :disabled="saving" @click="fetchAll">
+            <RefreshCw :size="14" /> Refresh
+          </Button>
+          <Button size="sm" variant="ghost" :disabled="editing || saving" @click="handleClone">
+            <Copy :size="14" /> Clone
+          </Button>
+          <Button size="sm" variant="ghost" :disabled="editing || saving" @click="handleDelete">
+            <Trash2 :size="14" /> Delete
+          </Button>
+        </div>
+      </header>
+
+      <p
+        v-if="actionError"
+        :style="{ color: 'var(--color-danger)', marginBottom: '0.75rem', fontSize: '0.85rem' }"
+        role="alert"
+      >{{ actionError }}</p>
+
+      <!-- Identity / config — read-only summary, or full edit form -->
+      <Card title="Identity" :style="{ marginBottom: '1rem' }">
+        <form
+          v-if="editing"
+          :style="{ display: 'grid', gap: '0.5rem' }"
+          @submit.prevent="saveEdit"
+        >
+          <label>
+            Name
+            <input v-model="form.name" required :style="inputStyle" />
+          </label>
+          <label>
+            Git Repository URL
+            <input
+              v-model="form.gitRepoUrl"
+              required
+              placeholder="e.g. git@github.com:acme/app.git"
+              :style="inputStyle"
+            />
+          </label>
+          <label>
+            SSH Key <span :style="{ color: muted, fontSize: '0.8rem' }">(required if SSH URL)</span>
+            <select
+              v-model="form.sshKeyId"
+              :style="{ ...inputStyle, background: 'var(--color-surface)' }"
+            >
+              <option value="">— None (HTTPS public) —</option>
+              <option v-for="k in sshKeys" :key="k.id" :value="k.id">{{ k.name }}</option>
+            </select>
+          </label>
+          <label>
+            Branch
+            <input v-model="form.branch" required :style="inputStyle" />
+          </label>
+          <label>
+            Docker Image <span :style="{ color: muted, fontSize: '0.8rem' }">(optional)</span>
+            <input
+              v-model="form.dockerImage"
+              placeholder="e.g. myorg/myapp:latest"
+              :style="inputStyle"
+            />
+          </label>
+          <label>
+            Compose Path <span :style="{ color: muted, fontSize: '0.8rem' }">(optional)</span>
+            <input
+              v-model="form.composePath"
+              placeholder="e.g. docker-compose.yml"
+              :style="inputStyle"
+            />
+          </label>
+          <label>
+            Pipeline Name
+            <span :style="{ color: muted, fontSize: '0.8rem' }">
+              (only when kaiad.yaml is multi-pipeline)
+            </span>
+            <input
+              v-model="form.pipelineName"
+              placeholder="e.g. php (matches services.<name> in kaiad.yaml)"
+              :style="inputStyle"
+            />
+          </label>
+          <label>
+            Auto-fix executor
+            <span :style="{ color: muted, fontSize: '0.8rem' }">
+              (which AI CLI kaiad spins up to fix this service's errors)
+            </span>
+            <select
+              v-model="form.fixExecutor"
+              :style="{ ...inputStyle, background: 'var(--color-surface)' }"
+            >
+              <option value="claude">Claude</option>
+              <option value="cursor">Cursor</option>
+            </select>
+          </label>
+          <fieldset
+            :style="{
+              border: '1px solid var(--color-border)',
+              borderRadius: '6px',
+              padding: '0.5rem 0.75rem'
+            }"
+          >
+            <legend :style="{ padding: '0 0.4rem', fontSize: '0.8rem', color: muted }">
+              Bound agents <span>(many-to-many; pick zero or more)</span>
+            </legend>
+            <p
+              v-if="agents.length === 0"
+              :style="{ margin: 0, color: muted, fontSize: '0.82rem' }"
+            >
+              No agents enrolled yet. Bind agents after they appear on the Agents page.
+            </p>
+            <div v-else :style="{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem 1rem' }">
+              <label
+                v-for="a in agents"
+                :key="a.id"
+                :style="{
+                  display: 'inline-flex',
+                  gap: '0.3rem',
+                  alignItems: 'center',
+                  fontSize: '0.85rem'
+                }"
+              >
+                <input
+                  type="checkbox"
+                  :checked="form.agentIds.includes(a.id)"
+                  @change="toggleAgentBinding(a.id)"
+                />
+                {{ a.name?.trim() || a.id }}
+              </label>
+            </div>
+          </fieldset>
+          <div :style="{ display: 'flex', gap: '0.4rem' }">
+            <Button type="submit" variant="primary" size="sm" :disabled="saving">
+              <Check :size="14" /> Save changes
+            </Button>
+            <Button type="button" variant="ghost" size="sm" :disabled="saving" @click="cancelEdit">
+              <X :size="14" /> Cancel
+            </Button>
+          </div>
+        </form>
+
+        <div
+          v-else
+          :style="{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+            gap: '1rem',
+            fontSize: '0.85rem'
+          }"
+        >
+          <div>
+            <div :style="cellTitle">Branch</div>
+            <div :style="cellValue">{{ service.branch }}</div>
+          </div>
+          <div>
+            <div :style="cellTitle">SSH key</div>
+            <div :style="cellValue">{{ sshKeyName(service.sshKeyId) }}</div>
+          </div>
+          <div>
+            <div :style="cellTitle">Auto-fix executor</div>
+            <div :style="cellValue">{{ service.fixExecutor ?? "claude" }}</div>
+          </div>
+          <div>
+            <div :style="cellTitle">Pipeline name</div>
+            <div :style="cellValue">{{ service.pipelineName ?? "default" }}</div>
+          </div>
+          <div v-if="service.dockerImage">
+            <div :style="cellTitle">Docker image</div>
+            <div :style="{ ...cellValue, ...monoStyle, fontSize: '0.85rem' }">
+              {{ service.dockerImage }}
+            </div>
+          </div>
+          <div v-if="service.composePath">
+            <div :style="cellTitle">Compose path</div>
+            <div :style="{ ...cellValue, ...monoStyle, fontSize: '0.85rem' }">
+              {{ service.composePath }}
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      <!-- Agents running this service (with their containers) -->
+      <Card title="Agents running this service" :style="{ marginBottom: '1rem' }">
+        <p
+          v-if="boundAgents.length === 0"
+          :style="{ margin: 0, fontSize: '0.85rem', color: muted }"
+        >
+          No agents are bound to this service yet.
+          <template v-if="canManage">Use <strong>Edit</strong> above to attach one.</template>
+          <template v-else>An administrator needs to bind an agent.</template>
+        </p>
+
+        <div
+          v-for="row in boundAgents"
+          :key="row.agentId"
+          :style="{
+            border: '1px solid var(--color-border)',
+            borderRadius: '8px',
+            background: 'var(--color-surface)',
+            marginBottom: '0.75rem'
+          }"
+        >
+          <div
+            :style="{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.6rem',
+              flexWrap: 'wrap',
+              padding: '0.55rem 0.7rem',
+              borderBottom: '1px solid var(--color-border)'
+            }"
+          >
+            <Cpu :size="14" :style="{ flexShrink: 0 }" />
+            <a
+              :href="`#agent/${encodeURIComponent(row.agentId)}`"
+              :style="{
+                color: 'var(--color-text-primary)',
+                textDecoration: 'none',
+                fontWeight: 600
+              }"
+            >{{ row.agent?.name?.trim() || row.agentId }}</a>
+            <span v-if="row.agent?.name?.trim()" :style="{ ...monoStyle, color: muted, fontSize: '0.72rem' }">
+              {{ row.agentId }}
+            </span>
+            <Badge :variant="row.websocketConnected ? 'success' : 'muted'">
+              {{ row.websocketConnected ? "live" : "offline" }}
+            </Badge>
+            <Badge
+              v-if="row.agent"
+              :variant="badgeVariantForStatus(row.agent.status)"
+            >{{ row.agent.status }}</Badge>
+            <Badge v-if="row.agent" variant="muted">
+              runtime: {{ formatRuntimeBackend(row.agent.runtimeBackend) }}
+            </Badge>
+            <Badge v-if="row.agent" variant="muted">{{ row.agent.environment }}</Badge>
+            <span
+              v-if="row.agent?.lastSeenAt"
+              :style="{ marginLeft: 'auto', fontSize: '0.78rem', color: muted }"
+              :title="row.agent.lastSeenAt"
+            >
+              last seen {{ formatRelativeTime(row.agent.lastSeenAt) }}
+            </span>
+          </div>
+
+          <div :style="{ padding: '0.6rem 0.7rem' }">
+            <p
+              v-if="row.containers.length === 0"
+              :style="{ margin: 0, fontSize: '0.8rem', color: muted, fontStyle: 'italic' }"
+            >
+              No containers running for this service on this agent.
+            </p>
+            <div v-else :style="{ overflowX: 'auto' }">
+              <table
+                :style="{ width: '100%', borderCollapse: 'collapse', minWidth: '640px' }"
+              >
+                <thead>
+                  <tr>
+                    <th :style="thStyle">Container</th>
+                    <th :style="thStyle">Image</th>
+                    <th :style="thStyle">State</th>
+                    <th :style="thStyle">CPU</th>
+                    <th :style="thStyle">Memory</th>
+                    <th :style="thStyle">Net rx / tx</th>
+                    <th :style="thStyle">Sampled</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="app in row.containers" :key="app.containerId">
+                    <td :style="tdStyle">
+                      <div :style="{ fontWeight: 600 }">
+                        {{ app.name ?? app.containerId.slice(0, 12) }}
+                      </div>
+                      <div :style="{ ...monoStyle, fontSize: '0.7rem', color: muted }">
+                        {{ app.containerId.slice(0, 12) }}
+                      </div>
+                    </td>
+                    <td :style="{ ...tdStyle, fontSize: '0.76rem' }" :title="app.image">
+                      {{ app.image ? app.image.split("@")[0] : "—" }}
+                    </td>
+                    <td :style="tdStyle">
+                      <Badge :variant="app.state === 'running' ? 'success' : 'muted'">
+                        {{ app.state ?? "—" }}
+                      </Badge>
+                    </td>
+                    <td :style="tdStyle">{{ formatPercent(app.cpuPercent) }}</td>
+                    <td :style="tdStyle">
+                      <template v-if="app.memPercent !== undefined">
+                        <div>{{ formatPercent(app.memPercent) }}</div>
+                        <div
+                          v-if="app.memUsedBytes !== undefined && app.memLimitBytes !== undefined"
+                          :style="{ fontSize: '0.7rem', color: muted }"
+                        >
+                          {{ formatBytes(app.memUsedBytes) }} / {{ formatBytes(app.memLimitBytes) }}
+                        </div>
+                      </template>
+                      <template v-else-if="app.memUsedBytes !== undefined">
+                        {{ formatBytes(app.memUsedBytes) }}
+                      </template>
+                      <template v-else>—</template>
+                    </td>
+                    <td :style="tdStyle">
+                      {{ formatBytesPerSec(app.netRxBytesPerSec) }} /
+                      {{ formatBytesPerSec(app.netTxBytesPerSec) }}
+                    </td>
+                    <td :style="{ ...tdStyle, fontSize: '0.7rem', color: muted }">
+                      {{ new Date(app.ts).toLocaleTimeString() }}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      <!-- Builds — full history + manual trigger -->
+      <Card title="Builds" :style="{ marginBottom: '1rem' }">
+        <BuildsForServiceSection :service-id="service.id" :service-name="service.name" />
+      </Card>
+
+      <!-- Pipeline override editor -->
+      <Card title="Pipeline" :style="{ marginBottom: '1rem' }">
+        <PipelineOverrideEditor :service-id="service.id" :service-name="service.name" />
+      </Card>
+    </template>
+  </section>
+</template>

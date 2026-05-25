@@ -968,7 +968,7 @@ func ensureKubectlCreate(ctx context.Context, kind, namespace, name string, crea
 // Best-effort: errors here log and proceed. The kubectl apply that
 // follows still attempts the deploy; if the prep didn't take, the Pod
 // will surface the same FailedMount in events as before.
-func ensureNFSDirsExist(ctx context.Context, namespace, serviceID string, volumes []volumeSpec) {
+func ensureNFSDirsExist(ctx context.Context, namespace, serviceID string, volumes []volumeSpec, sc podSecurityContextSpec) {
 	type group struct {
 		parentMount string              // path to mount in the Job pod, e.g. "/data/"
 		leaves      map[string]struct{} // leaf dir names to mkdir within parentMount
@@ -1061,6 +1061,36 @@ func ensureNFSDirsExist(ctx context.Context, namespace, serviceID string, volume
 			"; chown 1000:1000 " + joined + " || true" +
 			"; ls -la /mnt"
 
+		// When the service runs with a non-root securityContext, mirror
+		// it on the mkdir Job's pod template. This is the difference
+		// between a postgres pod working and crashing under NFS
+		// root_squash: the mkdir Job runs as `runAsUser` directly, so
+		// the leaf dir is created OWNED BY that UID (not by `nobody`,
+		// which is what root_squash gives a root-running container).
+		// The service's container, started as the same UID, then OWNS
+		// its data dir — `chmod 0700` from inside the entrypoint
+		// (postgres's initdb) succeeds instead of EPERM-ing.
+		//
+		// We emit only the fields that were set, matching the
+		// Deployment renderer. Skipping the block entirely when the
+		// service has no securityContext keeps the existing,
+		// root-running behaviour for non-postgres-style images.
+		var podSecCtxBlock string
+		if sc.set && (sc.hasUser || sc.hasGroup || sc.hasFsGroup) {
+			var sb strings.Builder
+			sb.WriteString("      securityContext:\n")
+			if sc.hasUser {
+				fmt.Fprintf(&sb, "        runAsUser: %d\n", sc.runAsUser)
+			}
+			if sc.hasGroup {
+				fmt.Fprintf(&sb, "        runAsGroup: %d\n", sc.runAsGroup)
+			}
+			if sc.hasFsGroup {
+				fmt.Fprintf(&sb, "        fsGroup: %d\n", sc.fsGroup)
+			}
+			podSecCtxBlock = sb.String()
+		}
+
 		// We render and apply rather than driving the API directly:
 		// stays in the same kubectl+yaml idiom the rest of this file
 		// uses, no extra k8s.io client dependency.
@@ -1083,7 +1113,7 @@ spec:
         kaiad.dev/service-id: %q
     spec:
       restartPolicy: Never
-      containers:
+%s      containers:
       - name: mkdir
         image: busybox:1.36
         command: ["sh", "-c", %q]
@@ -1096,7 +1126,7 @@ spec:
           server: %q
           path: %q
 `,
-			jobName, namespace, serviceID, serviceID, cmd, server, g.parentMount,
+			jobName, namespace, serviceID, serviceID, podSecCtxBlock, cmd, server, g.parentMount,
 		)
 
 		// Pre-delete a stale Job with the same name (`--wait` so the
@@ -1237,7 +1267,7 @@ func (e *Executor) redeployKubernetes(ctx context.Context, in redeployInput) Com
 	// need. Idempotent (mkdir -p is a no-op on existing dirs); failure
 	// here logs and proceeds (the kubectl apply that follows still
 	// surfaces the underlying mount error if the prep didn't work).
-	ensureNFSDirsExist(ctx, namespace, in.serviceID, in.volumes)
+	ensureNFSDirsExist(ctx, namespace, in.serviceID, in.volumes, in.securityContext)
 
 	yaml := renderK8sManifests(in, namespace)
 

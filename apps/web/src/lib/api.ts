@@ -368,6 +368,14 @@ export type RegistryTag = {
   digest?: string;
   sizeBytes?: number;
   createdAt?: string;
+  /**
+   * Platforms the tag covers, formatted `<os>/<arch>[/<variant>]`.
+   * Image-index / manifest-list tags get one entry per referenced
+   * per-platform manifest; single-arch tags get a single entry derived
+   * from the image config. Empty/absent when the manifest carried no
+   * usable platform info.
+   */
+  platforms?: string[];
 };
 
 export type AuthProviderEntry = {

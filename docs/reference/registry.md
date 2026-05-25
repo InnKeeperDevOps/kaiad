@@ -27,7 +27,22 @@ Source: **`apps/api/src/registry/`**.
 - Streaming reads via Postgres Large Objects — `docker pull` of a 500MB
   layer doesn't materialize the layer in the Node heap.
 - A panel UI under **Registry** that lists repositories, tags, sizes,
-  and creation timestamps, with admin-only delete actions.
+  creation timestamps, and the platforms each tag covers, with
+  admin-only delete actions.
+- **Multi-architecture storage.** The native server accepts both the
+  Docker manifest-list (`application/vnd.docker.distribution.manifest.list.v2+json`)
+  and OCI image-index (`application/vnd.oci.image.index.v1+json`) media
+  types, and `parseManifest` extracts every per-platform child digest
+  into `referenced_manifest_digests[]` so GC respects them. Pushing a
+  multi-arch image (e.g. `docker buildx --platform linux/amd64,linux/arm64`)
+  works the same as any other push. The panel's tag table surfaces the
+  list of platforms per tag (e.g. `linux/amd64`, `linux/arm64/v8`);
+  single-arch tags show one entry derived from the image config's
+  `os` + `architecture` fields. The kaiad-internal build pipeline
+  itself still produces single-arch images (it `docker build`s on the
+  host's native arch); push your own multi-arch artifacts via
+  `docker buildx … --push` against the registry to get the panel
+  surface to light up.
 
 ## Endpoints
 

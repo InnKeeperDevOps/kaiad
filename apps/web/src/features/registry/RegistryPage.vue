@@ -325,6 +325,7 @@ onMounted(() => {
               <thead>
                 <tr :style="{ color: 'var(--color-text-secondary)', textAlign: 'left' }">
                   <th :style="{ padding: '0.4rem 0.5rem', fontWeight: 500 }">Tag</th>
+                  <th :style="{ padding: '0.4rem 0.5rem', fontWeight: 500 }">Platforms</th>
                   <th :style="{ padding: '0.4rem 0.5rem', fontWeight: 500 }">Digest</th>
                   <th :style="{ padding: '0.4rem 0.5rem', fontWeight: 500 }">Size</th>
                   <th :style="{ padding: '0.4rem 0.5rem', fontWeight: 500 }">Created</th>
@@ -343,6 +344,23 @@ onMounted(() => {
                 >
                   <td :style="{ padding: '0.45rem 0.5rem', fontFamily: 'var(--font-mono)' }">
                     {{ tag.tag }}
+                  </td>
+                  <td :style="{ padding: '0.45rem 0.5rem' }">
+                    <span
+                      v-if="!tag.platforms || tag.platforms.length === 0"
+                      :style="{ color: 'var(--color-text-secondary)', fontSize: '0.78rem' }"
+                      :title="'manifest carried no platform info'"
+                    >—</span>
+                    <span
+                      v-else
+                      :style="{ display: 'inline-flex', flexWrap: 'wrap', gap: '0.25rem' }"
+                    >
+                      <Badge
+                        v-for="p in tag.platforms"
+                        :key="p"
+                        variant="muted"
+                      >{{ p }}</Badge>
+                    </span>
                   </td>
                   <td
                     :style="{

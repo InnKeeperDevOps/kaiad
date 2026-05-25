@@ -83,6 +83,11 @@ type redeployInput struct {
 	// (maxUnavailable=0, maxSurge=1) unconditionally — that's safe
 	// without a probe too, just less effective.
 	healthcheck healthcheckSpec
+	// securityContext sets pod-level runAsUser/runAsGroup/fsGroup.
+	// When `.set` is false the renderer omits the whole block; absent
+	// individual fields are not emitted (Pod inherits whatever the
+	// image's USER directive — or k8s default = root — gives).
+	securityContext podSecurityContextSpec
 }
 
 type domainSpec struct {
@@ -113,6 +118,26 @@ type volumeSpec struct {
 	pvcClaim    string
 	mounts      []volumeMountSpec
 }
+// podSecurityContextSpec mirrors the realtime contract's
+// securityContext block. Any subset of (runAsUser, runAsGroup,
+// fsGroup) may be set; `set=false` means no securityContext: block is
+// emitted on the Pod at all.
+//
+// Primary use case: dodge NFS root_squash on data volumes. A container
+// whose entrypoint chowns its PGDATA crashes against root_squash
+// because root inside the container maps to nobody on the NFS server.
+// Setting runAsUser to the image's non-root data UID (postgres=999,
+// mysql=999, …) makes the entrypoint skip the chown branch.
+type podSecurityContextSpec struct {
+	set        bool
+	runAsUser  int64
+	runAsGroup int64
+	fsGroup    int64
+	hasUser    bool
+	hasGroup   bool
+	hasFsGroup bool
+}
+
 // healthcheckSpec mirrors the realtime contract's healthcheck block.
 // `set=false` means the redeploy command carried no healthcheck → the
 // renderer skips the readinessProbe but still uses the stricter
@@ -241,6 +266,27 @@ func parseRedeployPayload(payload map[string]interface{}) (redeployInput, error)
 			if se.name != "" && se.secret != "" && se.key != "" {
 				in.secretEnv = append(in.secretEnv, se)
 			}
+		}
+	}
+	// securityContext is optional. Each of runAsUser/runAsGroup/
+	// fsGroup is individually optional within the block.
+	if raw, ok := payload["securityContext"].(map[string]interface{}); ok {
+		sc := podSecurityContextSpec{}
+		if n, ok := raw["runAsUser"].(float64); ok {
+			sc.runAsUser = int64(n)
+			sc.hasUser = true
+		}
+		if n, ok := raw["runAsGroup"].(float64); ok {
+			sc.runAsGroup = int64(n)
+			sc.hasGroup = true
+		}
+		if n, ok := raw["fsGroup"].(float64); ok {
+			sc.fsGroup = int64(n)
+			sc.hasFsGroup = true
+		}
+		if sc.hasUser || sc.hasGroup || sc.hasFsGroup {
+			sc.set = true
+			in.securityContext = sc
 		}
 	}
 	// healthcheck is optional (null/absent → no probe).
@@ -1448,6 +1494,22 @@ func renderK8sManifests(in redeployInput, namespace string) string {
 	// deploy namespace (it does for the agent's own namespace).
 	if ps := strings.TrimSpace(os.Getenv("KAIAD_IMAGE_PULL_SECRET")); ps != "" {
 		fmt.Fprintf(&b, "      imagePullSecrets:\n        - name: %q\n", ps)
+	}
+	// Pod-level securityContext (optional). Each field is emitted
+	// only when explicitly set so we don't overwrite the image's
+	// USER with k8s default = 0 just because the field was omitted.
+	if in.securityContext.set {
+		sc := in.securityContext
+		b.WriteString("      securityContext:\n")
+		if sc.hasUser {
+			fmt.Fprintf(&b, "        runAsUser: %d\n", sc.runAsUser)
+		}
+		if sc.hasGroup {
+			fmt.Fprintf(&b, "        runAsGroup: %d\n", sc.runAsGroup)
+		}
+		if sc.hasFsGroup {
+			fmt.Fprintf(&b, "        fsGroup: %d\n", sc.fsGroup)
+		}
 	}
 	b.WriteString("      containers:\n        - name: app\n")
 	fmt.Fprintf(&b, "          image: %s\n", in.imageRef)

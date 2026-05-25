@@ -150,7 +150,13 @@ const form = ref({
   healthcheckPeriodSeconds: "",
   healthcheckTimeoutSeconds: "",
   healthcheckFailureThreshold: "",
-  healthcheckSuccessThreshold: ""
+  healthcheckSuccessThreshold: "",
+  // securityContext — same strings-not-numbers convention as
+  // healthcheck so an empty input means "leave this column null"
+  // (vs. 0, which is a valid UID).
+  runAsUser: "",
+  runAsGroup: "",
+  fsGroup: ""
 });
 const saving = ref(false);
 
@@ -177,7 +183,10 @@ function startEdit() {
     healthcheckFailureThreshold:
       hc?.failureThreshold != null ? String(hc.failureThreshold) : "",
     healthcheckSuccessThreshold:
-      hc?.successThreshold != null ? String(hc.successThreshold) : ""
+      hc?.successThreshold != null ? String(hc.successThreshold) : "",
+    runAsUser: svc.securityContext?.runAsUser != null ? String(svc.securityContext.runAsUser) : "",
+    runAsGroup: svc.securityContext?.runAsGroup != null ? String(svc.securityContext.runAsGroup) : "",
+    fsGroup: svc.securityContext?.fsGroup != null ? String(svc.securityContext.fsGroup) : ""
   };
   editing.value = true;
   actionError.value = null;
@@ -190,6 +199,27 @@ function toggleAgentBinding(agentId: string) {
   form.value.agentIds = form.value.agentIds.includes(agentId)
     ? form.value.agentIds.filter((a) => a !== agentId)
     : [...form.value.agentIds, agentId];
+}
+function buildSecurityContextPatch(): NonNullable<MonitoredService["securityContext"]> | null {
+  const num = (s: string): number | undefined => {
+    const t = s.trim();
+    if (!t) return undefined;
+    const n = parseInt(t, 10);
+    return Number.isFinite(n) && n >= 0 ? n : undefined;
+  };
+  const runAsUser = num(form.value.runAsUser);
+  const runAsGroup = num(form.value.runAsGroup);
+  const fsGroup = num(form.value.fsGroup);
+  // All-empty form ⇒ null (drop every column). Otherwise emit only
+  // the fields the user filled in.
+  if (runAsUser === undefined && runAsGroup === undefined && fsGroup === undefined) {
+    return null;
+  }
+  const out: NonNullable<MonitoredService["securityContext"]> = {};
+  if (runAsUser !== undefined) out.runAsUser = runAsUser;
+  if (runAsGroup !== undefined) out.runAsGroup = runAsGroup;
+  if (fsGroup !== undefined) out.fsGroup = fsGroup;
+  return out;
 }
 function buildHealthcheckPatch(): NonNullable<MonitoredService["healthcheck"]> | null {
   const path = form.value.healthcheckPath.trim();
@@ -231,7 +261,8 @@ async function saveEdit() {
       pipelineName: pipelineTrim || null,
       fixExecutor: form.value.fixExecutor,
       agentIds: form.value.agentIds,
-      healthcheck: buildHealthcheckPatch()
+      healthcheck: buildHealthcheckPatch(),
+      securityContext: buildSecurityContextPatch()
     });
     service.value = updated;
     editing.value = false;
@@ -604,6 +635,57 @@ function sshKeyName(id: string | null | undefined): string {
             }"
           >
             <legend :style="{ padding: '0 0.4rem', fontSize: '0.8rem', color: muted }">
+              Pod securityContext <span>(optional; most common: runAsUser to skip an image's entrypoint chown — fixes the NFS root_squash crash for postgres / mysql / …)</span>
+            </legend>
+            <div
+              :style="{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+                gap: '0.5rem 0.75rem',
+                fontSize: '0.85rem'
+              }"
+            >
+              <label>
+                runAsUser
+                <input
+                  v-model="form.runAsUser"
+                  type="number"
+                  min="0"
+                  placeholder="e.g. 999 for postgres"
+                  :style="inputStyle"
+                />
+              </label>
+              <label>
+                runAsGroup
+                <input
+                  v-model="form.runAsGroup"
+                  type="number"
+                  min="0"
+                  placeholder="(blank = inherit)"
+                  :style="inputStyle"
+                />
+              </label>
+              <label>
+                fsGroup
+                <input
+                  v-model="form.fsGroup"
+                  type="number"
+                  min="0"
+                  placeholder="(blank = inherit)"
+                  :style="inputStyle"
+                />
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset
+            :style="{
+              border: '1px solid var(--color-border)',
+              borderRadius: '6px',
+              padding: '0.5rem 0.75rem'
+            }"
+          >
+            <legend :style="{ padding: '0 0.4rem', fontSize: '0.8rem', color: muted }">
               Bound agents <span>(many-to-many; pick zero or more)</span>
             </legend>
             <p
@@ -731,6 +813,45 @@ function sshKeyName(id: string | null | undefined): string {
           <div>
             <div :style="cellTitle">Success threshold</div>
             <div :style="cellValue">{{ service.healthcheck.successThreshold ?? 1 }}</div>
+          </div>
+        </div>
+      </Card>
+
+      <!-- Pod securityContext (explicit visibility — chiefly used to
+           skip an entrypoint's chown branch on NFS root_squash mounts) -->
+      <Card title="Pod securityContext" :style="{ marginBottom: '1rem' }">
+        <p
+          v-if="!service.securityContext"
+          :style="{ margin: 0, fontSize: '0.85rem', color: muted }"
+        >
+          No securityContext block rendered. The Pod runs as whatever
+          the image's <code>USER</code> directive (or k8s default = root)
+          specifies. If your image's entrypoint <code>chown -R</code>s
+          its data volume and the volume sits on an NFS export with
+          <code>root_squash</code> on, set <code>runAsUser</code> to
+          the image's non-root data UID (postgres: <code>999</code>,
+          mysql: <code>999</code>) below via <strong>Edit</strong>.
+        </p>
+        <div
+          v-else
+          :style="{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+            gap: '1rem',
+            fontSize: '0.85rem'
+          }"
+        >
+          <div v-if="service.securityContext.runAsUser !== undefined">
+            <div :style="cellTitle">runAsUser</div>
+            <div :style="cellValue">{{ service.securityContext.runAsUser }}</div>
+          </div>
+          <div v-if="service.securityContext.runAsGroup !== undefined">
+            <div :style="cellTitle">runAsGroup</div>
+            <div :style="cellValue">{{ service.securityContext.runAsGroup }}</div>
+          </div>
+          <div v-if="service.securityContext.fsGroup !== undefined">
+            <div :style="cellTitle">fsGroup</div>
+            <div :style="cellValue">{{ service.securityContext.fsGroup }}</div>
           </div>
         </div>
       </Card>

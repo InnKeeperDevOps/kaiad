@@ -200,6 +200,28 @@ export const healthcheckSchema = z.object({
 });
 export type Healthcheck = z.infer<typeof healthcheckSchema>;
 
+/**
+ * Pod-level securityContext fields the agent should render onto the
+ * deployed Pod. Used most often to dodge NFS root_squash: a container
+ * whose entrypoint `chown -R`s the data volume crashes against an
+ * `root_squash`'d export, because root inside the container maps to
+ * nobody on the NFS server. Setting `runAsUser` to the image's
+ * non-root data UID (postgres = 999, mysql = 999, …) makes the
+ * entrypoint skip the chown branch and writes happen as that UID
+ * directly — the NFS server only squashes root, so non-root UIDs go
+ * through untouched. `fsGroup` is honored by the kubelet on volume
+ * types that support gid-fixup; NFS volumes ignore it.
+ *
+ * All fields optional. When absent, the container runs as whatever
+ * the image's USER directive (or its default = root) specifies.
+ */
+export const podSecurityContextSchema = z.object({
+  runAsUser: z.number().int().min(0).max(2 ** 31 - 1).optional(),
+  runAsGroup: z.number().int().min(0).max(2 ** 31 - 1).optional(),
+  fsGroup: z.number().int().min(0).max(2 ** 31 - 1).optional()
+});
+export type PodSecurityContext = z.infer<typeof podSecurityContextSchema>;
+
 export const monitoredServiceSchema = z.object({
   id: z.string(),
   tenantId: z.string(),
@@ -230,6 +252,13 @@ export const monitoredServiceSchema = z.object({
    * the kaiad.yaml healthcheck block when wired through the pipeline.
    */
   healthcheck: healthcheckSchema.nullable().optional(),
+  /**
+   * Pod-level securityContext rendered onto the deployed Pod. See
+   * podSecurityContextSchema — primarily used to set `runAsUser` so
+   * the container skips the entrypoint's `chown -R data` branch when
+   * the data volume lives on an NFS export with `root_squash` on.
+   */
+  securityContext: podSecurityContextSchema.nullable().optional(),
   /** Agents currently bound to this service. Empty until at least one is attached. */
   agents: z.array(agentBindingSchema).default([])
 });
@@ -245,7 +274,8 @@ export const createMonitoredServiceRequestSchema = z.object({
   composePath: z.string().min(1).optional(),
   pipelineName: z.string().min(1).nullable().optional(),
   fixExecutor: z.enum(["claude", "cursor"]).optional(),
-  healthcheck: healthcheckSchema.nullable().optional()
+  healthcheck: healthcheckSchema.nullable().optional(),
+  securityContext: podSecurityContextSchema.nullable().optional()
 });
 
 export const updateMonitoredServiceRequestSchema = z.object({
@@ -263,7 +293,8 @@ export const updateMonitoredServiceRequestSchema = z.object({
   composePath: z.string().min(1).optional(),
   pipelineName: z.string().min(1).nullable().optional(),
   fixExecutor: z.enum(["claude", "cursor"]).optional(),
-  healthcheck: healthcheckSchema.nullable().optional()
+  healthcheck: healthcheckSchema.nullable().optional(),
+  securityContext: podSecurityContextSchema.nullable().optional()
 });
 
 export const listMonitoredServicesResponseSchema = z.object({

@@ -214,6 +214,17 @@ alter table monitored_services add column if not exists healthcheck_timeout_seco
 alter table monitored_services add column if not exists healthcheck_failure_threshold int;
 alter table monitored_services add column if not exists healthcheck_success_threshold int;
 
+-- Pod-level securityContext applied to the Deployment's Pod template
+-- by the agent renderer. Mostly used to set runAsUser so the
+-- container skips its entrypoint chown -R data branch when the data
+-- volume lives on an NFS export with root_squash on (root in the
+-- container maps to nobody on the server and can't reassign
+-- ownership). Discrete columns rather than jsonb so a partial
+-- override (just runAsUser, defaults for the rest) is natural.
+alter table monitored_services add column if not exists security_run_as_user bigint;
+alter table monitored_services add column if not exists security_run_as_group bigint;
+alter table monitored_services add column if not exists security_fs_group bigint;
+
 -- Repo-scoped kaiad.yaml override (the default scope). Keyed by
 -- (tenant, git_repo_url, branch) so all services from that repo+branch
 -- pick it up. A service's own pipeline_override (above) overrides this.

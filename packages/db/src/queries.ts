@@ -661,6 +661,13 @@ export interface HealthcheckSpec {
   successThreshold: number;
 }
 
+/** Pod-level securityContext fields on a MonitoredService. */
+export interface PodSecurityContextSpec {
+  runAsUser?: number;
+  runAsGroup?: number;
+  fsGroup?: number;
+}
+
 export interface ServiceRow {
   id: string;
   tenantId: string;
@@ -681,6 +688,11 @@ export interface ServiceRow {
    * probe, but still uses the stricter RollingUpdate strategy.
    */
   healthcheck: HealthcheckSpec | null;
+  /**
+   * Pod-level securityContext (e.g. runAsUser). Null when every
+   * column is null — agent renders no securityContext block then.
+   */
+  securityContext: PodSecurityContextSpec | null;
 }
 
 // Healthcheck defaults — kept in sync with the zod defaults on
@@ -693,6 +705,17 @@ const HEALTHCHECK_DEFAULTS: Omit<HealthcheckSpec, "path" | "port"> = {
   failureThreshold: 3,
   successThreshold: 1
 };
+
+function mapSecurityContext(r: Record<string, unknown>): PodSecurityContextSpec | null {
+  const u = r.security_run_as_user;
+  const g = r.security_run_as_group;
+  const f = r.security_fs_group;
+  const out: PodSecurityContextSpec = {};
+  if (u != null) out.runAsUser = Number(u);
+  if (g != null) out.runAsGroup = Number(g);
+  if (f != null) out.fsGroup = Number(f);
+  return Object.keys(out).length > 0 ? out : null;
+}
 
 function mapHealthcheck(r: Record<string, unknown>): HealthcheckSpec | null {
   // The healthcheck is meaningful only when BOTH the http path and port
@@ -724,7 +747,8 @@ function mapService(r: Record<string, unknown>): ServiceRow {
     pipelineName: r.pipeline_name == null ? null : String(r.pipeline_name),
     pipelineOverride: r.pipeline_override == null ? null : String(r.pipeline_override),
     fixExecutor: r.fix_executor === "cursor" ? "cursor" : "claude",
-    healthcheck: mapHealthcheck(r)
+    healthcheck: mapHealthcheck(r),
+    securityContext: mapSecurityContext(r)
   };
 }
 
@@ -749,6 +773,26 @@ export async function getServiceHealthcheck(
   );
   if (rows.length === 0) return null;
   return mapHealthcheck(rows[0]);
+}
+
+/**
+ * Read just the pod-level securityContext (or null) for a service.
+ * Mirrors getServiceHealthcheck — used by the redeploy_service
+ * dispatch sites so the realtime payload carries the resolved
+ * runAsUser/runAsGroup/fsGroup the agent renderer needs.
+ */
+export async function getServiceSecurityContext(
+  query: QueryFn,
+  serviceId: string
+): Promise<PodSecurityContextSpec | null> {
+  const { rows } = await query(
+    `SELECT security_run_as_user, security_run_as_group, security_fs_group
+       FROM monitored_services
+      WHERE id = $1`,
+    [serviceId]
+  );
+  if (rows.length === 0) return null;
+  return mapSecurityContext(rows[0]);
 }
 
 /** Read just the pipeline override (or null) for a service. */
@@ -880,10 +924,12 @@ export async function createService(
     pipelineName?: string | null;
     fixExecutor?: string | null;
     healthcheck?: HealthcheckSpec | null;
+    securityContext?: PodSecurityContextSpec | null;
   },
 ): Promise<ServiceRow> {
   const id = crypto.randomUUID();
   const hc = data.healthcheck ?? null;
+  const sc = data.securityContext ?? null;
   const { rows } = await query(
     `INSERT INTO monitored_services (
        id, tenant_id, name, git_repo_url, ssh_key_id, branch,
@@ -891,9 +937,10 @@ export async function createService(
        healthcheck_path, healthcheck_port,
        healthcheck_initial_delay_seconds, healthcheck_period_seconds,
        healthcheck_timeout_seconds, healthcheck_failure_threshold,
-       healthcheck_success_threshold
+       healthcheck_success_threshold,
+       security_run_as_user, security_run_as_group, security_fs_group
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
      RETURNING *`,
     [
       id,
@@ -912,7 +959,10 @@ export async function createService(
       hc?.periodSeconds ?? null,
       hc?.timeoutSeconds ?? null,
       hc?.failureThreshold ?? null,
-      hc?.successThreshold ?? null
+      hc?.successThreshold ?? null,
+      sc?.runAsUser ?? null,
+      sc?.runAsGroup ?? null,
+      sc?.fsGroup ?? null
     ],
   );
   return mapService(rows[0]);

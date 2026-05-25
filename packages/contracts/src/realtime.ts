@@ -559,6 +559,22 @@ const redeployServiceCommandSchema = z.object({
       successThreshold: z.number().int().min(1).max(10).default(1)
     })
     .nullable()
+    .default(null),
+  /**
+   * Pod-level securityContext rendered onto the Deployment's Pod
+   * template. Most-common knob: `runAsUser` for images that ship with
+   * a non-root data UID baked in (postgres = 999, mysql = 999, …);
+   * setting this skips the entrypoint's "chown -R data" branch which
+   * fails outright against an NFS export with `root_squash` on.
+   * Null/absent → render no securityContext block at all.
+   */
+  securityContext: z
+    .object({
+      runAsUser: z.number().int().min(0).max(2 ** 31 - 1).optional(),
+      runAsGroup: z.number().int().min(0).max(2 ** 31 - 1).optional(),
+      fsGroup: z.number().int().min(0).max(2 ** 31 - 1).optional()
+    })
+    .nullable()
     .default(null)
 });
 

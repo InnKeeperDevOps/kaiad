@@ -148,6 +148,7 @@ import {
   listLatestBuildsForBoundServices,
   listLoadBalancerStatusForTenant,
   getServiceHealthcheck,
+  getServiceSecurityContext,
   listMissingDeploysForAgent,
   getServicePipelineOverride,
   setServicePipelineOverride,
@@ -4130,6 +4131,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
       }
       const resolved = resolveEnvironment(picked.pipeline, env);
       const healthcheck = await getServiceHealthcheck(q, m.serviceId);
+      const securityContext = await getServiceSecurityContext(q, m.serviceId);
       const commandId = crypto.randomUUID();
       const job: AgentCommandJob = {
         agentId,
@@ -4149,7 +4151,8 @@ export function buildServer(opts: BuildServerOptions = {}) {
           env: resolved.env,
           volumes: resolved.volumes,
           secretEnv: resolved.secretEnv,
-          healthcheck
+          healthcheck,
+          securityContext
         }
       };
       try {
@@ -4250,7 +4253,8 @@ export function buildServer(opts: BuildServerOptions = {}) {
         env: resolved.env,
         volumes: resolved.volumes,
         secretEnv: resolved.secretEnv,
-        healthcheck: svc.healthcheck ?? null
+        healthcheck: svc.healthcheck ?? null,
+        securityContext: svc.securityContext ?? null
       };
       try {
         const r = await realtimeManager.sendCommand(t.agentId, JSON.stringify(command));
@@ -4484,6 +4488,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
 
       const cmdId = crypto.randomUUID();
       const healthcheck = await getServiceHealthcheck(q, m.serviceId);
+      const securityContext = await getServiceSecurityContext(q, m.serviceId);
       const job: AgentCommandJob = {
         agentId,
         commandId: cmdId,
@@ -4502,7 +4507,8 @@ export function buildServer(opts: BuildServerOptions = {}) {
           env: newR.env,
           volumes: newR.volumes,
           secretEnv: newR.secretEnv,
-          healthcheck
+          healthcheck,
+          securityContext
         }
       };
       try {
@@ -4794,6 +4800,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
 
       const cmdId = crypto.randomUUID();
       const healthcheck = await getServiceHealthcheck(q, t.serviceId);
+      const securityContext = await getServiceSecurityContext(q, t.serviceId);
       const job: AgentCommandJob = {
         agentId: t.agentId,
         commandId: cmdId,
@@ -4812,7 +4819,8 @@ export function buildServer(opts: BuildServerOptions = {}) {
           env: desired.env,
           volumes: desired.volumes,
           secretEnv: desired.secretEnv,
-          healthcheck
+          healthcheck,
+          securityContext
         }
       };
       try {

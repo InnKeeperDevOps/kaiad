@@ -142,7 +142,8 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
         composePath: data.composePath,
         pipelineName: data.pipelineName,
         fixExecutor: data.fixExecutor,
-        healthcheck: data.healthcheck ?? null
+        healthcheck: data.healthcheck ?? null,
+        securityContext: data.securityContext ?? null
       });
       if (data.agentIds && data.agentIds.length > 0) {
         await queries.setAgentBindings(queryFn, tenantId, row.id, data.agentIds);
@@ -178,6 +179,16 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
         push("healthcheck_timeout_seconds", hc?.timeoutSeconds ?? null);
         push("healthcheck_failure_threshold", hc?.failureThreshold ?? null);
         push("healthcheck_success_threshold", hc?.successThreshold ?? null);
+      }
+      // securityContext patch: null clears every column (back to "no
+      // securityContext block on the Pod"); an object replaces all
+      // three fields atomically. Same atomic-replace shape as
+      // healthcheck above.
+      if (patch.securityContext !== undefined) {
+        const sc = patch.securityContext;
+        push("security_run_as_user", sc?.runAsUser ?? null);
+        push("security_run_as_group", sc?.runAsGroup ?? null);
+        push("security_fs_group", sc?.fsGroup ?? null);
       }
       if (assignments.length > 0) {
         values.push(id, tenantId);

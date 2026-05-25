@@ -268,6 +268,18 @@ export type Healthcheck = {
   successThreshold?: number;
 };
 
+/**
+ * Pod-level securityContext for a service. Most common knob: set
+ * `runAsUser` so an image whose entrypoint does its own `chown -R`
+ * skips that branch (postgres, mysql, …) — saves us when the data
+ * volume is on an NFS export with root_squash on.
+ */
+export type PodSecurityContext = {
+  runAsUser?: number;
+  runAsGroup?: number;
+  fsGroup?: number;
+};
+
 export type MonitoredService = {
   id: string;
   tenantId: string;
@@ -288,6 +300,8 @@ export type MonitoredService = {
   fixExecutor?: "claude" | "cursor";
   /** Null/absent = no probe; the rolling-update strategy still applies. */
   healthcheck?: Healthcheck | null;
+  /** Null/absent = no pod securityContext block rendered. */
+  securityContext?: PodSecurityContext | null;
 };
 
 /** Matches server OAuth provider registration (POST /api/v1/settings/oauth-providers). */
@@ -558,6 +572,7 @@ export const api = {
     pipelineName?: string | null;
     fixExecutor?: "claude" | "cursor";
     healthcheck?: Healthcheck | null;
+    securityContext?: PodSecurityContext | null;
   }) =>
     apiFetch<MonitoredService>("/api/v1/services", {
       method: "POST",
@@ -581,6 +596,8 @@ export const api = {
     fixExecutor?: "claude" | "cursor";
     /** null clears the probe; an object replaces it whole. */
     healthcheck?: Healthcheck | null;
+    /** null clears every securityContext column; an object replaces it whole. */
+    securityContext?: PodSecurityContext | null;
   }) =>
     apiFetch<MonitoredService>(`/api/v1/services/${encodeURIComponent(id)}`, {
       method: "PATCH",

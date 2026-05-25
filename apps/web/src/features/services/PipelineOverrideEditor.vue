@@ -114,8 +114,31 @@ function loadFormFromYaml() {
     formError.value = `Can't open form — YAML invalid: ${(e as Error).message}`;
   }
 }
+// Some fields are optional in kaiad.yaml's schema but the form
+// auto-creates an empty array the first time they're rendered (because
+// `strArr` calls `ensure(..., [])` so v-for has something to iterate).
+// `entrypoint` is the obvious case — schema requires `min(1)` when
+// present, so an empty array would fail validation. Strip those before
+// stringify so a form session that never used entrypoint produces YAML
+// without it.
+function pruneFormDoc(d: AnyObj): void {
+  const services =
+    d && typeof d.services === "object" && d.services
+      ? Object.values(d.services as Record<string, AnyObj>)
+      : [d];
+  for (const p of services) {
+    if (!p || typeof p !== "object") continue;
+    const rt = p.runtime;
+    if (rt && typeof rt === "object") {
+      if (Array.isArray(rt.entrypoint) && rt.entrypoint.length === 0) {
+        delete rt.entrypoint;
+      }
+    }
+  }
+}
 function syncYamlFromForm() {
   try {
+    pruneFormDoc(doc.value);
     yamlText.value = yamlStringify(doc.value);
   } catch (e) {
     formError.value = (e as Error).message;
@@ -551,15 +574,34 @@ async function clearOverride() {
             <Button variant="secondary" size="sm" @click="arr(entry.p, 'runtime', 'volumes').push({ name: 'vol', nfs: { server: '', path: '/' }, mounts: [{ path: '/' }] }); syncYamlFromForm()">+ Volume</Button>
           </section>
 
-          <!-- Runtime image + command -->
+          <!-- Runtime image + entrypoint + command -->
           <section class="pl-section">
             <h4 class="pl-section__title">
-              Runtime <span class="pl-hint">command &amp; (build mode) base image</span>
+              Runtime <span class="pl-hint">entrypoint, command &amp; (build mode) base image</span>
             </h4>
             <div class="pl-row">
               <label class="pl-label">Image</label>
               <input class="sm-input pl-in" :value="ensure(entry.p,'runtime',{}).image" @input="ensure(entry.p,'runtime',{}).image = ($event.target as HTMLInputElement).value; syncYamlFromForm()" placeholder="nginx:alpine" />
             </div>
+
+            <!-- Entrypoint (optional). When set, it becomes the image's
+                 ENTRYPOINT and `command` below becomes the CMD (default
+                 args). When the list is empty (no rows), the field is
+                 absent from kaiad.yaml and `command` continues to set
+                 the ENTRYPOINT — existing files keep building the same. -->
+            <p class="pl-hint pl-runtime__note">
+              Entrypoint <span>optional · when set, becomes image ENTRYPOINT and Command below becomes CMD</span>
+            </p>
+            <div v-for="(e, i) in strArr(entry.p, 'runtime', 'entrypoint')" :key="'e'+i" class="pl-row">
+              <span class="pl-hint">entrypoint[{{ i }}]</span>
+              <input class="sm-input pl-in" :value="e" @input="setStr(strArr(entry.p,'runtime','entrypoint'), i, $event)" placeholder="/usr/bin/python3" />
+              <Button variant="ghost" size="sm" @click="strArr(entry.p,'runtime','entrypoint').splice(i,1); syncYamlFromForm()">✕</Button>
+            </div>
+            <Button variant="secondary" size="sm" @click="strArr(entry.p,'runtime','entrypoint').push(''); syncYamlFromForm()">+ Entrypoint arg</Button>
+
+            <p class="pl-hint pl-runtime__note">
+              Command <span>required when runtime is present · CMD when entrypoint is set, otherwise ENTRYPOINT</span>
+            </p>
             <div v-for="(c, i) in strArr(entry.p, 'runtime', 'command')" :key="'c'+i" class="pl-row">
               <span class="pl-hint">argv[{{ i }}]</span>
               <input class="sm-input pl-in" :value="c" @input="setStr(strArr(entry.p,'runtime','command'), i, $event)" placeholder="/start.sh" />

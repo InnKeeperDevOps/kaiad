@@ -77,6 +77,30 @@ const expandedId = ref<string | null>(null);
 const auth = useAuth();
 const isViewer = computed(() => auth.value.isViewer);
 
+// "Advanced" view — surfaces every field the Incident schema carries
+// instead of the curated summary view: full incident IDs and
+// fingerprints, exact ISO timestamps, auto-opened command outputs,
+// full commit SHAs, fix executor, full started/finished timestamps.
+// Persisted across visits in localStorage so power users don't
+// re-toggle every time they open the page.
+const ADV_KEY = "kaiad.incidents.advanced";
+const showAdvanced = ref<boolean>(
+  (() => {
+    try {
+      return localStorage.getItem(ADV_KEY) === "1";
+    } catch {
+      return false;
+    }
+  })()
+);
+watch(showAdvanced, (v) => {
+  try {
+    localStorage.setItem(ADV_KEY, v ? "1" : "0");
+  } catch {
+    /* private mode etc. — best-effort */
+  }
+});
+
 async function refreshIncidents() {
   try {
     const r = await api.listIncidents();
@@ -172,7 +196,36 @@ const btnStyle = {
 
 <template>
   <section>
-    <h2 :style="{ margin: '0 0 1rem' }">Incidents</h2>
+    <div
+      :style="{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '0.75rem',
+        margin: '0 0 1rem'
+      }"
+    >
+      <h2 :style="{ margin: 0 }">Incidents</h2>
+      <button
+        type="button"
+        :title="showAdvanced
+          ? 'Hide internal IDs, exact timestamps, raw outputs'
+          : 'Show full incident + fingerprint IDs, exact ISO timestamps, auto-opened command output, full commit SHAs'"
+        :style="{
+          marginLeft: 'auto',
+          background: showAdvanced ? 'var(--color-primary)' : 'transparent',
+          color: showAdvanced ? 'var(--color-primary-foreground)' : 'var(--color-text-secondary)',
+          border: '1px solid var(--color-border)',
+          borderRadius: '6px',
+          padding: '0.25rem 0.6rem',
+          fontSize: '0.78rem',
+          cursor: 'pointer',
+          fontFamily: 'inherit'
+        }"
+        @click="showAdvanced = !showAdvanced"
+      >
+        {{ showAdvanced ? 'Advanced ✓' : 'Advanced' }}
+      </button>
+    </div>
     <div v-if="error" :style="{ color: 'var(--color-danger)', marginBottom: '0.5rem' }">{{ error }}</div>
 
     <p v-if="incidents.length === 0" :style="{ color: 'var(--color-text-secondary)' }">
@@ -231,12 +284,16 @@ const btnStyle = {
                 fontFamily: 'monospace',
                 color: 'var(--color-text-secondary)'
               }"
+              :title="showAdvanced ? undefined : inc.fingerprint"
             >
-              {{ inc.fingerprint.slice(0, 12) }}…
+              {{ showAdvanced ? inc.fingerprint : inc.fingerprint.slice(0, 12) + '…' }}
             </td>
             <td :style="{ padding: '0.5rem', fontSize: '0.85rem' }">{{ inc.serviceId }}</td>
-            <td :style="{ padding: '0.5rem', fontSize: '0.85rem' }">
-              {{ new Date(inc.firstSeenAt).toLocaleString() }}
+            <td
+              :style="{ padding: '0.5rem', fontSize: '0.85rem' }"
+              :title="showAdvanced ? undefined : inc.firstSeenAt"
+            >
+              {{ showAdvanced ? inc.firstSeenAt : new Date(inc.firstSeenAt).toLocaleString() }}
             </td>
             <td :style="{ padding: '0.5rem', textAlign: 'center' }">{{ inc.eventCount }}</td>
             <td v-if="!isViewer" :style="{ padding: '0.5rem' }" @click.stop>
@@ -335,6 +392,49 @@ const btnStyle = {
                       @click="refreshIncidents"
                     >Refresh</button>
                   </div>
+
+                  <!-- Advanced-only metadata strip: raw IDs + ISO
+                       timestamps the curated view abbreviates or
+                       hides. Lets a power user copy the incident id
+                       straight into a curl, paste a fingerprint into
+                       SQL, or correlate timing with agent logs. -->
+                  <dl
+                    v-if="showAdvanced"
+                    :style="{
+                      marginTop: '0.45rem',
+                      marginBottom: '0.2rem',
+                      display: 'grid',
+                      gridTemplateColumns: 'max-content 1fr',
+                      columnGap: '0.6rem',
+                      rowGap: '0.15rem',
+                      fontSize: '0.74rem',
+                      color: 'var(--color-text-secondary)',
+                      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace'
+                    }"
+                  >
+                    <dt>incident.id</dt>
+                    <dd :style="{ margin: 0, wordBreak: 'break-all' }">{{ inc.id }}</dd>
+                    <dt>fingerprint</dt>
+                    <dd :style="{ margin: 0, wordBreak: 'break-all' }">{{ inc.fingerprint }}</dd>
+                    <dt>firstSeenAt</dt>
+                    <dd :style="{ margin: 0 }">{{ inc.firstSeenAt }}</dd>
+                    <dt>lastSeenAt</dt>
+                    <dd :style="{ margin: 0 }">{{ inc.lastSeenAt }}</dd>
+                    <template v-if="inc.lastFixStartedAt">
+                      <dt>fix.startedAt</dt>
+                      <dd :style="{ margin: 0 }">{{ inc.lastFixStartedAt }}</dd>
+                    </template>
+                    <template v-if="inc.lastFixFinishedAt">
+                      <dt>fix.finishedAt</dt>
+                      <dd :style="{ margin: 0 }">{{ inc.lastFixFinishedAt }}</dd>
+                    </template>
+                    <template v-if="inc.lastFixExecutor">
+                      <dt>fix.executor</dt>
+                      <dd :style="{ margin: 0 }">{{ inc.lastFixExecutor }}</dd>
+                    </template>
+                    <dt>eventCount</dt>
+                    <dd :style="{ margin: 0 }">{{ inc.eventCount }}</dd>
+                  </dl>
                   <ol
                     v-if="inc.lastFixEvents && inc.lastFixEvents.length"
                     :style="{
@@ -375,7 +475,11 @@ const btnStyle = {
                           v-if="ev.output === '(no output)'"
                           :style="{ fontSize: '0.72rem', color: 'var(--color-text-secondary)', fontStyle: 'italic' }"
                         >(no output)</span>
-                        <details v-else-if="ev.output" :style="{ marginTop: '0.1rem' }">
+                        <details
+                          v-else-if="ev.output"
+                          :open="showAdvanced"
+                          :style="{ marginTop: '0.1rem' }"
+                        >
                           <summary :style="{ cursor: 'pointer', fontSize: '0.72rem', color: 'var(--color-text-secondary)' }">output ({{ ev.output.length }} chars)</summary>
                           <pre
                             :style="{
@@ -401,9 +505,15 @@ const btnStyle = {
                   >No autonomous fix attempts yet for this incident.</p>
                   <p v-if="inc.lastFixCommitSha" :style="{ marginTop: '0.35rem', fontSize: '0.82rem' }">
                     <strong>Commit:</strong>
-                    <code :style="{ marginLeft: '0.4rem' }">{{ inc.lastFixCommitSha.slice(0, 12) }}</code>
+                    <code :style="{ marginLeft: '0.4rem' }">{{
+                      showAdvanced ? inc.lastFixCommitSha : inc.lastFixCommitSha.slice(0, 12)
+                    }}</code>
                   </p>
-                  <details v-if="inc.lastFixOutput" :style="{ marginTop: '0.35rem' }">
+                  <details
+                    v-if="inc.lastFixOutput"
+                    :open="showAdvanced"
+                    :style="{ marginTop: '0.35rem' }"
+                  >
                     <summary :style="{ cursor: 'pointer', fontSize: '0.8rem', color: 'var(--color-text-secondary)' }">CLI output (latest)</summary>
                     <pre
                       :style="{

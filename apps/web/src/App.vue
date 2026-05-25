@@ -52,19 +52,58 @@ type Route =
   | "tenantConfig"
   | "login";
 
-const NAV_ITEMS: { route: Route; label: string; icon: Component; adminOnly?: boolean }[] = [
-  { route: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { route: "agents", label: "Agents", icon: Cpu },
-  { route: "operator", label: "Operator", icon: Workflow, adminOnly: true },
-  { route: "services", label: "Services", icon: Box },
-  { route: "incidents", label: "Incidents", icon: AlertTriangle },
-  { route: "sshKeys", label: "SSH Keys", icon: Key },
-  { route: "loadBalancers", label: "Load Balancers", icon: Network },
-  { route: "registry", label: "Registry", icon: Database, adminOnly: true },
-  { route: "tenants", label: "Tenants", icon: Building2, adminOnly: true },
-  { route: "users", label: "Users & Groups", icon: Users, adminOnly: true },
-  { route: "settings", label: "Settings", icon: Settings, adminOnly: true }
+type NavItem = { route: Route; label: string; icon: Component; adminOnly?: boolean };
+type NavGroup = { label: string; items: NavItem[] };
+
+const NAV_GROUPS: NavGroup[] = [
+  {
+    label: "Operate",
+    items: [
+      { route: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+      { route: "agents", label: "Agents", icon: Cpu },
+      { route: "services", label: "Services", icon: Box },
+      { route: "incidents", label: "Incidents", icon: AlertTriangle },
+      { route: "operator", label: "Operator", icon: Workflow, adminOnly: true }
+    ]
+  },
+  {
+    label: "Deployment",
+    items: [
+      { route: "sshKeys", label: "SSH Keys", icon: Key },
+      { route: "loadBalancers", label: "Load Balancers", icon: Network },
+      { route: "registry", label: "Registry", icon: Database, adminOnly: true }
+    ]
+  },
+  {
+    label: "Admin",
+    items: [
+      { route: "tenants", label: "Tenants", icon: Building2, adminOnly: true },
+      { route: "users", label: "Users & Groups", icon: Users, adminOnly: true },
+      { route: "settings", label: "Settings", icon: Settings, adminOnly: true }
+    ]
+  }
 ];
+
+// Human-readable page title shown in the top bar — derived from the
+// active route so it stays in sync with the sidebar selection and
+// browser history without each page having to render its own H1.
+const PAGE_TITLE: Record<Route, string> = {
+  dashboard: "Dashboard",
+  incidents: "Incidents",
+  agents: "Agents",
+  agentDetail: "Agent",
+  operator: "Operator",
+  services: "Services",
+  serviceDetail: "Service",
+  sshKeys: "SSH Keys",
+  registry: "Registry",
+  loadBalancers: "Load Balancers",
+  settings: "Settings",
+  tenants: "Tenants",
+  users: "Users & Groups",
+  tenantConfig: "Tenant configuration",
+  login: "Sign in"
+};
 
 function readNavFromHash(): {
   route: Route;
@@ -147,7 +186,21 @@ provideAuth(user);
 
 const authState = computed(() => buildAuthState(user.value));
 
-const visibleNav = computed(() => NAV_ITEMS.filter((item) => !(item.adminOnly && authState.value.isViewer)));
+// Filter each group's items by the current user's role; drop empty
+// groups so the sidebar doesn't render a header with no rows under it.
+const visibleNavGroups = computed<NavGroup[]>(() =>
+  NAV_GROUPS
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((it) => !(it.adminOnly && authState.value.isViewer))
+    }))
+    .filter((g) => g.items.length > 0)
+);
+const currentPageTitle = computed<string>(() => PAGE_TITLE[route.value] ?? "");
+const userInitial = computed(() => {
+  const e = user.value?.email ?? "";
+  return e ? e.slice(0, 1).toUpperCase() : "?";
+});
 
 async function loadSetupStatus() {
   try {
@@ -220,13 +273,55 @@ onUnmounted(() => {
 
 const docsUrl = (import.meta.env.VITE_DOCS_URL as string | undefined) ?? "";
 
+// ─── Layout style constants ─────────────────────────────────────────
+// All consolidated here so the top-bar + sidebar share a vocabulary
+// and Vue templates below stay readable.
+const TOPBAR_HEIGHT = "56px";
+const SIDEBAR_WIDTH = "232px";
+
 const navStyle: CSSProperties = {
   background: "var(--color-nav-bg)",
-  padding: "1rem 0",
   display: "flex",
   flexDirection: "column",
-  gap: "0.15rem"
+  gap: "0.1rem",
+  borderRight: "1px solid var(--color-border)",
+  height: "100vh",
+  position: "sticky",
+  top: 0,
+  overflowY: "auto"
 };
+const topBarStyle: CSSProperties = {
+  height: TOPBAR_HEIGHT,
+  display: "flex",
+  alignItems: "center",
+  gap: "1rem",
+  padding: "0 1rem",
+  borderBottom: "1px solid var(--color-border)",
+  background: "var(--color-surface)",
+  position: "sticky",
+  top: 0,
+  zIndex: 5
+};
+const groupLabelStyle: CSSProperties = {
+  padding: "0.65rem 1rem 0.25rem",
+  fontSize: "0.7rem",
+  fontWeight: 600,
+  textTransform: "uppercase",
+  letterSpacing: "0.08em",
+  color: "var(--color-nav-muted)"
+};
+const navItemStyle = (active: boolean): CSSProperties => ({
+  display: "flex",
+  alignItems: "center",
+  gap: "0.55rem",
+  padding: "0.5rem 1rem",
+  color: active ? "var(--color-nav-active)" : "var(--color-nav-text)",
+  textDecoration: "none",
+  fontSize: "0.88rem",
+  background: active ? "var(--color-nav-surface)" : "transparent",
+  borderLeft: active ? "3px solid var(--color-nav-active)" : "3px solid transparent",
+  transition: "background 0.15s"
+});
 </script>
 
 <template>
@@ -241,58 +336,51 @@ const navStyle: CSSProperties = {
 
   <LoginPage v-else-if="route === 'login'" />
 
-  <div v-else :style="{ display: 'grid', gridTemplateColumns: '220px 1fr', minHeight: '100vh' }">
+  <div
+    v-else
+    :style="{
+      display: 'grid',
+      gridTemplateColumns: `${SIDEBAR_WIDTH} 1fr`,
+      minHeight: '100vh',
+      background: 'var(--color-bg)'
+    }"
+  >
+    <!-- Sidebar: brand at top, grouped nav, doc link at bottom. The
+         tenant switcher + user menu moved up to the top bar so this
+         column stays purely navigational. -->
     <nav :style="navStyle">
-      <div
-        :style="{
-          padding: '0 1rem 1rem',
-          color: 'var(--color-nav-text)',
-          fontWeight: 700,
-          fontSize: '1.1rem'
-        }"
-      >
-        Kaiad
-      </div>
       <a
-        v-for="item in visibleNav"
-        :key="item.route"
-        :href="`#${item.route}`"
+        href="#dashboard"
         :style="{
           display: 'flex',
           alignItems: 'center',
-          gap: '0.5rem',
-          padding: '0.55rem 1rem',
-          color: isActive(item.route) ? 'var(--color-nav-active)' : 'var(--color-nav-text)',
+          gap: '0.55rem',
+          padding: '1rem',
+          color: 'var(--color-nav-text)',
           textDecoration: 'none',
-          fontSize: '0.9rem',
-          background: isActive(item.route) ? 'var(--color-nav-surface)' : 'transparent',
-          borderLeft: isActive(item.route) ? '3px solid var(--color-nav-active)' : '3px solid transparent',
-          transition: 'background 0.15s'
+          fontWeight: 700,
+          fontSize: '1.05rem',
+          borderBottom: '1px solid var(--color-border)'
         }"
       >
-        <component :is="item.icon" :size="16" />
-        {{ item.label }}
+        <LayoutDashboard :size="18" />
+        Kaiad
       </a>
+      <template v-for="(group, gi) in visibleNavGroups" :key="group.label">
+        <div :style="{ ...groupLabelStyle, marginTop: gi === 0 ? '0.4rem' : '0.6rem' }">
+          {{ group.label }}
+        </div>
+        <a
+          v-for="item in group.items"
+          :key="item.route"
+          :href="`#${item.route}`"
+          :style="navItemStyle(isActive(item.route))"
+        >
+          <component :is="item.icon" :size="15" />
+          {{ item.label }}
+        </a>
+      </template>
       <div :style="{ flex: 1 }" />
-      <TenantSwitcher :user="user" :me-resolved="meResolved" @user-updated="handleTenantSwitch" />
-      <button
-        :style="{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.5rem',
-          padding: '0.55rem 1rem',
-          color: 'var(--color-nav-muted)',
-          background: 'transparent',
-          border: 'none',
-          fontSize: '0.9rem',
-          cursor: 'pointer',
-          textAlign: 'left',
-          borderLeft: '3px solid transparent'
-        }"
-        @click="logout"
-      >
-        <LogOut :size="16" /> Logout
-      </button>
       <a
         v-if="docsUrl"
         :href="docsUrl"
@@ -302,18 +390,94 @@ const navStyle: CSSProperties = {
           display: 'flex',
           alignItems: 'center',
           gap: '0.5rem',
-          padding: '0.55rem 1rem',
+          padding: '0.6rem 1rem',
           color: 'var(--color-nav-muted)',
           textDecoration: 'none',
-          fontSize: '0.8rem',
-          borderLeft: '3px solid transparent'
+          fontSize: '0.78rem',
+          borderTop: '1px solid var(--color-border)'
         }"
       >
         Documentation ↗
       </a>
     </nav>
 
-    <main :style="{ padding: '1.5rem', overflow: 'auto' }">
+    <div :style="{ minWidth: 0 }">
+      <!-- Top bar: page title, tenant context, user identity + sign out -->
+      <header :style="topBarStyle">
+        <h1
+          :style="{
+            margin: 0,
+            fontSize: '1rem',
+            fontWeight: 600,
+            color: 'var(--color-text-primary)'
+          }"
+        >
+          {{ currentPageTitle }}
+        </h1>
+        <div :style="{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.6rem' }">
+          <TenantSwitcher :user="user" :me-resolved="meResolved" @user-updated="handleTenantSwitch" />
+          <div
+            :title="user?.email ?? ''"
+            :style="{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.45rem',
+              padding: '0.25rem 0.45rem 0.25rem 0.3rem',
+              border: '1px solid var(--color-border)',
+              borderRadius: '999px',
+              fontSize: '0.82rem',
+              color: 'var(--color-text-primary)',
+              background: 'var(--color-surface)'
+            }"
+          >
+            <span
+              :style="{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: '1.4rem',
+                height: '1.4rem',
+                borderRadius: '50%',
+                background: 'var(--color-primary)',
+                color: 'var(--color-primary-foreground)',
+                fontSize: '0.72rem',
+                fontWeight: 600
+              }"
+            >{{ userInitial }}</span>
+            <span
+              :style="{
+                maxWidth: '14rem',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap'
+              }"
+            >{{ user?.email ?? 'signed in' }}</span>
+          </div>
+          <button
+            type="button"
+            title="Sign out"
+            :style="{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.35rem',
+              padding: '0.3rem 0.6rem',
+              background: 'transparent',
+              color: 'var(--color-text-secondary)',
+              border: '1px solid var(--color-border)',
+              borderRadius: '6px',
+              fontSize: '0.82rem',
+              cursor: 'pointer',
+              fontFamily: 'inherit'
+            }"
+            @click="logout"
+          >
+            <LogOut :size="14" />
+            <span :style="{ display: 'none' }">Sign out</span>
+          </button>
+        </div>
+      </header>
+
+      <main :style="{ padding: '1.5rem', overflow: 'auto' }">
       <DashboardPage v-if="route === 'dashboard'" />
       <IncidentsPage v-else-if="route === 'incidents'" />
       <AgentsPage v-else-if="route === 'agents'" />
@@ -338,6 +502,7 @@ const navStyle: CSSProperties = {
         :tenant-id-from-route="tenantConfigTenantId"
         @auth-user-updated="(u: AuthUser) => (user = u)"
       />
-    </main>
+      </main>
+    </div>
   </div>
 </template>

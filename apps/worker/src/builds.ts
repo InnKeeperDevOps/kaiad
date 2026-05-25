@@ -939,14 +939,18 @@ async function buildRuntimeImage(params: {
   const { query, buildId, rootDir, artifactsDir, pipeline, serviceName, sha } = params;
   const runtime = pipeline.runtime!;
 
-  // crane mutate uses `,` as a separator inside --entrypoint. Reject
-  // entrypoint args that contain a comma so we don't silently corrupt
-  // the runtime command.
-  for (const arg of runtime.command) {
+  // crane mutate uses `,` as a separator inside --entrypoint and --cmd.
+  // Reject args that contain a comma so we don't silently corrupt the
+  // runtime command. Covers both kaiad.yaml's `command` AND the optional
+  // `entrypoint` (when present, it becomes the image's ENTRYPOINT and
+  // `command` becomes the CMD).
+  const entrypointArgs = runtime.entrypoint ?? runtime.command;
+  const cmdArgs = runtime.entrypoint ? runtime.command : null;
+  for (const arg of [...entrypointArgs, ...(cmdArgs ?? [])]) {
     if (arg.includes(",")) {
       return {
         ok: false,
-        reason: `runtime.command arg "${arg}" contains a comma, which crane mutate cannot disambiguate`
+        reason: `runtime.entrypoint/command arg "${arg}" contains a comma, which crane mutate cannot disambiguate`
       };
     }
   }
@@ -1138,14 +1142,21 @@ async function buildRuntimeImage(params: {
 
   // 3) crane mutate — pull the just-pushed image, set entrypoint +
   //    exposed ports, push back to the same tag.
+  // When `entrypoint` is set, it becomes the image's ENTRYPOINT and
+  // `command` becomes the CMD (default args). When absent, `command`
+  // stays the ENTRYPOINT — the original single-field behaviour, so
+  // existing kaiad.yaml files keep building identically.
   const mutateArgs: string[] = [
     ...(REGISTRY_INSECURE ? ["--insecure"] : []),
     "mutate",
     internalRef,
     "--tag",
     internalRef,
-    `--entrypoint=${runtime.command.join(",")}`
+    `--entrypoint=${entrypointArgs.join(",")}`
   ];
+  if (cmdArgs && cmdArgs.length > 0) {
+    mutateArgs.push(`--cmd=${cmdArgs.join(",")}`);
+  }
   for (const p of pipeline.ports) {
     mutateArgs.push(`--exposed-ports=${p.port}/${p.protocol.toLowerCase()}`);
   }

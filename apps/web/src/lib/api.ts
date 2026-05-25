@@ -518,6 +518,25 @@ export const api = {
     apiFetch<{ groups: ErrorGroup[] }>(`/api/v1/agents/${encodeURIComponent(agentId)}/error-groups`),
   listErrorGroupsForService: (serviceId: string) =>
     apiFetch<{ groups: ErrorGroup[] }>(`/api/v1/services/${encodeURIComponent(serviceId)}/error-groups`),
+  /**
+   * Preview a remote repo's kaiad.yaml before creating any services
+   * for it. Drives the Add-Service wizard's "what's actually in this
+   * repo?" step: tells the UI whether the file is single- or
+   * multi-pipeline and lists the pipeline names so the user can decide
+   * whether to fan out the create.
+   */
+  previewPipeline: (data: { gitRepoUrl: string; branch?: string; sshKeyId?: string | null }) =>
+    apiFetch<{
+      pipelineYaml: string;
+      parse:
+        | { ok: true; kind: "single"; pipelineNames: string[] }
+        | { ok: true; kind: "multi"; pipelineNames: string[] }
+        | { ok: false; reason: string };
+    }>("/api/v1/services/preview-pipeline", {
+      method: "POST",
+      body: JSON.stringify(data)
+    }),
+
   createService: (data: {
     name: string;
     gitRepoUrl: string;

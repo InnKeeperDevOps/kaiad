@@ -3248,6 +3248,170 @@ export function buildServer(opts: BuildServerOptions = {}) {
     return { services: svcs };
   });
 
+  // Lightweight execFile wrapper for the few server-side `git` invocations
+  // here: bounded by timeoutMs, optional stdout size cap. Never rejects —
+  // resolves to { code, stdout, stderr } so the caller decides how a
+  // non-zero exit translates to a response.
+  async function runShortCommand(
+    cmd: string,
+    args: string[],
+    opts: {
+      env?: NodeJS.ProcessEnv;
+      timeoutMs: number;
+      maxStdoutBytes?: number;
+    }
+  ): Promise<{ code: number; stdout: string; stderr: string }> {
+    const run = promisify(execFile);
+    try {
+      const { stdout, stderr } = await run(cmd, args, {
+        env: opts.env ?? process.env,
+        timeout: opts.timeoutMs,
+        maxBuffer: opts.maxStdoutBytes ?? 4 * 1024 * 1024,
+        encoding: "utf8"
+      });
+      return { code: 0, stdout, stderr };
+    } catch (err) {
+      // execFile rejects with { code, stdout, stderr, signal } on
+      // non-zero exit or timeout. Pull what's there back out so the
+      // caller can render the real error to the panel.
+      const e = err as { code?: number; signal?: string; stdout?: string; stderr?: string; message?: string };
+      return {
+        code: typeof e.code === "number" ? e.code : -1,
+        stdout: typeof e.stdout === "string" ? e.stdout : "",
+        stderr: typeof e.stderr === "string" && e.stderr.length > 0 ? e.stderr : e.message ?? "spawn failed"
+      };
+    }
+  }
+
+  // Preview the kaiad.yaml at a remote ref BEFORE creating a service.
+  // Powers the Add-Service wizard's "what's actually in this repo?"
+  // step: returns whether the file is single- or multi-service and the
+  // list of pipeline names, so the UI can offer "create one service
+  // per pipeline, prefixed by the name you typed".
+  //
+  // Shallow-clones into a tmpdir, reads kaiad.yaml, parsePipelineYaml's
+  // it, deletes the tmpdir. Same SSH-key flow as kaiadFix — uploaded
+  // keys go to a 0600 tmpfile and GIT_SSH_COMMAND points at it.
+  app.post("/api/v1/services/preview-pipeline", async (req, reply) => {
+    const session = await resolveSession(authStore, req.headers.authorization);
+    if (!session) {
+      return reply
+        .status(401)
+        .send(
+          apiErrorSchema.parse({
+            code: "UNAUTHORIZED",
+            message: "Missing or invalid bearer token",
+            correlationId: (req as any).correlationId
+          })
+        );
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const gitRepoUrl = typeof body.gitRepoUrl === "string" ? body.gitRepoUrl.trim() : "";
+    const branch = (typeof body.branch === "string" && body.branch.trim()) || "main";
+    const sshKeyId =
+      typeof body.sshKeyId === "string" && body.sshKeyId.trim() !== "" ? body.sshKeyId : null;
+    if (!gitRepoUrl) {
+      return reply.status(400).send(
+        apiErrorSchema.parse({
+          code: "BAD_REQUEST",
+          message: "gitRepoUrl is required",
+          correlationId: (req as any).correlationId
+        })
+      );
+    }
+
+    // Resolve SSH key material (uploaded → bytes; local_path → path).
+    // Same surface autoFix uses; null when the URL doesn't need a key.
+    let keyMaterial:
+      | { type: "uploaded"; privateKey: string | null; localPath: string | null }
+      | { type: "local_path"; privateKey: string | null; localPath: string | null }
+      | null = null;
+    if (sshKeyId) {
+      const m = await domainStore.getSshKeyMaterial(session.tenantId, sshKeyId);
+      if (!m) {
+        return reply.status(404).send(
+          apiErrorSchema.parse({
+            code: "NOT_FOUND",
+            message: "ssh key not found in this tenant",
+            correlationId: (req as any).correlationId
+          })
+        );
+      }
+      keyMaterial = m;
+    }
+
+    const tmp = path.join(os.tmpdir(), `kaiad-preview-${crypto.randomUUID()}`);
+    let keyFile: string | null = null;
+    try {
+      await fs.promises.mkdir(tmp, { recursive: true });
+
+      const env = { ...process.env } as NodeJS.ProcessEnv;
+      if (keyMaterial?.type === "uploaded" && keyMaterial.privateKey) {
+        keyFile = path.join(tmp, ".sshkey");
+        let body = keyMaterial.privateKey;
+        if (!body.endsWith("\n")) body += "\n";
+        await fs.promises.writeFile(keyFile, body, { mode: 0o600 });
+        env.GIT_SSH_COMMAND = `ssh -i ${keyFile} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes`;
+      } else if (keyMaterial?.type === "local_path" && keyMaterial.localPath) {
+        env.GIT_SSH_COMMAND = `ssh -i ${keyMaterial.localPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes`;
+      }
+
+      // --depth 1 --single-branch keeps this fast even on a multi-GB
+      // history; --no-checkout skips the working-tree materialisation
+      // (we read the file out of the object DB via `git show`).
+      const cloneTarget = path.join(tmp, "repo");
+      const clone = await runShortCommand(
+        "git",
+        ["clone", "--depth", "1", "--branch", branch, "--single-branch", "--no-checkout", gitRepoUrl, cloneTarget],
+        { env, timeoutMs: 30_000 }
+      );
+      if (clone.code !== 0) {
+        return reply.status(400).send(
+          apiErrorSchema.parse({
+            code: "CLONE_FAILED",
+            message: `git clone failed (exit ${clone.code}): ${clone.stderr.slice(0, 500)}`,
+            correlationId: (req as any).correlationId
+          })
+        );
+      }
+
+      // Pull kaiad.yaml's blob out of the object DB. A 256 KB cap on
+      // the read keeps a hostile repo from filling memory.
+      const show = await runShortCommand(
+        "git",
+        ["-C", cloneTarget, "show", `${branch}:kaiad.yaml`],
+        { env, timeoutMs: 10_000, maxStdoutBytes: 256 * 1024 }
+      );
+      if (show.code !== 0) {
+        return reply.status(404).send(
+          apiErrorSchema.parse({
+            code: "PIPELINE_NOT_FOUND",
+            message: `kaiad.yaml not found on ${branch}: ${show.stderr.slice(0, 400)}`,
+            correlationId: (req as any).correlationId
+          })
+        );
+      }
+      const pipelineYaml = show.stdout;
+      const parsed = parsePipelineYaml(pipelineYaml);
+      const parse =
+        parsed.ok && parsed.kind === "multi"
+          ? { ok: true as const, kind: "multi" as const, pipelineNames: Object.keys(parsed.pipelines).sort() }
+          : parsed.ok
+            ? { ok: true as const, kind: "single" as const, pipelineNames: [] as string[] }
+            : { ok: false as const, reason: parsed.reason };
+
+      return reply.send({ pipelineYaml, parse });
+    } finally {
+      // Best-effort cleanup. The tmpfile in `tmp` includes the SSH key
+      // when one was written; rm -rf drops both.
+      try {
+        await fs.promises.rm(tmp, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+
   app.post("/api/v1/services", async (req, reply) => {
     const session = await resolveSession(authStore, req.headers.authorization);
     if (!session) {

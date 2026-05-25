@@ -167,7 +167,24 @@ export const pipelineRuntimeSchema = z.object({
    * is more practical than enumerating each in `copy:`.
    */
   layers: z.array(safeRelativePath).default([]),
-  /** Container entrypoint as an exec-form argv array. */
+  /**
+   * Container ENTRYPOINT (exec-form argv array). When set, the
+   * runtime image's ENTRYPOINT is replaced with this and `command`
+   * becomes the CMD (argv passed to the entrypoint). Use this when
+   * you want to override only the binary while preserving the
+   * declared args — or pair it with `command` to express the
+   * classic Docker ENTRYPOINT + CMD shape, e.g.
+   *   entrypoint: ["/usr/bin/python3"]
+   *   command:    ["app.py", "--port", "8080"]
+   * Optional; when absent, `command` continues to set the ENTRYPOINT
+   * (existing behaviour, backwards-compatible).
+   */
+  entrypoint: z.array(z.string().min(1)).min(1).optional(),
+  /**
+   * When `entrypoint` is set, this is the container CMD (default args
+   * passed to the entrypoint). When `entrypoint` is absent, this is
+   * the container ENTRYPOINT.
+   */
   command: z.array(z.string().min(1)).min(1),
   /**
    * Plain environment variables injected into the deployed container

@@ -40,12 +40,16 @@ async function load() {
 }
 onMounted(load);
 
-function onWizardCreated(svc: MonitoredService) {
-  services.value = [...services.value, svc];
+function onWizardCreated(svcs: MonitoredService[]) {
+  if (svcs.length === 0) return;
+  services.value = [...services.value, ...svcs];
   showWizard.value = false;
-  // Send the user to the new service's detail page — that's where the
-  // post-create steps (bind agents, edit the pipeline) live now.
-  window.location.hash = `service/${encodeURIComponent(svc.id)}`;
+  // One service → land on its detail page (where post-create config
+  // lives). Multiple → stay on the list so the user can see the whole
+  // set at a glance; the new rows are already appended above.
+  if (svcs.length === 1) {
+    window.location.hash = `service/${encodeURIComponent(svcs[0].id)}`;
+  }
 }
 
 function agentCount(svc: MonitoredService): number {

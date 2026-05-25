@@ -66,6 +66,13 @@ type redeployInput struct {
 	imageRef     string
 	instances    int
 	domains      []domainSpec
+	// ports is kaiad.yaml's `ports:[]` resolved by the platform. When
+	// non-empty, this is the source of truth for the container's
+	// `ports:` AND the rendered k8s Service ports. Without this an
+	// agent that only saw `domains:` would fall back to port 80 for
+	// any service without HTTP domains (postgres / redis / …), so the
+	// rendered Service refused traffic on the actual data port.
+	ports []portSpec
 	loadBalancer loadBalancerSpec
 	// env is the resolved plain env-var map (runtime.env merged with the
 	// per-environment override) injected into the deployed container.
@@ -88,6 +95,16 @@ type redeployInput struct {
 	// individual fields are not emitted (Pod inherits whatever the
 	// image's USER directive — or k8s default = root — gives).
 	securityContext podSecurityContextSpec
+}
+
+// portSpec mirrors kaiad.yaml's `ports:[]` entries the platform
+// resolves and ships in the redeploy_service command. `name` is
+// optional (the agent generates a `port-<N>` name when empty so the
+// Service's ports[].name is always present).
+type portSpec struct {
+	port     int
+	name     string
+	protocol string // "TCP" | "UDP"; default TCP
 }
 
 type domainSpec struct {
@@ -317,6 +334,27 @@ func parseRedeployPayload(payload map[string]interface{}) (redeployInput, error)
 		if hc.path != "" && hc.port > 0 {
 			hc.set = true
 			in.healthcheck = hc
+		}
+	}
+	if raw, ok := payload["ports"].([]interface{}); ok {
+		for _, item := range raw {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			p := portSpec{protocol: "TCP"}
+			if n, ok := m["port"].(float64); ok {
+				p.port = int(n)
+			}
+			if s, ok := m["name"].(string); ok {
+				p.name = s
+			}
+			if s, ok := m["protocol"].(string); ok && s != "" {
+				p.protocol = s
+			}
+			if p.port > 0 {
+				in.ports = append(in.ports, p)
+			}
 		}
 	}
 	if raw, ok := payload["domains"].([]interface{}); ok {
@@ -1480,18 +1518,49 @@ func renderK8sManifests(in redeployInput, namespace string) string {
 		LabelServiceID, in.serviceID, in.buildID, in.environment, name,
 	)
 
-	// Deduplicate ports — multiple domains may share a port.
-	portSet := map[int]bool{}
-	var ports []int
-	for _, d := range in.domains {
-		if !portSet[d.port] {
-			portSet[d.port] = true
-			ports = append(ports, d.port)
-		}
+	// Source-of-truth for the Service AND the container's ports[] is
+	// kaiad.yaml's `ports:[]`. When present that's what we render —
+	// honoring the declared port/name/protocol per entry. When the
+	// payload didn't carry `ports:[]` (older platform), fall back to
+	// the set of ports referenced by `domains:[]` (every entry gets
+	// TCP), so existing HTTP services keep working unchanged. Last
+	// resort — neither set — port 80 / TCP, matching the original
+	// fallback so a single, port-less service still gets *some* Service
+	// rather than a YAML validation error.
+	type renderedPort struct {
+		port     int
+		name     string
+		protocol string
 	}
-	sort.Ints(ports)
+	var ports []renderedPort
+	seen := map[int]bool{}
+	for _, p := range in.ports {
+		if seen[p.port] {
+			continue
+		}
+		seen[p.port] = true
+		proto := p.protocol
+		if proto == "" {
+			proto = "TCP"
+		}
+		name := p.name
+		if name == "" {
+			name = fmt.Sprintf("port-%d", p.port)
+		}
+		ports = append(ports, renderedPort{port: p.port, name: name, protocol: proto})
+	}
 	if len(ports) == 0 {
-		ports = []int{80}
+		for _, d := range in.domains {
+			if seen[d.port] {
+				continue
+			}
+			seen[d.port] = true
+			ports = append(ports, renderedPort{port: d.port, name: fmt.Sprintf("port-%d", d.port), protocol: "TCP"})
+		}
+		sort.Slice(ports, func(i, j int) bool { return ports[i].port < ports[j].port })
+	}
+	if len(ports) == 0 {
+		ports = []renderedPort{{port: 80, name: "port-80", protocol: "TCP"}}
 	}
 
 	var b strings.Builder
@@ -1559,7 +1628,7 @@ func renderK8sManifests(in redeployInput, namespace string) string {
 	if len(ports) > 0 {
 		b.WriteString("          ports:\n")
 		for _, p := range ports {
-			fmt.Fprintf(&b, "            - containerPort: %d\n", p)
+			fmt.Fprintf(&b, "            - containerPort: %d\n              protocol: %s\n", p.port, p.protocol)
 		}
 	}
 	if len(in.volumes) > 0 {
@@ -1687,7 +1756,7 @@ func renderK8sManifests(in redeployInput, namespace string) string {
 		svcType, LabelServiceID, in.serviceID, in.environment)
 	b.WriteString("  ports:\n")
 	for _, p := range ports {
-		fmt.Fprintf(&b, "    - name: port-%d\n      port: %d\n      targetPort: %d\n      protocol: TCP\n", p, p, p)
+		fmt.Fprintf(&b, "    - name: %s\n      port: %d\n      targetPort: %d\n      protocol: %s\n", p.name, p.port, p.port, p.protocol)
 	}
 	b.WriteString("---\n")
 

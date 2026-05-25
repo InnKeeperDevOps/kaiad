@@ -540,6 +540,24 @@ const redeployServiceCommandSchema = z.object({
     )
     .default([]),
   /**
+   * Resolved container ports from kaiad.yaml's `ports:[]`. The agent
+   * renders these on the container AND the k8s Service so a service
+   * that listens on a non-HTTP port (postgres 5432, redis 6379, …)
+   * gets a Service with the right port and not the renderer's
+   * fallback of 80. Declared here or platformToAgentMessageSchema
+   * strips it from the wire. Empty array → agent falls back to
+   * domain ports (older deploys); empty BOTH → port 80 (oldest).
+   */
+  ports: z
+    .array(
+      z.object({
+        port: z.number().int().min(1).max(65535),
+        name: z.string().min(1).optional(),
+        protocol: z.enum(["TCP", "UDP"]).default("TCP")
+      })
+    )
+    .default([]),
+  /**
    * Resolved HTTP healthcheck (kaiad.yaml or the per-service override).
    * When present the agent renders a readinessProbe on the container so
    * a new replica gets no traffic until /<path>:<port> returns 2xx — and

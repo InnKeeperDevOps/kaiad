@@ -529,6 +529,15 @@ export function resolveEnvironment(
    * when non-empty, else the top-level `runtime.secretEnv`.
    */
   secretEnv: PipelineSecretEnv[];
+  /**
+   * Resolved container ports. Ports aren't per-environment in the
+   * schema (one binding-arity per image), so this is always the
+   * top-level `ports:[]`. The agent renders these onto both the
+   * container's `ports[]` and the k8s Service so a postgres-style
+   * service listening on 5432 actually gets a Service with port
+   * 5432, not the renderer's fallback of 80.
+   */
+  ports: PipelinePort[];
 } {
   const env = def.environments[envName];
   return {
@@ -538,7 +547,8 @@ export function resolveEnvironment(
     namespace: env?.namespace ?? def.namespace ?? "",
     env: { ...(def.runtime?.env ?? {}), ...(env?.env ?? {}) },
     volumes: env?.volumes?.length ? env.volumes : (def.runtime?.volumes ?? []),
-    secretEnv: env?.secretEnv?.length ? env.secretEnv : (def.runtime?.secretEnv ?? [])
+    secretEnv: env?.secretEnv?.length ? env.secretEnv : (def.runtime?.secretEnv ?? []),
+    ports: def.ports
   };
 }
 

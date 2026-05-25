@@ -1667,6 +1667,7 @@ async function dispatchRedeployToBoundAgents(
         env: resolved.env,
         volumes: resolved.volumes,
         secretEnv: resolved.secretEnv,
+        ports: resolved.ports,
         healthcheck,
         securityContext
       }

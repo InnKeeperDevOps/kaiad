@@ -4151,6 +4151,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
           env: resolved.env,
           volumes: resolved.volumes,
           secretEnv: resolved.secretEnv,
+          ports: resolved.ports,
           healthcheck,
           securityContext
         }
@@ -4236,7 +4237,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
     for (const t of targets) {
       const resolved = pickedPipeline
         ? resolveEnvironment(pickedPipeline, t.environment)
-        : { instances: 1, domains: [], loadBalancer: { type: "none" }, namespace: "", env: {}, volumes: [], secretEnv: [] };
+        : { instances: 1, domains: [], loadBalancer: { type: "none" }, namespace: "", env: {}, volumes: [], secretEnv: [], ports: [] };
       const commandId = crypto.randomUUID();
       const command = {
         type: "redeploy_service",
@@ -4253,6 +4254,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
         env: resolved.env,
         volumes: resolved.volumes,
         secretEnv: resolved.secretEnv,
+        ports: resolved.ports,
         healthcheck: svc.healthcheck ?? null,
         securityContext: svc.securityContext ?? null
       };
@@ -4507,6 +4509,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
           env: newR.env,
           volumes: newR.volumes,
           secretEnv: newR.secretEnv,
+          ports: newR.ports,
           healthcheck,
           securityContext
         }
@@ -4819,6 +4822,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
           env: desired.env,
           volumes: desired.volumes,
           secretEnv: desired.secretEnv,
+          ports: desired.ports,
           healthcheck,
           securityContext
         }

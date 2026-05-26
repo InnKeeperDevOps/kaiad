@@ -240,7 +240,12 @@ export function buildFixPrompt(
     "3. Do NOT run git commands. Do NOT commit or push. Kaiad commits and pushes after you exit.",
     "4. Do not produce conversational prose; just edit files. If you write to stdout, keep it terse.",
     "5. Do NOT ask questions or request human input — this is automated.",
-    "6. If after analysis you genuinely cannot determine a safe fix, exit WITHOUT modifying any files."
+    "6. If after analysis you genuinely cannot determine a safe fix, exit WITHOUT modifying any files.",
+    "",
+    "If your fix touches the service's deploy config (`kaiad.yaml` at repo root), consult the canonical schema before editing — invented or misspelled fields will fail the next build:",
+    "  - kaiad.yaml reference: https://kaiad.dev/reference/pipeline.html",
+    "  - Variable interpolation: https://kaiad.dev/reference/pipeline-variables.html",
+    "  - Site index: https://kaiad.dev/"
   ].join("\n");
 }
 

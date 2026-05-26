@@ -701,5 +701,33 @@ runtime:
       expect(r.pipeline.runtime?.entrypoint).toEqual(["/usr/local/bin/wrapper.sh"]);
       expect(r.pipeline.runtime?.command).toBeUndefined();
     });
+
+    it("treats `command: []` as omitted (form editor session that removed all rows)", () => {
+      const r = parsePipelineYaml(`
+version: 1
+runtime:
+  image: nginx:alpine
+  command: []
+`);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      if (r.kind === "multi") throw new Error("expected single");
+      expect(r.pipeline.runtime?.command).toBeUndefined();
+    });
+
+    it("treats `command: []` as omitted in dockerfile mode (Dockerfile's CMD wins)", () => {
+      const r = parsePipelineYaml(`
+version: 1
+dockerfile:
+  path: Dockerfile
+  context: .
+runtime:
+  command: []
+`);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      if (r.kind === "multi") throw new Error("expected single");
+      expect(r.pipeline.runtime?.command).toBeUndefined();
+    });
   });
 });

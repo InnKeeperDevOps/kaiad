@@ -179,18 +179,30 @@ export const pipelineRuntimeSchema = z.object({
    * Optional; when absent, `command` continues to set the ENTRYPOINT
    * (existing behaviour, backwards-compatible).
    */
-  entrypoint: z.array(z.string().min(1)).min(1).optional(),
+  // Empty arrays (`entrypoint: []` / `command: []`) coerce to undefined
+  // so the form editor can save a runtime block where the operator
+  // removed every argv row, and so a hand-edited kaiad.yaml with an
+  // explicit empty array means "use image default" instead of failing
+  // on `.min(1)`. Equivalent to omitting the field entirely.
+  entrypoint: z
+    .array(z.string().min(1))
+    .optional()
+    .transform((v) => (v && v.length > 0 ? v : undefined)),
   /**
    * When `entrypoint` is set, this is the container CMD (default args
    * passed to the entrypoint). When `entrypoint` is absent, this is
    * the container ENTRYPOINT.
    *
-   * Optional: when BOTH `entrypoint` and `command` are absent the
-   * runtime image keeps whatever ENTRYPOINT/CMD its base image (or the
-   * upstream Dockerfile) already declares — useful for prebuilt images
-   * like `nginx:alpine` whose default CMD is already what you want.
+   * Optional: when BOTH `entrypoint` and `command` are absent (or set
+   * to `[]`) the runtime image keeps whatever ENTRYPOINT/CMD its base
+   * image — including a Dockerfile's CMD/ENTRYPOINT in dockerfile
+   * mode — already declares. Useful for prebuilt images like
+   * `nginx:alpine` whose default CMD is already what you want.
    */
-  command: z.array(z.string().min(1)).min(1).optional(),
+  command: z
+    .array(z.string().min(1))
+    .optional()
+    .transform((v) => (v && v.length > 0 ? v : undefined)),
   /**
    * Plain environment variables injected into the deployed container
    * (rendered into the k8s Deployment / docker run). Per-environment

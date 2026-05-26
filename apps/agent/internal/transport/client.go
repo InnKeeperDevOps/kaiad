@@ -235,7 +235,7 @@ func WithAppStatsCollector(fn func(agentID string) ([][]byte, error)) ClientOpti
 // DefaultAgentVersion is the version the agent reports to the control
 // plane unless overridden via WithVersion(...) or $SM_AGENT_VERSION.
 // Bump on every agent release.
-const DefaultAgentVersion = "0.1.29"
+const DefaultAgentVersion = "0.1.30"
 
 func NewClient(url string, agentID string, opts ...ClientOption) *Client {
 	c := &Client{
@@ -664,7 +664,7 @@ func (c *Client) handleIncoming(ctx context.Context, errCh chan<- error, data []
 		return
 	}
 	switch envelope.Type {
-	case "run_step", "docker_op", "cancel_run", "sync_desired_state", "run_cursor_plan", "run_claude_plan", "run_toolchain", "receive_source_archive", "run_fix_plan", "redeploy_service", "teardown_service":
+	case "run_step", "docker_op", "cancel_run", "sync_desired_state", "run_cursor_plan", "run_claude_plan", "run_toolchain", "receive_source_archive", "run_fix_plan", "redeploy_service", "teardown_service", "list_metallb_pool_ips":
 	default:
 		c.protoDebug("inbound ignored unknown command type=%s", envelope.Type)
 		return

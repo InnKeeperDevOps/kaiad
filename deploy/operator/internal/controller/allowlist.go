@@ -102,6 +102,16 @@ var allowedRBAC = map[string]map[string]map[string]struct{}{
 			"get": {}, "list": {}, "watch": {},
 		},
 	},
+	// Read-only IPAddressPool access for the panel's MetalLB pinned-IP
+	// picker. The agent enumerates a pool's spec.addresses and subtracts
+	// already-allocated LoadBalancer IPs so the UI can show free vs taken
+	// addresses. No write verbs — RBAC stays incapable of mutating pool
+	// definitions or allocating addresses; that's MetalLB's controller.
+	"metallb.io": {
+		"ipaddresspools": {
+			"get": {}, "list": {},
+		},
+	},
 }
 
 // validateManages returns nil if every rule is on the allow-list, otherwise an

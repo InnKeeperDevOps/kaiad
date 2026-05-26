@@ -28,6 +28,12 @@ export interface KaiadFixStart {
    *  clicked Run-fix in the panel. Surfaced on the in-flight list so
    *  the UI can label and the cancel route can decide what to do next. */
   triggeredBy?: "auto" | "manual";
+  /** Pin the timeline to this incident id directly. Set by the manual
+   *  Run-fix / retry routes so startKaiadFix doesn't re-resolve the
+   *  incident from the upserted group's fingerprint — which can mismatch
+   *  the original incident and produce an "incidentId: null" run. Auto
+   *  dispatch leaves this unset and lets startKaiadFix look it up. */
+  incidentId?: string | null;
 }
 
 export interface AutoFixDispatcherDeps {

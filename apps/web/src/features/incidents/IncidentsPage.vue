@@ -331,8 +331,14 @@ const btnStyle = {
             >
               {{ f.incidentId ? f.incidentId.slice(0, 8) + "…" : "—" }}
             </td>
-            <td :style="{ padding: '0.35rem 0.4rem' }">{{ f.executor }}</td>
-            <td :style="{ padding: '0.35rem 0.4rem' }">{{ f.triggeredBy }}</td>
+            <td :style="{ padding: '0.35rem 0.4rem' }">
+              <span v-if="f.pending" :style="{ color: 'var(--color-warning)' }">starting…</span>
+              <template v-else>{{ f.executor }}</template>
+            </td>
+            <td :style="{ padding: '0.35rem 0.4rem' }">
+              <span v-if="f.pending" :style="{ color: 'var(--color-text-secondary)' }">—</span>
+              <template v-else>{{ f.triggeredBy }}</template>
+            </td>
             <td :style="{ padding: '0.35rem 0.4rem', fontVariantNumeric: 'tabular-nums' }">
               {{ formatElapsed(f.elapsedMs) }}
             </td>

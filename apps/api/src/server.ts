@@ -545,12 +545,55 @@ export function buildServer(opts: BuildServerOptions = {}) {
     triggeredBy: "auto" | "manual";
     abort: AbortController;
   };
-  /** `null` value = lock acquired before startKaiadFix populates the
-   *  full meta (the synchronous acquire window that prevents racing
-   *  concurrent app_log_error handlers). startKaiadFix overwrites with
-   *  the full FixInFlightMeta as soon as the AbortController exists. */
-  const fixInFlightByService = new Map<string, FixInFlightMeta | null>();
+  /** Placeholder entry held during the synchronous acquire window
+   *  between lock acquisition and startKaiadFix populating the full
+   *  meta. Tracks `acquiredAt` so a stuck placeholder (startKaiadFix
+   *  never landed) can be swept by the GC below — without that an
+   *  orphaned placeholder permanently jams "Run fix" on the service. */
+  type FixInFlightPlaceholder = {
+    placeholder: true;
+    tenantId: string;
+    serviceId: string;
+    acquiredAt: number;
+  };
+  const isPlaceholder = (v: FixInFlightMeta | FixInFlightPlaceholder): v is FixInFlightPlaceholder =>
+    (v as FixInFlightPlaceholder).placeholder === true;
+  const fixInFlightByService = new Map<string, FixInFlightMeta | FixInFlightPlaceholder>();
   const fixServiceKey = (tenantId: string, serviceId: string) => `${tenantId}:${serviceId}`;
+  const acquireFixPlaceholder = (tenantId: string, serviceId: string): boolean => {
+    const key = fixServiceKey(tenantId, serviceId);
+    if (fixInFlightByService.has(key)) return false;
+    fixInFlightByService.set(key, {
+      placeholder: true,
+      tenantId,
+      serviceId,
+      acquiredAt: Date.now()
+    });
+    return true;
+  };
+
+  // Sweep orphaned placeholders — if startKaiadFix never landed within
+  // 60s the acquire window is well past; release the lock so "Run fix"
+  // isn't permanently 409'd. 60s comfortably exceeds the longest
+  // observed path between set(placeholder) and the meta-swap (synchronous
+  // map writes + a single getCurrentIncidentId await).
+  const PLACEHOLDER_TTL_MS = 60_000;
+  const placeholderSweepTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [key, val] of fixInFlightByService) {
+      if (isPlaceholder(val) && now - val.acquiredAt > PLACEHOLDER_TTL_MS) {
+        fixInFlightByService.delete(key);
+        console.warn("[kaiad_fix]", JSON.stringify({
+          event: "fix_lock.placeholder_swept",
+          key,
+          ageMs: now - val.acquiredAt
+        }));
+      }
+    }
+  }, 15_000);
+  // Test-mode helper: tests that import the bound server can stop the
+  // timer. unref so the timer doesn't keep the process alive on its own.
+  placeholderSweepTimer.unref?.();
   const app = Fastify();
   app.register(cors);
   app.register(websocket);
@@ -598,16 +641,22 @@ export function buildServer(opts: BuildServerOptions = {}) {
       // recordFixProgress call resolved "most recent incident for the
       // fingerprint" independently — so when the agent shipped a new
       // error mid-run a fresh incident appeared and events split
-      // across rows.
-      let incidentId: string | null = null;
-      try {
-        incidentId = await domainStore.getCurrentIncidentId(
-          a.tenantId,
-          a.service.id,
-          a.group.fingerprint
-        );
-      } catch (e) {
-        fixLog({ event: "fix_progress.lookup_failed", err: String(e) });
+      // across rows. Manual/retry callers pass `a.incidentId` directly
+      // because the upserted group's fingerprint can mismatch the
+      // original incident's fingerprint (the synthetic group recomputes
+      // it from inc.message + inc.fullLog), which produced "incidentId:
+      // null" runs that detached the fix timeline from the incident.
+      let incidentId: string | null = a.incidentId ?? null;
+      if (!incidentId) {
+        try {
+          incidentId = await domainStore.getCurrentIncidentId(
+            a.tenantId,
+            a.service.id,
+            a.group.fingerprint
+          );
+        } catch (e) {
+          fixLog({ event: "fix_progress.lookup_failed", err: String(e) });
+        }
       }
       // Promote the placeholder lock to a full in-flight entry now that
       // we have an AbortController and (best-effort) the incident id.
@@ -1685,8 +1734,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
                     serviceId: service?.id
                   });
                 } else {
-                  fixInFlightByService.set(svcKey, null);
-                  weAcquired = true;
+                  weAcquired = acquireFixPlaceholder(tenantId, service!.id);
                 }
               }
               const outcome = (svcKey && !weAcquired)
@@ -2960,9 +3008,13 @@ export function buildServer(opts: BuildServerOptions = {}) {
       );
     }
     const lockKey = fixServiceKey(s.tenantId, service.id);
-    if (fixInFlightByService.has(lockKey)) {
+    const existing = fixInFlightByService.get(lockKey);
+    if (existing) {
+      const detail = isPlaceholder(existing)
+        ? `A fix lock is held for this service but the runner hasn't started yet (acquired ${Math.round((Date.now() - existing.acquiredAt) / 1000)}s ago). Cancel it from the Incidents page's "Autonomous fixes running" panel, or wait — the GC sweeps stuck placeholders after ${Math.round(PLACEHOLDER_TTL_MS / 1000)}s.`
+        : `A fix is already in flight for this service. Cancel it from the Incidents page's "Autonomous fixes running" panel.`;
       return reply.status(409).send(
-        apiErrorSchema.parse({ code: "ALREADY_RUNNING", message: "A fix is already in flight for this service", correlationId: (req as any).correlationId })
+        apiErrorSchema.parse({ code: "ALREADY_RUNNING", message: detail, correlationId: (req as any).correlationId })
       );
     }
     const keyMaterial = await domainStore.getSshKeyMaterial(s.tenantId, service.sshKeyId);
@@ -2992,7 +3044,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
         apiErrorSchema.parse({ code: "INTERNAL", message: "Error group missing after upsert", correlationId: (req as any).correlationId })
       );
     }
-    fixInFlightByService.set(lockKey, null);
+    acquireFixPlaceholder(s.tenantId, service.id);
     errorGroups.setStatus(group.id, "fixing");
     startKaiadFix({
       commandId: `cmd-manual-${crypto.randomUUID()}`,
@@ -3003,47 +3055,75 @@ export function buildServer(opts: BuildServerOptions = {}) {
       sshKeyValue: keyMaterial.privateKey ?? keyMaterial.localPath ?? null,
       executor: (service.fixExecutor as "claude" | "cursor") ?? "claude",
       contextLines: errorGroups.contextLinesFor(group.id),
-      triggeredBy: "manual"
+      triggeredBy: "manual",
+      incidentId: inc.id
     });
     return { ok: true, groupId: group.id };
   });
 
   // List autonomous fixes currently running inside this kaiad process.
-  // Tenant-scoped (an operator only sees their own services' fixes).
-  // Entries with a `null` value in the map are momentary acquire-window
-  // placeholders that haven't yet entered startKaiadFix; we hide them
-  // because there's no metadata to render and no AbortController to
-  // cancel against — the next request will see the full entry.
+  // Tenant-scoped. Surfaces both fully-running fixes AND placeholder
+  // locks (acquire-window entries) — the latter as `pending: true` so
+  // the operator can see + cancel a stuck acquire that otherwise hides
+  // and jams "Run fix".
   app.get("/api/v1/auto-fix/in-flight", async (req, reply) => {
     const s = await authorize(req as any, reply as any, { perm: "incidents:read" });
     if (!s) return;
-    const out: Array<{
+    type Out = {
       tenantId: string;
       serviceId: string;
       serviceName: string;
-      groupId: string;
-      fingerprint: string;
+      groupId: string | null;
+      fingerprint: string | null;
       incidentId: string | null;
-      executor: "claude" | "cursor";
+      executor: "claude" | "cursor" | null;
       startedAt: string;
-      triggeredBy: "auto" | "manual";
+      triggeredBy: "auto" | "manual" | null;
       elapsedMs: number;
-    }> = [];
+      pending?: boolean;
+    };
+    const out: Out[] = [];
     const now = Date.now();
-    for (const meta of fixInFlightByService.values()) {
-      if (!meta || meta.tenantId !== s.tenantId) continue;
-      out.push({
-        tenantId: meta.tenantId,
-        serviceId: meta.serviceId,
-        serviceName: meta.serviceName,
-        groupId: meta.groupId,
-        fingerprint: meta.fingerprint,
-        incidentId: meta.incidentId,
-        executor: meta.executor,
-        startedAt: meta.startedAt,
-        triggeredBy: meta.triggeredBy,
-        elapsedMs: now - new Date(meta.startedAt).getTime()
-      });
+    // Resolve service names for placeholders lazily — most callsites
+    // either have a tiny number of placeholders or none. Pull the
+    // tenant's services once if needed.
+    let tenantServices: { id: string; name: string }[] | null = null;
+    const resolveServiceName = async (serviceId: string): Promise<string> => {
+      if (!tenantServices) {
+        tenantServices = (await domainStore.listServices(s.tenantId)).map((svc) => ({ id: svc.id, name: svc.name }));
+      }
+      return tenantServices.find((x) => x.id === serviceId)?.name ?? serviceId;
+    };
+    for (const entry of fixInFlightByService.values()) {
+      if (entry.tenantId !== s.tenantId) continue;
+      if (isPlaceholder(entry)) {
+        out.push({
+          tenantId: entry.tenantId,
+          serviceId: entry.serviceId,
+          serviceName: await resolveServiceName(entry.serviceId),
+          groupId: null,
+          fingerprint: null,
+          incidentId: null,
+          executor: null,
+          startedAt: new Date(entry.acquiredAt).toISOString(),
+          triggeredBy: null,
+          elapsedMs: now - entry.acquiredAt,
+          pending: true
+        });
+      } else {
+        out.push({
+          tenantId: entry.tenantId,
+          serviceId: entry.serviceId,
+          serviceName: entry.serviceName,
+          groupId: entry.groupId,
+          fingerprint: entry.fingerprint,
+          incidentId: entry.incidentId,
+          executor: entry.executor,
+          startedAt: entry.startedAt,
+          triggeredBy: entry.triggeredBy,
+          elapsedMs: now - new Date(entry.startedAt).getTime()
+        });
+      }
     }
     return { fixes: out };
   });
@@ -3061,30 +3141,37 @@ export function buildServer(opts: BuildServerOptions = {}) {
     if (!s) return;
     const action = req.query.action ?? "none";
     const lockKey = fixServiceKey(s.tenantId, req.params.serviceId);
-    const meta = fixInFlightByService.get(lockKey);
-    if (!meta) {
+    const entry = fixInFlightByService.get(lockKey);
+    if (!entry) {
       return reply.status(404).send(
         apiErrorSchema.parse({ code: "NOT_FOUND", message: "No in-flight fix for this service", correlationId: (req as any).correlationId })
       );
     }
-    if (meta.tenantId !== s.tenantId) {
+    if (entry.tenantId !== s.tenantId) {
       return reply.status(403).send(
         apiErrorSchema.parse({ code: "FORBIDDEN", message: "Fix belongs to another tenant", correlationId: (req as any).correlationId })
       );
     }
-    const incidentIdSnapshot = meta.incidentId;
-    const serviceIdSnapshot = meta.serviceId;
-    // Pull the trigger. The runner's SIGKILL'd child resolves with
-    // reason:"cancelled"; the finally block in startKaiadFix releases
-    // the lock and writes the terminal status.
-    meta.abort.abort();
-    // Wait briefly for the runner's cleanup to land (lock released +
-    // incident status persisted) so the follow-up retry/delete sees a
-    // clean state. 8s upper bound matches the slowest SIGKILL+chown+rm
-    // path observed; the runner usually settles in <1s.
-    const deadline = Date.now() + 8000;
-    while (fixInFlightByService.has(lockKey) && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 100));
+    const incidentIdSnapshot = isPlaceholder(entry) ? null : entry.incidentId;
+    const serviceIdSnapshot = entry.serviceId;
+    if (isPlaceholder(entry)) {
+      // Orphaned acquire-window lock — startKaiadFix never landed (or
+      // crashed before populating meta). Just release the key; there's
+      // no child to SIGKILL and no incident timeline to finalize.
+      fixInFlightByService.delete(lockKey);
+    } else {
+      // Pull the trigger. The runner's SIGKILL'd child resolves with
+      // reason:"cancelled"; the finally block in startKaiadFix releases
+      // the lock and writes the terminal status.
+      entry.abort.abort();
+      // Wait briefly for the runner's cleanup to land (lock released +
+      // incident status persisted) so the follow-up retry/delete sees a
+      // clean state. 8s upper bound matches the slowest SIGKILL+chown+rm
+      // path observed; the runner usually settles in <1s.
+      const deadline = Date.now() + 8000;
+      while (fixInFlightByService.has(lockKey) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
     }
     if (action === "delete" && incidentIdSnapshot) {
       try {
@@ -3142,7 +3229,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
           apiErrorSchema.parse({ code: "INTERNAL", message: "Error group missing after upsert", correlationId: (req as any).correlationId })
         );
       }
-      fixInFlightByService.set(lockKey, null);
+      acquireFixPlaceholder(s.tenantId, serviceIdSnapshot);
       errorGroups.setStatus(group.id, "fixing");
       startKaiadFix({
         commandId: `cmd-retry-${crypto.randomUUID()}`,
@@ -3153,7 +3240,8 @@ export function buildServer(opts: BuildServerOptions = {}) {
         sshKeyValue: keyMaterial.privateKey ?? keyMaterial.localPath ?? null,
         executor: (service.fixExecutor as "claude" | "cursor") ?? "claude",
         contextLines: errorGroups.contextLinesFor(group.id),
-        triggeredBy: "manual"
+        triggeredBy: "manual",
+        incidentId: incidentIdSnapshot
       });
       return { ok: true, action: "retry", groupId: group.id };
     }

@@ -490,13 +490,17 @@ export const api = {
         tenantId: string;
         serviceId: string;
         serviceName: string;
-        groupId: string;
-        fingerprint: string;
+        groupId: string | null;
+        fingerprint: string | null;
         incidentId: string | null;
-        executor: "claude" | "cursor";
+        executor: "claude" | "cursor" | null;
         startedAt: string;
-        triggeredBy: "auto" | "manual";
+        triggeredBy: "auto" | "manual" | null;
         elapsedMs: number;
+        /** Acquire-window lock that hasn't entered the full runner yet
+         *  (or whose runner has crashed without releasing). Surfaced
+         *  so an operator can cancel an orphaned placeholder. */
+        pending?: boolean;
       }>;
     }>("/api/v1/auto-fix/in-flight"),
 

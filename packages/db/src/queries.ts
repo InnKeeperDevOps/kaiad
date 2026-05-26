@@ -348,11 +348,17 @@ export async function recordFixProgress(
     resetEvents?: boolean;
   },
 ): Promise<void> {
-  const sets: string[] = [];
-  const values: unknown[] = [tenantId, serviceId, fingerprint];
+  // Build the SET clause + its values independently of the WHERE
+  // clause's params. The pinned-id path only needs tenant_id + id, and
+  // the legacy fallback needs (tenant, service, fingerprint); driving
+  // both off one shared `values` array caused unreferenced placeholders
+  // ("could not determine data type of parameter $2") when the pinned
+  // path stripped service_id/fingerprint from its WHERE.
+  const setClauses: string[] = [];
+  const setValues: unknown[] = [];
   const push = (col: string, v: unknown) => {
-    values.push(v);
-    sets.push(`${col} = $${values.length}`);
+    setValues.push(v);
+    setClauses.push(`${col} = $${setValues.length}`);
   };
   if (patch.status !== undefined) push("last_fix_status", patch.status);
   if (patch.executor !== undefined) push("last_fix_executor", patch.executor);
@@ -361,25 +367,29 @@ export async function recordFixProgress(
   if (patch.commitSha !== undefined) push("last_fix_commit_sha", patch.commitSha);
   if (patch.output !== undefined) push("last_fix_output", patch.output);
 
-  // Events: optionally reset first, then append the new event.
-  if (patch.resetEvents) sets.push(`last_fix_events = '[]'::jsonb`);
+  if (patch.resetEvents) setClauses.push(`last_fix_events = '[]'::jsonb`);
   if (patch.event) {
     const ev = { at: new Date().toISOString(), ...patch.event };
-    values.push(JSON.stringify(ev));
-    sets.push(`last_fix_events = COALESCE(last_fix_events, '[]'::jsonb) || $${values.length}::jsonb`);
+    setValues.push(JSON.stringify(ev));
+    setClauses.push(
+      `last_fix_events = COALESCE(last_fix_events, '[]'::jsonb) || $${setValues.length}::jsonb`,
+    );
   }
-  if (sets.length === 0) return;
+  if (setClauses.length === 0) return;
+
   if (patch.incidentId) {
     // Pinned-id path: every call from one fix-run targets the same
     // row. Match by id + tenant_id only — manual Run-fix synthesizes a
     // fresh error group whose fingerprint can differ from the original
     // incident's stored fingerprint, so requiring fingerprint here
     // silently dropped every event from manual runs.
-    values.push(patch.incidentId);
+    const values = [...setValues, tenantId, patch.incidentId];
+    const tenantIdx = setValues.length + 1;
+    const incidentIdx = setValues.length + 2;
     await query(
-      `UPDATE incidents SET ${sets.join(", ")}
-         WHERE id = $${values.length}
-           AND tenant_id = $1`,
+      `UPDATE incidents SET ${setClauses.join(", ")}
+         WHERE id = $${incidentIdx}
+           AND tenant_id = $${tenantIdx}`,
       values,
     );
     return;
@@ -387,11 +397,15 @@ export async function recordFixProgress(
   // Legacy fallback: update the most recent incident for this
   // (tenant, service, fingerprint) regardless of status. Kept for
   // back-compat; callers should pass `incidentId` whenever possible.
+  const values = [...setValues, tenantId, serviceId, fingerprint];
+  const tenantIdx = setValues.length + 1;
+  const serviceIdx = setValues.length + 2;
+  const fingerprintIdx = setValues.length + 3;
   await query(
-    `UPDATE incidents SET ${sets.join(", ")}
+    `UPDATE incidents SET ${setClauses.join(", ")}
        WHERE id = (
          SELECT id FROM incidents
-         WHERE tenant_id = $1 AND service_id = $2 AND fingerprint = $3
+         WHERE tenant_id = $${tenantIdx} AND service_id = $${serviceIdx} AND fingerprint = $${fingerprintIdx}
          ORDER BY last_seen_at DESC LIMIT 1
        )`,
     values,

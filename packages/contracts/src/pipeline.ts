@@ -184,8 +184,13 @@ export const pipelineRuntimeSchema = z.object({
    * When `entrypoint` is set, this is the container CMD (default args
    * passed to the entrypoint). When `entrypoint` is absent, this is
    * the container ENTRYPOINT.
+   *
+   * Optional: when BOTH `entrypoint` and `command` are absent the
+   * runtime image keeps whatever ENTRYPOINT/CMD its base image (or the
+   * upstream Dockerfile) already declares — useful for prebuilt images
+   * like `nginx:alpine` whose default CMD is already what you want.
    */
-  command: z.array(z.string().min(1)).min(1),
+  command: z.array(z.string().min(1)).min(1).optional(),
   /**
    * Plain environment variables injected into the deployed container
    * (rendered into the k8s Deployment / docker run). Per-environment

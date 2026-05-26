@@ -673,4 +673,33 @@ runtime:
       expect(r.reason).toMatch(/layers.*b\.tar/);
     });
   });
+
+  describe("runtime.command optional", () => {
+    it("accepts a runtime block with no command (image default ENTRYPOINT/CMD wins)", () => {
+      const r = parsePipelineYaml(`
+version: 1
+runtime:
+  image: nginx:alpine
+`);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      if (r.kind === "multi") throw new Error("expected single");
+      expect(r.pipeline.runtime?.command).toBeUndefined();
+      expect(r.pipeline.runtime?.entrypoint).toBeUndefined();
+    });
+
+    it("accepts entrypoint without command (entrypoint overrides, base CMD wins)", () => {
+      const r = parsePipelineYaml(`
+version: 1
+runtime:
+  image: nginx:alpine
+  entrypoint: ["/usr/local/bin/wrapper.sh"]
+`);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      if (r.kind === "multi") throw new Error("expected single");
+      expect(r.pipeline.runtime?.entrypoint).toEqual(["/usr/local/bin/wrapper.sh"]);
+      expect(r.pipeline.runtime?.command).toBeUndefined();
+    });
+  });
 });

@@ -945,9 +945,14 @@ async function buildRuntimeImage(params: {
   // runtime command. Covers both kaiad.yaml's `command` AND the optional
   // `entrypoint` (when present, it becomes the image's ENTRYPOINT and
   // `command` becomes the CMD).
-  const entrypointArgs = runtime.entrypoint ?? runtime.command;
-  const cmdArgs = runtime.entrypoint ? runtime.command : null;
-  for (const arg of [...entrypointArgs, ...(cmdArgs ?? [])]) {
+  //
+  // Both fields are optional: when neither is set, we skip
+  // `--entrypoint`/`--cmd` entirely so the runtime image inherits the
+  // base image's existing ENTRYPOINT/CMD (e.g. `nginx:alpine`'s default
+  // CMD), instead of erroring on a missing required field.
+  const entrypointArgs = runtime.entrypoint ?? runtime.command ?? null;
+  const cmdArgs = runtime.entrypoint ? runtime.command ?? null : null;
+  for (const arg of [...(entrypointArgs ?? []), ...(cmdArgs ?? [])]) {
     if (arg.includes(",")) {
       return {
         ok: false,
@@ -1152,9 +1157,11 @@ async function buildRuntimeImage(params: {
     "mutate",
     internalRef,
     "--tag",
-    internalRef,
-    `--entrypoint=${entrypointArgs.join(",")}`
+    internalRef
   ];
+  if (entrypointArgs && entrypointArgs.length > 0) {
+    mutateArgs.push(`--entrypoint=${entrypointArgs.join(",")}`);
+  }
   if (cmdArgs && cmdArgs.length > 0) {
     mutateArgs.push(`--cmd=${cmdArgs.join(",")}`);
   }

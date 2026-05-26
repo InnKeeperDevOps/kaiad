@@ -40,7 +40,7 @@ const repoScopeHint = computed(() => {
 const STARTER = `version: 1
 runtime:
   image: nginx:alpine
-  command: ["nginx", "-g", "daemon off;"]
+  # command / entrypoint optional — omit to inherit the image's defaults
   env: {}
 ports:
   - port: 80
@@ -132,6 +132,12 @@ function pruneFormDoc(d: AnyObj): void {
     if (rt && typeof rt === "object") {
       if (Array.isArray(rt.entrypoint) && rt.entrypoint.length === 0) {
         delete rt.entrypoint;
+      }
+      // command is optional too — strip empty arrays so omitting all
+      // rows inherits the image's default ENTRYPOINT/CMD instead of
+      // failing validation on `min(1)`.
+      if (Array.isArray(rt.command) && rt.command.length === 0) {
+        delete rt.command;
       }
     }
   }
@@ -397,7 +403,9 @@ function addMulti() {
     doc.value = { version: ver, services: { [props.serviceName || "svc"]: single } };
   } else {
     doc.value.services[`service-${Object.keys(doc.value.services).length + 1}`] = {
-      runtime: { image: "nginx:alpine", command: ["nginx", "-g", "daemon off;"], env: {} },
+      // command/entrypoint omitted — inherit image defaults; operators
+      // who need an override add rows via the form.
+      runtime: { image: "nginx:alpine", env: {} },
       ports: [{ port: 80, name: "http" }],
       loadBalancer: { type: "none" }
     };

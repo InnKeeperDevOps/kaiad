@@ -98,7 +98,7 @@ crane.
 | `runtime.copy` | array | no | `[]` | Each entry is `{ from: <artifact-name>, to: <abs-path-in-image> }`. |
 | `runtime.layers` | string[] | no | `[]` | Tar archives (from `artifacts:`) appended verbatim as filesystem layers. |
 | `runtime.entrypoint` | string[] | no | — | Container ENTRYPOINT (exec-form argv). When set, this becomes the image's ENTRYPOINT and `runtime.command` becomes the CMD (default args). Use this for the classic Docker ENTRYPOINT + CMD shape, e.g. `entrypoint: ["/usr/bin/python3"]` paired with `command: ["app.py", "--port", "8080"]`. Optional and backwards-compatible — pre-existing kaiad.yaml files (no `entrypoint:`) keep building identically. |
-| `runtime.command` | string[] | yes (if `runtime` present) | — | When `runtime.entrypoint` is set, this is the image's CMD (default args). When absent, this is the image's ENTRYPOINT — e.g. `["node", "/app/server.js"]`. |
+| `runtime.command` | string[] | no | — | When `runtime.entrypoint` is set, this is the image's CMD (default args). When absent, this is the image's ENTRYPOINT — e.g. `["node", "/app/server.js"]`. If BOTH `runtime.entrypoint` AND `runtime.command` are omitted, the runtime image inherits whatever ENTRYPOINT/CMD its `runtime.image` base already declares — useful for prebuilt images like `nginx:alpine` whose default CMD is already what you want. |
 
 **Inside the build container**, the worker bind-mounts:
 

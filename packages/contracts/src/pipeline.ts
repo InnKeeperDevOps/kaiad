@@ -601,14 +601,17 @@ const innerPipelineSchema = z
   })
   // Same cross-field checks as the top-level pipelineDefinitionSchema.
   .superRefine((def, ctx) => {
-    if (def.dockerfile) {
-      if (def.build || def.runtime || def.artifacts.length > 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["dockerfile"],
-          message: "dockerfile: is exclusive with build/artifacts/runtime — pick one mode"
-        });
-      }
+    // Only `build` truly conflicts with `dockerfile` — a Dockerfile IS
+    // the build step. `runtime` (deploy-time env/secretEnv/volumes/
+    // command/entrypoint) and `artifacts` still apply: the Dockerfile-
+    // built image is deployed with the same runtime config any other
+    // image gets. Matches the top-level pipelineDefinitionSchema check.
+    if (def.dockerfile && def.build) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["dockerfile"],
+        message: "dockerfile: is exclusive with build: — a Dockerfile already is the build step"
+      });
     }
     if (def.runtime) {
       const captured = new Set(def.artifacts);

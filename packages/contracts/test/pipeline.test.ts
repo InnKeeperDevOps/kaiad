@@ -730,4 +730,49 @@ runtime:
       expect(r.pipeline.runtime?.command).toBeUndefined();
     });
   });
+
+  describe("dockerfile + runtime coexistence (multi-pipeline)", () => {
+    it("allows dockerfile alongside runtime in a multi-service definition", () => {
+      // dockerfile builds the image; runtime supplies deploy-time
+      // env/secretEnv/volumes/healthcheck — both fields apply at
+      // different stages, so the inner cross-check must NOT reject this.
+      const r = parsePipelineYaml(`
+version: 1
+services:
+  app:
+    dockerfile:
+      path: Dockerfile
+      context: .
+    runtime:
+      env:
+        NODE_ENV: production
+    ports:
+      - port: 8080
+`);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      if (r.kind !== "multi") throw new Error("expected multi");
+      expect(r.pipelines.app.dockerfile?.path).toBe("Dockerfile");
+      expect(r.pipelines.app.runtime?.env).toEqual({ NODE_ENV: "production" });
+    });
+
+    it("still rejects dockerfile + build (truly exclusive) in a multi-service definition", () => {
+      const r = parsePipelineYaml(`
+version: 1
+services:
+  app:
+    dockerfile:
+      path: Dockerfile
+      context: .
+    build:
+      image: node:20
+      steps: ["npm ci"]
+    ports:
+      - port: 8080
+`);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.reason).toMatch(/dockerfile.*exclusive.*build/i);
+    });
+  });
 });

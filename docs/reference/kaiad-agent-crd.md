@@ -101,6 +101,7 @@ any Role/ClusterRole. Anything outside fails admission with
 | `metrics.k8s.io` | `pods` | `get`, `list` (read-only — Agents-page CPU/memory) |
 | `batch` | `jobs` | `get`, `list`, `watch`, `create`, `delete` |
 | `batch` | `cronjobs` | `get`, `list`, `watch` |
+| `metallb.io` | `ipaddresspools` | `get`, `list` (read-only — Pinned IP picker on the panel's service editor) |
 
 The intent is that **a tenant who can apply a `KaiadAgent` CR cannot
 escalate to cluster-admin or read Secrets through it** — note `secrets`

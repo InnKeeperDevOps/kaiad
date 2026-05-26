@@ -166,6 +166,9 @@ rules:
   - apiGroups: ["batch"]
     resources: ["cronjobs"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["metallb.io"]
+    resources: ["ipaddresspools"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -409,6 +412,7 @@ the allow-list contains:
 | `metrics.k8s.io` | `pods` | `get`, `list` (read-only — Agents-page CPU/memory; see below) |
 | `batch` | `jobs` | `get`, `list`, `watch`, `create`, `delete` |
 | `batch` | `cronjobs` | `get`, `list`, `watch` |
+| `metallb.io` | `ipaddresspools` | `get`, `list` (read-only — Pinned IP picker) |
 
 `create`/`delete` on `deployments`/`services`/`ingresses` let the agent
 actually deploy + tear down a service; `namespaces.create` lets it

@@ -235,6 +235,145 @@ function addEnvName(p: AnyObj, name: string) {
     syncYamlFromForm();
   }
 }
+// ── MetalLB pinned-IP picker ──────────────────────────────────────────
+// `loadBalancerIPs` is a comma-separated string on the wire (matches
+// kaiad.yaml's metallb variant). The picker treats it as a set: each
+// pipeline gets its own PoolState that caches the API response for the
+// currently-entered Address pool name.
+type MetalLBPoolState = {
+  pool: string;
+  loading: boolean;
+  loaded: boolean;
+  error: string | null;
+  available: string[];
+  taken: Array<{ ip: string; service?: string; namespace?: string }>;
+};
+const poolStates = ref<Record<string, MetalLBPoolState>>({});
+const poolDebounce: Record<string, ReturnType<typeof setTimeout> | undefined> = {};
+
+function poolKey(name: string): string {
+  return name || "__single__";
+}
+function poolState(name: string): MetalLBPoolState {
+  const k = poolKey(name);
+  if (!poolStates.value[k]) {
+    poolStates.value[k] = {
+      pool: "",
+      loading: false,
+      loaded: false,
+      error: null,
+      available: [],
+      taken: []
+    };
+  }
+  return poolStates.value[k];
+}
+function loadPoolIPs(name: string, rawPool: unknown, immediate = false) {
+  const pool = String(rawPool ?? "").trim();
+  const st = poolState(name);
+  const k = poolKey(name);
+  if (poolDebounce[k]) {
+    clearTimeout(poolDebounce[k]);
+    poolDebounce[k] = undefined;
+  }
+  if (!pool) {
+    st.pool = "";
+    st.loading = false;
+    st.loaded = false;
+    st.error = null;
+    st.available = [];
+    st.taken = [];
+    return;
+  }
+  const fire = async () => {
+    st.pool = pool;
+    st.loading = true;
+    st.error = null;
+    try {
+      const r = await api.listMetalLBPoolIPs(props.serviceId, pool);
+      st.available = r.available;
+      st.taken = r.taken;
+      st.loaded = true;
+    } catch (e) {
+      st.error = (e as Error).message;
+      st.available = [];
+      st.taken = [];
+      st.loaded = true;
+    } finally {
+      st.loading = false;
+    }
+  };
+  if (immediate) {
+    void fire();
+  } else {
+    poolDebounce[k] = setTimeout(fire, 400);
+  }
+}
+
+function pinnedIPSet(p: AnyObj): Set<string> {
+  const raw = String(lb(p).loadBalancerIPs ?? "");
+  const out = new Set<string>();
+  for (const s of raw.split(",")) {
+    const t = s.trim();
+    if (t) out.add(t);
+  }
+  return out;
+}
+function hasPinnedIP(p: AnyObj, ip: string): boolean {
+  return pinnedIPSet(p).has(ip);
+}
+function setPinnedIPs(p: AnyObj, ips: Iterable<string>): void {
+  const joined = [...ips].join(",");
+  if (joined) {
+    lb(p).loadBalancerIPs = joined;
+  } else {
+    delete lb(p).loadBalancerIPs;
+  }
+  syncYamlFromForm();
+}
+function togglePinnedIP(p: AnyObj, ip: string, ev: Event): void {
+  const checked = (ev.target as HTMLInputElement).checked;
+  const set = pinnedIPSet(p);
+  if (checked) set.add(ip);
+  else set.delete(ip);
+  setPinnedIPs(p, set);
+}
+function addCustomPinnedIP(p: AnyObj, ev: Event): void {
+  const el = ev.target as HTMLInputElement;
+  const v = el.value.trim();
+  if (!v) return;
+  const set = pinnedIPSet(p);
+  set.add(v);
+  setPinnedIPs(p, set);
+  el.value = "";
+}
+function pinnedIPsNotInPool(p: AnyObj, name: string): string[] {
+  const set = pinnedIPSet(p);
+  const st = poolState(name);
+  const pool = new Set<string>([...st.available, ...st.taken.map((t) => t.ip)]);
+  return [...set].filter((ip) => !pool.has(ip));
+}
+
+// When the YAML loads with a metallb address pool already set (existing
+// override), trigger a fetch so the picker shows the current free list
+// immediately. Reruns whenever the pool field changes outside the input
+// handler — e.g. switching between pipelines or a Raw-tab edit.
+watch(
+  pipelines,
+  (list) => {
+    for (const entry of list) {
+      const l = lb(entry.p);
+      if (l.type === "metallb" && l.addressPool) {
+        const st = poolState(entry.name);
+        if (st.pool !== String(l.addressPool).trim() && !st.loading) {
+          loadPoolIPs(entry.name, l.addressPool, true);
+        }
+      }
+    }
+  },
+  { deep: true }
+);
+
 function volKind(v: AnyObj): string {
   return v.nfs ? "nfs" : v.hostPath ? "hostPath" : v.persistentVolumeClaim ? "pvc" : "emptyDir";
 }
@@ -469,16 +608,101 @@ async function clearOverride() {
               </select>
               <template v-if="lb(entry.p).type === 'metallb'">
                 <label class="pl-label">Address pool</label>
-                <input class="sm-input pl-in" v-model="lb(entry.p).addressPool" @input="syncYamlFromForm" placeholder="first-pool" />
-                <label class="pl-label">Pinned IP(s)</label>
-                <input class="sm-input pl-in" v-model="lb(entry.p).loadBalancerIPs" @input="syncYamlFromForm" placeholder="192.168.1.230" />
+                <input
+                  class="sm-input pl-in"
+                  v-model="lb(entry.p).addressPool"
+                  @input="syncYamlFromForm(); loadPoolIPs(entry.name, lb(entry.p).addressPool)"
+                  placeholder="first-pool"
+                />
               </template>
-              <template v-if="lb(entry.p).type === 'nginx'">
-                <label class="pl-label">Ingress class</label>
-                <input class="sm-input pl-in" v-model="lb(entry.p).ingressClass" @input="syncYamlFromForm" placeholder="nginx" />
-                <label class="pl-label">TLS secret</label>
-                <input class="sm-input pl-in" v-model="lb(entry.p).tlsSecret" @input="syncYamlFromForm" />
-              </template>
+            </div>
+            <div v-if="lb(entry.p).type === 'metallb' && lb(entry.p).addressPool" class="pl-metallb">
+              <div class="pl-metallb__head">
+                <label class="pl-label pl-metallb__label">Pinned IP(s)</label>
+                <span v-if="poolState(entry.name).loading" class="pl-hint">Loading pool…</span>
+                <span v-else-if="poolState(entry.name).error" class="pl-hint pl-metallb__err">
+                  {{ poolState(entry.name).error }}
+                </span>
+                <span v-else-if="poolState(entry.name).loaded" class="pl-hint">
+                  {{ poolState(entry.name).available.length }} free ·
+                  {{ poolState(entry.name).taken.length }} in use
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  :disabled="poolState(entry.name).loading"
+                  @click="loadPoolIPs(entry.name, lb(entry.p).addressPool, true)"
+                >
+                  Refresh
+                </Button>
+              </div>
+              <div v-if="poolState(entry.name).loaded && !poolState(entry.name).error" class="pl-metallb__chips">
+                <label
+                  v-for="ip in poolState(entry.name).available"
+                  :key="'a' + ip"
+                  class="pl-chip"
+                  :class="{ 'pl-chip--on': hasPinnedIP(entry.p, ip) }"
+                >
+                  <input
+                    type="checkbox"
+                    :checked="hasPinnedIP(entry.p, ip)"
+                    @change="togglePinnedIP(entry.p, ip, $event)"
+                  />
+                  <span class="pl-chip__ip">{{ ip }}</span>
+                </label>
+                <label
+                  v-for="t in poolState(entry.name).taken"
+                  :key="'t' + t.ip"
+                  class="pl-chip pl-chip--taken"
+                  :class="{ 'pl-chip--on': hasPinnedIP(entry.p, t.ip) }"
+                  :title="(t.namespace ? t.namespace + '/' : '') + (t.service || 'taken')"
+                >
+                  <input
+                    type="checkbox"
+                    :checked="hasPinnedIP(entry.p, t.ip)"
+                    @change="togglePinnedIP(entry.p, t.ip, $event)"
+                  />
+                  <span class="pl-chip__ip">{{ t.ip }}</span>
+                  <span class="pl-chip__by">{{ t.service || "in use" }}</span>
+                </label>
+                <span
+                  v-if="poolState(entry.name).available.length === 0 && poolState(entry.name).taken.length === 0"
+                  class="pl-hint"
+                >
+                  No IPs reported for pool <code>{{ lb(entry.p).addressPool }}</code>.
+                </span>
+              </div>
+              <div
+                v-if="pinnedIPsNotInPool(entry.p, entry.name).length"
+                class="pl-metallb__extra"
+              >
+                <span class="pl-hint">Pinned but outside pool:</span>
+                <label
+                  v-for="ip in pinnedIPsNotInPool(entry.p, entry.name)"
+                  :key="'x' + ip"
+                  class="pl-chip pl-chip--extra pl-chip--on"
+                >
+                  <input
+                    type="checkbox"
+                    checked
+                    @change="togglePinnedIP(entry.p, ip, $event)"
+                  />
+                  <span class="pl-chip__ip">{{ ip }}</span>
+                </label>
+              </div>
+              <div class="pl-metallb__add">
+                <input
+                  class="sm-input pl-in"
+                  placeholder="Add a literal IP — press Enter"
+                  @keyup.enter="addCustomPinnedIP(entry.p, $event)"
+                />
+              </div>
+            </div>
+            <div class="pl-row" v-if="lb(entry.p).type === 'nginx'">
+              <label class="pl-label">Ingress class</label>
+              <input class="sm-input pl-in" v-model="lb(entry.p).ingressClass" @input="syncYamlFromForm" placeholder="nginx" />
+              <label class="pl-label">TLS secret</label>
+              <input class="sm-input pl-in" v-model="lb(entry.p).tlsSecret" @input="syncYamlFromForm" />
             </div>
           </section>
 
@@ -952,6 +1176,82 @@ async function clearOverride() {
   font-weight: 600;
   min-width: 5rem;
   justify-content: center;
+}
+
+/* MetalLB pinned-IP picker */
+.pl-metallb {
+  margin: 0.4rem 0 0;
+  padding: 0.55rem 0.65rem;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+.pl-metallb__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.4rem;
+}
+.pl-metallb__label {
+  font-weight: 600;
+  color: var(--color-text);
+}
+.pl-metallb__err {
+  color: var(--color-danger);
+}
+.pl-metallb__chips,
+.pl-metallb__extra {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.pl-metallb__extra {
+  margin-top: 0.45rem;
+  padding-top: 0.4rem;
+  border-top: 1px dashed var(--color-border);
+  align-items: center;
+}
+.pl-metallb__add {
+  margin-top: 0.5rem;
+}
+.pl-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 14px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  cursor: pointer;
+  user-select: none;
+}
+.pl-chip input[type="checkbox"] {
+  margin: 0;
+}
+.pl-chip__ip {
+  white-space: nowrap;
+}
+.pl-chip:hover {
+  border-color: var(--color-border-strong);
+}
+.pl-chip--on {
+  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+.pl-chip--taken {
+  opacity: 0.72;
+}
+.pl-chip--taken .pl-chip__by {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  margin-left: 0.15rem;
+}
+.pl-chip--extra {
+  border-style: dashed;
 }
 
 .pl-actions {

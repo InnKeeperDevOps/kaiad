@@ -41,6 +41,7 @@ import {
   upsertTenantSettingsRequestSchema,
   agentCommandDispatchResponseSchema,
   platformToAgentMessageSchema,
+  listMetalLBPoolIPsResponseSchema,
   apiCredentialMetadataSchema,
   createApiCredentialRequestSchema,
   createApiCredentialResponseSchema,
@@ -3500,6 +3501,87 @@ export function buildServer(opts: BuildServerOptions = {}) {
     });
     return { entries };
   });
+
+  // Returns the IPs a MetalLB IPAddressPool owns, split into available
+  // vs already-allocated. Powers the "Pinned IP(s)" multi-select on the
+  // service load-balancer editor. Routes through the service's bound
+  // k8s agent (the one with cluster credentials) — falls back to any
+  // connected k8s-runtime agent on the tenant if no binding qualifies.
+  app.get<{ Params: { id: string }; Querystring: { pool?: string } }>(
+    "/api/v1/services/:id/metallb-pool-ips",
+    async (req, reply) => {
+      const session = await resolveSession(authStore, req.headers.authorization);
+      if (!session) {
+        return reply.status(401).send(
+          apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId })
+        );
+      }
+      const pool = String(req.query.pool ?? "").trim();
+      if (!pool) {
+        return reply.status(400).send(
+          apiErrorSchema.parse({ code: "BAD_REQUEST", message: "Missing ?pool query parameter", correlationId: (req as any).correlationId })
+        );
+      }
+      const service = await domainStore.getService(session.tenantId, req.params.id);
+      if (!service) {
+        return reply.status(404).send(
+          apiErrorSchema.parse({ code: "NOT_FOUND", message: "Service not found", correlationId: (req as any).correlationId })
+        );
+      }
+      const connected = new Set(realtimeManager.getConnectedAgentIds());
+      const tenantAgents = await domainStore.listAgents(session.tenantId);
+      const isK8s = (id: string) =>
+        tenantAgents.find((a) => a.id === id)?.runtimeBackend === "kubernetes";
+      const boundCandidate = service.agents.find(
+        (b) => connected.has(b.agentId) && isK8s(b.agentId)
+      )?.agentId;
+      const fallback = tenantAgents.find(
+        (a) => connected.has(a.id) && a.runtimeBackend === "kubernetes"
+      )?.id;
+      const agentId = boundCandidate ?? fallback;
+      if (!agentId) {
+        return reply.status(409).send(
+          apiErrorSchema.parse({ code: "NO_K8S_AGENT", message: "No connected kubernetes-runtime agent available to query MetalLB", correlationId: (req as any).correlationId })
+        );
+      }
+      const commandId = crypto.randomUUID();
+      const command = platformToAgentMessageSchema.parse({
+        type: "list_metallb_pool_ips",
+        commandId,
+        pool
+      });
+      const ackPromise = realtimeManager.awaitCommandResult(commandId, 15_000);
+      try {
+        await realtimeManager.sendCommand(agentId, JSON.stringify(command));
+      } catch (err) {
+        return reply.status(502).send(
+          apiErrorSchema.parse({ code: "DISPATCH_FAILED", message: (err as Error).message, correlationId: (req as any).correlationId })
+        );
+      }
+      let ack;
+      try {
+        ack = await ackPromise;
+      } catch (err) {
+        return reply.status(504).send(
+          apiErrorSchema.parse({ code: "METALLB_TIMEOUT", message: (err as Error).message, correlationId: (req as any).correlationId })
+        );
+      }
+      if (ack.status !== "completed") {
+        return reply.status(502).send(
+          apiErrorSchema.parse({ code: "AGENT_ERROR", message: ack.output || `Agent returned ${ack.status}`, correlationId: (req as any).correlationId })
+        );
+      }
+      let parsed;
+      try {
+        parsed = listMetalLBPoolIPsResponseSchema.parse(JSON.parse(ack.output ?? "{}"));
+      } catch (err) {
+        return reply.status(502).send(
+          apiErrorSchema.parse({ code: "BAD_AGENT_OUTPUT", message: (err as Error).message, correlationId: (req as any).correlationId })
+        );
+      }
+      return { agentId, ...parsed };
+    }
+  );
 
   app.delete<{ Params: { id: string } }>("/api/v1/services/:id", async (req, reply) => {
     const session = await resolveSession(authStore, req.headers.authorization);

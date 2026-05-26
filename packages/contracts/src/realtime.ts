@@ -616,6 +616,41 @@ const teardownServiceCommandSchema = z.object({
   namespace: z.string().default("")
 });
 
+/**
+ * Asks a kubernetes-runtime agent to enumerate the IPs in a MetalLB
+ * IPAddressPool minus the IPs already claimed by LoadBalancer Services
+ * on the cluster. The agent serializes the result as a JSON object in
+ * the command_ack output (see listMetalLBPoolIPsResponseSchema). Used
+ * by the panel to populate the "Pinned IP(s)" multi-select on the
+ * service load-balancer editor.
+ */
+const listMetalLBPoolIPsCommandSchema = z.object({
+  type: z.literal("list_metallb_pool_ips"),
+  commandId: z.string(),
+  /** IPAddressPool name (matches the metallb.universe.tf/address-pool annotation). */
+  pool: z.string().min(1)
+});
+
+/** Shape the agent serializes into `command_ack.output` for list_metallb_pool_ips. */
+export const listMetalLBPoolIPsResponseSchema = z.object({
+  pool: z.string(),
+  /** IPs the pool owns that are NOT currently assigned to a LoadBalancer Service. */
+  available: z.array(z.string()),
+  /** IPs the pool owns that ARE currently assigned, with the service name for context. */
+  taken: z.array(
+    z.object({
+      ip: z.string(),
+      service: z.string().optional(),
+      namespace: z.string().optional()
+    })
+  ),
+  /** Echo of the pool's spec.addresses ranges so the UI can show what
+   *  it's choosing from. */
+  ranges: z.array(z.string()).default([])
+});
+
+export type ListMetalLBPoolIPsResponse = z.infer<typeof listMetalLBPoolIPsResponseSchema>;
+
 /** Uses `z.union` (not `discriminatedUnion`) so variants may apply `.superRefine` (e.g. receive_source_archive url xor path). */
 export const platformToAgentMessageSchema = z.union([
   runStepCommandSchema,
@@ -628,7 +663,8 @@ export const platformToAgentMessageSchema = z.union([
   receiveSourceArchiveCommandSchema,
   runFixPlanCommandSchema,
   redeployServiceCommandSchema,
-  teardownServiceCommandSchema
+  teardownServiceCommandSchema,
+  listMetalLBPoolIPsCommandSchema
 ]);
 
 export type AgentToPlatformMessage = z.infer<typeof agentToPlatformMessageSchema>;

@@ -654,6 +654,22 @@ export const api = {
   listLoadBalancers: () =>
     apiFetch<{ entries: LoadBalancerEntry[] }>("/api/v1/load-balancers"),
 
+  /**
+   * Asks the service's bound k8s agent (or any tenant k8s agent) to
+   * enumerate IPs in a MetalLB IPAddressPool, split into available vs
+   * taken. Powers the Pinned IP(s) multi-select on the service editor.
+   */
+  listMetalLBPoolIPs: (serviceId: string, pool: string) =>
+    apiFetch<{
+      agentId: string;
+      pool: string;
+      available: string[];
+      taken: Array<{ ip: string; service?: string; namespace?: string }>;
+      ranges: string[];
+    }>(
+      `/api/v1/services/${encodeURIComponent(serviceId)}/metallb-pool-ips?pool=${encodeURIComponent(pool)}`
+    ),
+
   // --- Service builds ---
 
   listServiceBuilds: (serviceId: string) =>

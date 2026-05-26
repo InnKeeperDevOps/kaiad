@@ -27,6 +27,10 @@ export interface KaiadFixParams {
   /** Called at each phase boundary so the Incidents UI can render the
    *  live fix timeline (clone → CLI → commit → push, with errors). */
   onProgress?: (event: FixProgressEvent) => void;
+  /** Operator-triggered cancel. When fired, the in-flight child process
+   *  (git or AI CLI) is SIGKILL'd and the runner returns with
+   *  reason: "cancelled". */
+  signal?: AbortSignal;
 }
 
 export type FixProgressEvent = {
@@ -58,6 +62,7 @@ export type KaiadFixReason =
   | "clone_failed"
   | "cli_failed"
   | "push_failed"
+  | "cancelled"
   | "error";
 
 export interface KaiadFixResult {
@@ -95,10 +100,10 @@ function normalizePEM(s: string): string {
 function run(
   bin: string,
   args: string[],
-  opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs: number; uid?: number; gid?: number }
+  opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs: number; uid?: number; gid?: number; signal?: AbortSignal }
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    execFile(
+    const child = execFile(
       bin,
       args,
       {
@@ -115,6 +120,19 @@ function run(
         resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
       }
     );
+    // Operator cancel: SIGKILL the child immediately. The execFile callback
+    // still fires (with err.signal set) so the promise resolves.
+    if (opts.signal) {
+      const onAbort = () => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* child may have already exited */
+        }
+      };
+      if (opts.signal.aborted) onAbort();
+      else opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
   });
 }
 
@@ -135,8 +153,8 @@ function run(
 function runCli(
   bin: string,
   args: string[],
-  opts: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; uid?: number; gid?: number }
-): Promise<{ code: number; stdout: string; stderr: string; signaled?: boolean }> {
+  opts: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; uid?: number; gid?: number; signal?: AbortSignal }
+): Promise<{ code: number; stdout: string; stderr: string; signaled?: boolean; cancelled?: boolean }> {
   return new Promise((resolve) => {
     let realBin = bin;
     let realArgs = args;
@@ -161,6 +179,7 @@ function runCli(
     let stdout = "";
     let stderr = "";
     let signaled = false;
+    let cancelled = false;
     child.stdout.on("data", (d) => {
       stdout += d;
     });
@@ -171,13 +190,25 @@ function runCli(
       signaled = true;
       child.kill("SIGKILL");
     }, opts.timeoutMs);
+    const onAbort = () => {
+      cancelled = true;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already exited */
+      }
+    };
+    if (opts.signal) {
+      if (opts.signal.aborted) onAbort();
+      else opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
     child.on("error", (e) => {
       clearTimeout(timer);
-      resolve({ code: 1, stdout, stderr: stderr + String(e) });
+      resolve({ code: 1, stdout, stderr: stderr + String(e), cancelled });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      resolve({ code: code ?? 1, stdout, stderr, signaled });
+      resolve({ code: code ?? 1, stdout, stderr, signaled, cancelled });
     });
   });
 }
@@ -262,6 +293,12 @@ function looksLikeAuthFailure(s: string): boolean {
 export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
   const timeoutMs = p.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const branch = p.branch || "main";
+  const signal = p.signal;
+  const cancelled = (): KaiadFixResult => ({
+    ok: false,
+    reason: "cancelled",
+    output: "fix cancelled by operator"
+  });
   const scratch = await mkdtemp(join(tmpdir(), "kaiad-fix-"));
   // Clone into a subdir so the SSH key file (and anything else under
   // scratch) doesn't make `git clone .` see a non-empty target.
@@ -294,7 +331,7 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
     opts: Parameters<typeof run>[2]
   ): Promise<{ code: number; stdout: string; stderr: string; output: string }> => {
     const cmd = cmdLine(bin, args);
-    const r = await run(bin, args, opts);
+    const r = await run(bin, args, { ...opts, signal });
     const output = (r.stdout + r.stderr).replace(/\s+$/, "");
     emit({
       step,
@@ -336,9 +373,11 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
       { cwd: repoDir, env, timeoutMs }
     );
     if (clone.code !== 0) {
+      if (signal?.aborted) return cancelled();
       const reason = looksLikeAuthFailure(clone.output) ? "auth" : "clone_failed";
       return { ok: false, reason, output: `git clone failed:\n${clone.output}` };
     }
+    if (signal?.aborted) return cancelled();
 
     for (const [k, v] of [
       ["user.email", "kaiad-bot@kaiad.dev"],
@@ -406,7 +445,7 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
     // bails (claude exits 0 with no diff, or hits a transient error).
     // Resetting between attempts gives it a clean tree each try.
     const retryLimit = Math.max(1, Number(process.env.SM_FIX_RETRY_LIMIT) || 3);
-    let cli: { code: number; stdout: string; stderr: string; signaled?: boolean } | null = null;
+    let cli: { code: number; stdout: string; stderr: string; signaled?: boolean; cancelled?: boolean } | null = null;
     let cliOut = "";
     let attempt = 0;
     let succeeded = false;
@@ -425,11 +464,13 @@ export async function runKaiadFix(p: KaiadFixParams): Promise<KaiadFixResult> {
         env: cliEnv,
         timeoutMs,
         uid: cliUid,
-        gid: cliGid
+        gid: cliGid,
+        signal
       });
       if (runningAsRoot) {
         await run("chown", ["-R", "0:0", repoDir], { timeoutMs: 30000 });
       }
+      if (cli.cancelled || signal?.aborted) return cancelled();
       cliOut = cli.stdout + cli.stderr;
       p.logger?.info?.({
         phase: "cli_done",

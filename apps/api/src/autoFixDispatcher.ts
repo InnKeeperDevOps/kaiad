@@ -24,6 +24,10 @@ export interface KaiadFixStart {
   sshKeyValue: string | null;
   executor: "claude" | "cursor";
   contextLines: string[];
+  /** "auto" = log-error → autoFixDispatcher path; "manual" = operator
+   *  clicked Run-fix in the panel. Surfaced on the in-flight list so
+   *  the UI can label and the cancel route can decide what to do next. */
+  triggeredBy?: "auto" | "manual";
 }
 
 export interface AutoFixDispatcherDeps {

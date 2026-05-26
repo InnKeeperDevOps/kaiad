@@ -480,6 +480,37 @@ export const api = {
     apiFetch<{ ok: boolean; groupId: string }>(`/api/v1/incidents/${encodeURIComponent(id)}/run-fix`, {
       method: "POST"
     }),
+
+  /** Lists autonomous fixes currently running inside the kaiad process
+   *  (scoped to the caller's tenant). Returns elapsed ms per entry so
+   *  the UI can show "running for 2m 14s". */
+  listInFlightAutoFixes: () =>
+    apiFetch<{
+      fixes: Array<{
+        tenantId: string;
+        serviceId: string;
+        serviceName: string;
+        groupId: string;
+        fingerprint: string;
+        incidentId: string | null;
+        executor: "claude" | "cursor";
+        startedAt: string;
+        triggeredBy: "auto" | "manual";
+        elapsedMs: number;
+      }>;
+    }>("/api/v1/auto-fix/in-flight"),
+
+  /** Cancel the in-flight fix for a service. `action` controls follow-up:
+   *  "retry" re-dispatches as soon as the cancel settles; "delete" removes
+   *  the incident the cancelled fix was attached to; default kills the run
+   *  and leaves the incident at status `cancelled`. */
+  cancelInFlightAutoFix: (serviceId: string, action: "retry" | "delete" | "none" = "none") => {
+    const q = action === "none" ? "" : `?action=${action}`;
+    return apiFetch<{ ok: boolean; action: string; groupId?: string }>(
+      `/api/v1/auto-fix/in-flight/${encodeURIComponent(serviceId)}/cancel${q}`,
+      { method: "POST" }
+    );
+  },
   listAgents: () => apiFetch<{ agents: Agent[] }>("/api/v1/agents"),
   getAgent: (id: string) =>
     apiFetch<Agent>(`/api/v1/agents/${encodeURIComponent(id)}`),

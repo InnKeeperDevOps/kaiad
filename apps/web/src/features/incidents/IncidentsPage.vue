@@ -29,6 +29,7 @@ const fixStatusLabel: Record<string, string> = {
   clone_failed: "Clone failed",
   cli_failed: "AI CLI failed",
   push_failed: "Push failed",
+  cancelled: "Cancelled",
   failed: "Failed"
 };
 const fixStatusColor: Record<string, string> = {
@@ -43,6 +44,7 @@ const fixStatusColor: Record<string, string> = {
   clone_failed: "var(--color-danger)",
   cli_failed: "var(--color-danger)",
   push_failed: "var(--color-danger)",
+  cancelled: "var(--color-warning)",
   failed: "var(--color-danger)"
 };
 function fixGlyph(ev: { step: string; ok?: boolean }): string {
@@ -77,6 +79,48 @@ const expandedId = ref<string | null>(null);
 const auth = useAuth();
 const isViewer = computed(() => auth.value.isViewer);
 
+// Live list of fixes currently running inside kaiad — `null` until the
+// first /api/v1/auto-fix/in-flight response so the panel doesn't flash
+// an empty state on first paint.
+type InFlightFix = Awaited<ReturnType<typeof api.listInFlightAutoFixes>>["fixes"][number];
+const inFlightFixes = ref<InFlightFix[] | null>(null);
+const cancelBusyServiceId = ref<string | null>(null);
+
+async function refreshInFlight() {
+  try {
+    const r = await api.listInFlightAutoFixes();
+    inFlightFixes.value = r.fixes;
+  } catch (e: unknown) {
+    // Don't clobber the incidents-page error banner — silently
+    // ignore; the next tick retries.
+    inFlightFixes.value = [];
+    console.warn("listInFlightAutoFixes failed", e);
+  }
+}
+
+function formatElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const sr = s % 60;
+  return `${m}m ${sr}s`;
+}
+
+async function handleCancelFix(serviceId: string, action: "none" | "retry" | "delete") {
+  if (action === "delete" && !window.confirm("Cancel the in-flight fix AND delete the incident? This cannot be undone.")) {
+    return;
+  }
+  cancelBusyServiceId.value = serviceId;
+  try {
+    await api.cancelInFlightAutoFix(serviceId, action);
+    await Promise.all([refreshInFlight(), refreshIncidents()]);
+  } catch (e: unknown) {
+    error.value = (e as Error).message;
+  } finally {
+    cancelBusyServiceId.value = null;
+  }
+}
+
 // "Advanced" view — surfaces every field the Incident schema carries
 // instead of the curated summary view: full incident IDs and
 // fingerprints, exact ISO timestamps, auto-opened command outputs,
@@ -109,7 +153,18 @@ async function refreshIncidents() {
     error.value = (e as Error).message;
   }
 }
-onMounted(refreshIncidents);
+onMounted(() => {
+  void refreshIncidents();
+  void refreshInFlight();
+});
+
+// Refresh the in-flight panel every 3s so an operator sees a fix
+// appear/disappear without manual reload. Same cadence as the
+// expanded-row poll for incident timeline progress.
+const inFlightTimer = setInterval(() => {
+  void refreshInFlight();
+}, 3000);
+onUnmounted(() => clearInterval(inFlightTimer));
 
 // While an expanded incident's fix is in-flight, poll every 3s so the
 // timeline animates without the user clicking refresh. Stops as soon
@@ -227,6 +282,113 @@ const btnStyle = {
       </button>
     </div>
     <div v-if="error" :style="{ color: 'var(--color-danger)', marginBottom: '0.5rem' }">{{ error }}</div>
+
+    <!-- In-flight autonomous fixes. Always rendered when the array is
+         non-empty; hidden between runs so it doesn't add chrome. -->
+    <section
+      v-if="!isViewer && inFlightFixes && inFlightFixes.length > 0"
+      :style="{
+        border: '1px solid var(--color-border)',
+        borderLeft: '3px solid var(--color-primary)',
+        borderRadius: '8px',
+        padding: '0.65rem 0.85rem',
+        marginBottom: '1rem',
+        background: 'var(--color-surface-muted)'
+      }"
+    >
+      <div :style="{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.45rem' }">
+        <span :style="{ fontWeight: 600, fontSize: '0.85rem' }">Autonomous fixes running</span>
+        <span :style="{ fontSize: '0.78rem', color: 'var(--color-text-secondary)' }">
+          {{ inFlightFixes.length }} in flight
+        </span>
+      </div>
+      <table :style="{ width: '100%', borderCollapse: 'collapse', fontSize: '0.83rem' }">
+        <thead>
+          <tr :style="{ color: 'var(--color-text-secondary)', textAlign: 'left' }">
+            <th :style="{ padding: '0.3rem 0.4rem', fontWeight: 500 }">Service</th>
+            <th :style="{ padding: '0.3rem 0.4rem', fontWeight: 500 }">Incident</th>
+            <th :style="{ padding: '0.3rem 0.4rem', fontWeight: 500 }">Executor</th>
+            <th :style="{ padding: '0.3rem 0.4rem', fontWeight: 500 }">Trigger</th>
+            <th :style="{ padding: '0.3rem 0.4rem', fontWeight: 500 }">Elapsed</th>
+            <th :style="{ padding: '0.3rem 0.4rem', fontWeight: 500, textAlign: 'right' }">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="f in inFlightFixes"
+            :key="f.serviceId"
+            :style="{ borderTop: '1px solid var(--color-border)' }"
+          >
+            <td :style="{ padding: '0.35rem 0.4rem' }">{{ f.serviceName }}</td>
+            <td
+              :style="{
+                padding: '0.35rem 0.4rem',
+                fontFamily: 'monospace',
+                fontSize: '0.78rem',
+                color: 'var(--color-text-secondary)'
+              }"
+              :title="f.incidentId ?? '(no incident bound)'"
+            >
+              {{ f.incidentId ? f.incidentId.slice(0, 8) + "…" : "—" }}
+            </td>
+            <td :style="{ padding: '0.35rem 0.4rem' }">{{ f.executor }}</td>
+            <td :style="{ padding: '0.35rem 0.4rem' }">{{ f.triggeredBy }}</td>
+            <td :style="{ padding: '0.35rem 0.4rem', fontVariantNumeric: 'tabular-nums' }">
+              {{ formatElapsed(f.elapsedMs) }}
+            </td>
+            <td :style="{ padding: '0.35rem 0.4rem', textAlign: 'right' }">
+              <button
+                type="button"
+                :disabled="cancelBusyServiceId === f.serviceId"
+                :style="{
+                  background: 'transparent',
+                  border: '1px solid var(--color-border)',
+                  color: 'var(--color-text)',
+                  borderRadius: '6px',
+                  padding: '0.2rem 0.55rem',
+                  fontSize: '0.78rem',
+                  cursor: cancelBusyServiceId === f.serviceId ? 'wait' : 'pointer'
+                }"
+                @click="handleCancelFix(f.serviceId, 'none')"
+              >Cancel</button>
+              <button
+                type="button"
+                :disabled="cancelBusyServiceId === f.serviceId"
+                :style="{
+                  marginLeft: '0.3rem',
+                  background: 'transparent',
+                  border: '1px solid var(--color-primary)',
+                  color: 'var(--color-primary)',
+                  borderRadius: '6px',
+                  padding: '0.2rem 0.55rem',
+                  fontSize: '0.78rem',
+                  cursor: cancelBusyServiceId === f.serviceId ? 'wait' : 'pointer'
+                }"
+                title="Cancel the in-flight fix and immediately re-dispatch a fresh run"
+                @click="handleCancelFix(f.serviceId, 'retry')"
+              >Cancel &amp; retry</button>
+              <button
+                v-if="f.incidentId"
+                type="button"
+                :disabled="cancelBusyServiceId === f.serviceId"
+                :style="{
+                  marginLeft: '0.3rem',
+                  background: 'transparent',
+                  border: '1px solid var(--color-danger)',
+                  color: 'var(--color-danger)',
+                  borderRadius: '6px',
+                  padding: '0.2rem 0.55rem',
+                  fontSize: '0.78rem',
+                  cursor: cancelBusyServiceId === f.serviceId ? 'wait' : 'pointer'
+                }"
+                title="Cancel the in-flight fix and delete the incident"
+                @click="handleCancelFix(f.serviceId, 'delete')"
+              >Cancel &amp; delete</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
 
     <p v-if="incidents.length === 0" :style="{ color: 'var(--color-text-secondary)' }">
       No incidents recorded yet.

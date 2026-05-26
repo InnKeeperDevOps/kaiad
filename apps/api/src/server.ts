@@ -533,7 +533,23 @@ export function buildServer(opts: BuildServerOptions = {}) {
    * of fix outcome (a stuck "fixing" lock would starve future incidents
    * for that service until process restart).
    */
-  const fixInFlightByService = new Set<string>();
+  type FixInFlightMeta = {
+    tenantId: string;
+    serviceId: string;
+    serviceName: string;
+    groupId: string;
+    fingerprint: string;
+    incidentId: string | null;
+    executor: "claude" | "cursor";
+    startedAt: string;
+    triggeredBy: "auto" | "manual";
+    abort: AbortController;
+  };
+  /** `null` value = lock acquired before startKaiadFix populates the
+   *  full meta (the synchronous acquire window that prevents racing
+   *  concurrent app_log_error handlers). startKaiadFix overwrites with
+   *  the full FixInFlightMeta as soon as the AbortController exists. */
+  const fixInFlightByService = new Map<string, FixInFlightMeta | null>();
   const fixServiceKey = (tenantId: string, serviceId: string) => `${tenantId}:${serviceId}`;
   const app = Fastify();
   app.register(cors);
@@ -593,6 +609,21 @@ export function buildServer(opts: BuildServerOptions = {}) {
       } catch (e) {
         fixLog({ event: "fix_progress.lookup_failed", err: String(e) });
       }
+      // Promote the placeholder lock to a full in-flight entry now that
+      // we have an AbortController and (best-effort) the incident id.
+      const abort = new AbortController();
+      fixInFlightByService.set(lockKey, {
+        tenantId: a.tenantId,
+        serviceId: a.service.id,
+        serviceName: a.service.name,
+        groupId: a.group.id,
+        fingerprint: a.group.fingerprint,
+        incidentId,
+        executor: a.executor,
+        startedAt: new Date().toISOString(),
+        triggeredBy: a.triggeredBy ?? "auto",
+        abort
+      });
       fixLog({
         event: "kaiad_fix.start",
         groupId: a.group.id,
@@ -627,6 +658,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
           executor: a.executor,
           errorMessage: a.group.sampleMessage,
           contextLines: a.contextLines,
+          signal: abort.signal,
           logger: {
             info: (...m: unknown[]) => fixLog({ event: "kaiad_fix.info", m }),
             warn: (...m: unknown[]) => fixLog({ event: "kaiad_fix.warn", m })
@@ -665,6 +697,8 @@ export function buildServer(opts: BuildServerOptions = {}) {
         ? "cli_failed"
         : result.reason === "push_failed"
         ? "push_failed"
+        : result.reason === "cancelled"
+        ? "cancelled"
         : "failed";
       try {
         if (result.ok) {
@@ -1651,7 +1685,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
                     serviceId: service?.id
                   });
                 } else {
-                  fixInFlightByService.add(svcKey);
+                  fixInFlightByService.set(svcKey, null);
                   weAcquired = true;
                 }
               }
@@ -2958,7 +2992,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
         apiErrorSchema.parse({ code: "INTERNAL", message: "Error group missing after upsert", correlationId: (req as any).correlationId })
       );
     }
-    fixInFlightByService.add(lockKey);
+    fixInFlightByService.set(lockKey, null);
     errorGroups.setStatus(group.id, "fixing");
     startKaiadFix({
       commandId: `cmd-manual-${crypto.randomUUID()}`,
@@ -2968,9 +3002,162 @@ export function buildServer(opts: BuildServerOptions = {}) {
       sshKeyType: keyMaterial.type,
       sshKeyValue: keyMaterial.privateKey ?? keyMaterial.localPath ?? null,
       executor: (service.fixExecutor as "claude" | "cursor") ?? "claude",
-      contextLines: errorGroups.contextLinesFor(group.id)
+      contextLines: errorGroups.contextLinesFor(group.id),
+      triggeredBy: "manual"
     });
     return { ok: true, groupId: group.id };
+  });
+
+  // List autonomous fixes currently running inside this kaiad process.
+  // Tenant-scoped (an operator only sees their own services' fixes).
+  // Entries with a `null` value in the map are momentary acquire-window
+  // placeholders that haven't yet entered startKaiadFix; we hide them
+  // because there's no metadata to render and no AbortController to
+  // cancel against — the next request will see the full entry.
+  app.get("/api/v1/auto-fix/in-flight", async (req, reply) => {
+    const s = await authorize(req as any, reply as any, { perm: "incidents:read" });
+    if (!s) return;
+    const out: Array<{
+      tenantId: string;
+      serviceId: string;
+      serviceName: string;
+      groupId: string;
+      fingerprint: string;
+      incidentId: string | null;
+      executor: "claude" | "cursor";
+      startedAt: string;
+      triggeredBy: "auto" | "manual";
+      elapsedMs: number;
+    }> = [];
+    const now = Date.now();
+    for (const meta of fixInFlightByService.values()) {
+      if (!meta || meta.tenantId !== s.tenantId) continue;
+      out.push({
+        tenantId: meta.tenantId,
+        serviceId: meta.serviceId,
+        serviceName: meta.serviceName,
+        groupId: meta.groupId,
+        fingerprint: meta.fingerprint,
+        incidentId: meta.incidentId,
+        executor: meta.executor,
+        startedAt: meta.startedAt,
+        triggeredBy: meta.triggeredBy,
+        elapsedMs: now - new Date(meta.startedAt).getTime()
+      });
+    }
+    return { fixes: out };
+  });
+
+  // Cancel an in-flight fix. ?action=retry re-dispatches a fresh run as
+  // soon as the SIGKILL'd run releases the lock; ?action=delete removes
+  // the underlying incident after the cancel settles. Default ("none")
+  // just kills the in-flight run and leaves the incident at status
+  // `cancelled` for the operator to act on.
+  app.post<{
+    Params: { serviceId: string };
+    Querystring: { action?: "retry" | "delete" };
+  }>("/api/v1/auto-fix/in-flight/:serviceId/cancel", async (req, reply) => {
+    const s = await authorize(req as any, reply as any, { perm: "incidents:write" });
+    if (!s) return;
+    const action = req.query.action ?? "none";
+    const lockKey = fixServiceKey(s.tenantId, req.params.serviceId);
+    const meta = fixInFlightByService.get(lockKey);
+    if (!meta) {
+      return reply.status(404).send(
+        apiErrorSchema.parse({ code: "NOT_FOUND", message: "No in-flight fix for this service", correlationId: (req as any).correlationId })
+      );
+    }
+    if (meta.tenantId !== s.tenantId) {
+      return reply.status(403).send(
+        apiErrorSchema.parse({ code: "FORBIDDEN", message: "Fix belongs to another tenant", correlationId: (req as any).correlationId })
+      );
+    }
+    const incidentIdSnapshot = meta.incidentId;
+    const serviceIdSnapshot = meta.serviceId;
+    // Pull the trigger. The runner's SIGKILL'd child resolves with
+    // reason:"cancelled"; the finally block in startKaiadFix releases
+    // the lock and writes the terminal status.
+    meta.abort.abort();
+    // Wait briefly for the runner's cleanup to land (lock released +
+    // incident status persisted) so the follow-up retry/delete sees a
+    // clean state. 8s upper bound matches the slowest SIGKILL+chown+rm
+    // path observed; the runner usually settles in <1s.
+    const deadline = Date.now() + 8000;
+    while (fixInFlightByService.has(lockKey) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (action === "delete" && incidentIdSnapshot) {
+      try {
+        await domainStore.deleteIncident(s.tenantId, incidentIdSnapshot);
+      } catch (e) {
+        fixLog({ event: "cancel.delete_failed", err: String(e), incidentId: incidentIdSnapshot });
+      }
+    }
+    if (action === "retry") {
+      // Re-dispatch via the same manual-fix path the panel's "Run fix"
+      // button uses. If the lock hasn't released yet (rare — runner
+      // finalize stuck) the retry returns 409 and the operator can
+      // click again once the cancel finishes.
+      if (fixInFlightByService.has(lockKey)) {
+        return reply.status(409).send(
+          apiErrorSchema.parse({ code: "STILL_CANCELLING", message: "Cancel hasn't settled yet — retry in a moment", correlationId: (req as any).correlationId })
+        );
+      }
+      if (!incidentIdSnapshot) {
+        return reply.status(400).send(
+          apiErrorSchema.parse({ code: "NO_INCIDENT", message: "Cancelled fix had no incident to retry", correlationId: (req as any).correlationId })
+        );
+      }
+      const service = await domainStore.getService(s.tenantId, serviceIdSnapshot);
+      const inc = await domainStore.getIncident(s.tenantId, incidentIdSnapshot);
+      if (!service || !inc) {
+        return reply.status(404).send(
+          apiErrorSchema.parse({ code: "NOT_FOUND", message: "Incident or service vanished mid-cancel", correlationId: (req as any).correlationId })
+        );
+      }
+      if (!service.gitRepoUrl || !service.sshKeyId) {
+        return reply.status(400).send(
+          apiErrorSchema.parse({ code: "BAD_REQUEST", message: "Service is missing gitRepoUrl or sshKeyId", correlationId: (req as any).correlationId })
+        );
+      }
+      const keyMaterial = await domainStore.getSshKeyMaterial(s.tenantId, service.sshKeyId);
+      if (!keyMaterial) {
+        return reply.status(400).send(
+          apiErrorSchema.parse({ code: "BAD_REQUEST", message: "SSH key material not found", correlationId: (req as any).correlationId })
+        );
+      }
+      const ctx = inc.fullLog ? inc.fullLog.split("\n").filter((l) => l !== "") : [];
+      const upsert = errorGroups.upsert({
+        tenantId: s.tenantId,
+        agentId: "manual",
+        serviceId: service.id,
+        message: inc.message ?? "(retry)",
+        contextLines: ctx,
+        ts: new Date().toISOString()
+      });
+      errorGroups.setStatus(upsert.group.id, "open");
+      const group = errorGroups.get(upsert.group.id);
+      if (!group) {
+        return reply.status(500).send(
+          apiErrorSchema.parse({ code: "INTERNAL", message: "Error group missing after upsert", correlationId: (req as any).correlationId })
+        );
+      }
+      fixInFlightByService.set(lockKey, null);
+      errorGroups.setStatus(group.id, "fixing");
+      startKaiadFix({
+        commandId: `cmd-retry-${crypto.randomUUID()}`,
+        tenantId: s.tenantId,
+        service,
+        group,
+        sshKeyType: keyMaterial.type,
+        sshKeyValue: keyMaterial.privateKey ?? keyMaterial.localPath ?? null,
+        executor: (service.fixExecutor as "claude" | "cursor") ?? "claude",
+        contextLines: errorGroups.contextLinesFor(group.id),
+        triggeredBy: "manual"
+      });
+      return { ok: true, action: "retry", groupId: group.id };
+    }
+    return { ok: true, action };
   });
 
   // --- Registry retention (admin) ---

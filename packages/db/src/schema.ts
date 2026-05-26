@@ -225,6 +225,14 @@ alter table monitored_services add column if not exists security_run_as_user big
 alter table monitored_services add column if not exists security_run_as_group bigint;
 alter table monitored_services add column if not exists security_fs_group bigint;
 
+-- When true, the build poller skips this service: a new commit to
+-- the watched branch does NOT auto-enqueue a build, so it doesn't
+-- auto-deploy either. Manual builds (POST /api/v1/services/:id/builds)
+-- still work; reconcile still replays the last successful build on
+-- agent reconnect. Defaults to false so existing services keep their
+-- auto-build behaviour unchanged.
+alter table monitored_services add column if not exists locked boolean not null default false;
+
 -- Repo-scoped kaiad.yaml override (the default scope). Keyed by
 -- (tenant, git_repo_url, branch) so all services from that repo+branch
 -- pick it up. A service's own pipeline_override (above) overrides this.

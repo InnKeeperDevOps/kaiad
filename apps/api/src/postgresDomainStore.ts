@@ -143,7 +143,8 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
         pipelineName: data.pipelineName,
         fixExecutor: data.fixExecutor,
         healthcheck: data.healthcheck ?? null,
-        securityContext: data.securityContext ?? null
+        securityContext: data.securityContext ?? null,
+        locked: data.locked === true
       });
       if (data.agentIds && data.agentIds.length > 0) {
         await queries.setAgentBindings(queryFn, tenantId, row.id, data.agentIds);
@@ -190,6 +191,7 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
         push("security_run_as_group", sc?.runAsGroup ?? null);
         push("security_fs_group", sc?.fsGroup ?? null);
       }
+      if (patch.locked !== undefined) push("locked", patch.locked);
       if (assignments.length > 0) {
         values.push(id, tenantId);
         const { rows } = await queryFn(

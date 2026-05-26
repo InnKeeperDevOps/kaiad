@@ -143,6 +143,7 @@ const form = ref({
   composePath: "",
   pipelineName: "",
   fixExecutor: "claude" as "claude" | "cursor",
+  locked: false,
   agentIds: [] as string[],
   healthcheckPath: "",
   healthcheckPort: "",
@@ -173,6 +174,7 @@ function startEdit() {
     composePath: svc.composePath ?? "",
     pipelineName: svc.pipelineName ?? "",
     fixExecutor: svc.fixExecutor === "cursor" ? "cursor" : "claude",
+    locked: svc.locked === true,
     agentIds: (svc.agents ?? []).map((b) => b.agentId),
     healthcheckPath: hc?.path ?? "",
     healthcheckPort: hc?.port != null ? String(hc.port) : "",
@@ -260,6 +262,7 @@ async function saveEdit() {
       // empty string → null clears (revert to single-pipeline default)
       pipelineName: pipelineTrim || null,
       fixExecutor: form.value.fixExecutor,
+      locked: form.value.locked,
       agentIds: form.value.agentIds,
       healthcheck: buildHealthcheckPatch(),
       securityContext: buildSecurityContextPatch()
@@ -428,6 +431,11 @@ function sshKeyName(id: string | null | undefined): string {
             <Badge :variant="totalContainers > 0 ? 'success' : 'muted'">
               {{ totalContainers }} container{{ totalContainers === 1 ? "" : "s" }} running
             </Badge>
+            <Badge
+              v-if="service.locked"
+              variant="warning"
+              :title="'New commits on ' + service.branch + ' do NOT auto-build this service. Use Start build to release.'"
+            >🔒 manual-only</Badge>
           </div>
         </div>
         <div v-if="canManage" :style="{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }">
@@ -525,6 +533,38 @@ function sshKeyName(id: string | null | undefined): string {
               <option value="claude">Claude</option>
               <option value="cursor">Cursor</option>
             </select>
+          </label>
+
+          <!-- Lock = "manual builds only". The build poller skips
+               locked services, so a `git push` to the watched branch
+               doesn't auto-enqueue a build. The Start build button
+               still works; reconcile still replays the last
+               successful build on agent reconnect. -->
+          <label
+            :style="{
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: '0.55rem',
+              fontSize: '0.85rem',
+              padding: '0.45rem 0.6rem',
+              border: '1px solid var(--color-border)',
+              borderRadius: '6px',
+              background: 'var(--color-surface)'
+            }"
+          >
+            <input
+              type="checkbox"
+              v-model="form.locked"
+              :style="{ marginTop: '0.15rem' }"
+            />
+            <span>
+              <strong>Lock from auto-build</strong>
+              <div :style="{ color: muted, fontSize: '0.78rem', marginTop: '0.1rem' }">
+                When on, the build poller ignores new commits on
+                <code>{{ form.branch }}</code> for this service.
+                Builds only fire when you click <strong>Start build</strong>.
+              </div>
+            </span>
           </label>
           <fieldset
             :style="{

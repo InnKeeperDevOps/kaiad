@@ -100,6 +100,7 @@ export type DomainStore = {
       fixExecutor?: "claude" | "cursor";
       healthcheck?: MonitoredService["healthcheck"] | null;
       securityContext?: MonitoredService["securityContext"] | null;
+      locked?: boolean;
     }
   ): Promise<MonitoredService>;
   updateService(
@@ -124,6 +125,8 @@ export type DomainStore = {
       healthcheck?: MonitoredService["healthcheck"] | null;
       /** null clears every securityContext column; an object replaces it whole. */
       securityContext?: MonitoredService["securityContext"] | null;
+      /** When true, the build poller skips this service. */
+      locked?: boolean;
     }
   ): Promise<MonitoredService | undefined>;
   deleteService(tenantId: string, id: string): Promise<boolean>;
@@ -437,6 +440,7 @@ export function createMemoryDomainStore(): DomainStore {
         fixExecutor: data.fixExecutor ?? "claude",
         healthcheck: data.healthcheck ?? null,
         securityContext: data.securityContext ?? null,
+        locked: data.locked === true,
         agents: []
       };
       services.set(svc.id, svc);
@@ -458,6 +462,7 @@ export function createMemoryDomainStore(): DomainStore {
       if (patch.fixExecutor !== undefined) svc.fixExecutor = patch.fixExecutor;
       if (patch.healthcheck !== undefined) svc.healthcheck = patch.healthcheck;
       if (patch.securityContext !== undefined) svc.securityContext = patch.securityContext;
+      if (patch.locked !== undefined) svc.locked = patch.locked;
       if (patch.agentIds !== undefined) {
         // Replace the full set: drop bindings for this service that aren't in the
         // desired list, then add any missing ones.

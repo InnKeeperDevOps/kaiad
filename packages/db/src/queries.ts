@@ -693,6 +693,15 @@ export interface ServiceRow {
    * column is null — agent renders no securityContext block then.
    */
   securityContext: PodSecurityContextSpec | null;
+  /**
+   * True ⇒ the build poller skips this service. Defaults to false.
+   * The runtime trade-off is intentional: a locked service still
+   * reconciles its last successful build to a reconnecting agent
+   * (so a Pod restart doesn't strand it), but a new commit on its
+   * watched branch will not auto-enqueue a build. The "Start build"
+   * button still works.
+   */
+  locked: boolean;
 }
 
 // Healthcheck defaults — kept in sync with the zod defaults on
@@ -748,7 +757,8 @@ function mapService(r: Record<string, unknown>): ServiceRow {
     pipelineOverride: r.pipeline_override == null ? null : String(r.pipeline_override),
     fixExecutor: r.fix_executor === "cursor" ? "cursor" : "claude",
     healthcheck: mapHealthcheck(r),
-    securityContext: mapSecurityContext(r)
+    securityContext: mapSecurityContext(r),
+    locked: r.locked === true
   };
 }
 
@@ -925,6 +935,7 @@ export async function createService(
     fixExecutor?: string | null;
     healthcheck?: HealthcheckSpec | null;
     securityContext?: PodSecurityContextSpec | null;
+    locked?: boolean;
   },
 ): Promise<ServiceRow> {
   const id = crypto.randomUUID();
@@ -938,9 +949,10 @@ export async function createService(
        healthcheck_initial_delay_seconds, healthcheck_period_seconds,
        healthcheck_timeout_seconds, healthcheck_failure_threshold,
        healthcheck_success_threshold,
-       security_run_as_user, security_run_as_group, security_fs_group
+       security_run_as_user, security_run_as_group, security_fs_group,
+       locked
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
      RETURNING *`,
     [
       id,
@@ -962,7 +974,8 @@ export async function createService(
       hc?.successThreshold ?? null,
       sc?.runAsUser ?? null,
       sc?.runAsGroup ?? null,
-      sc?.fsGroup ?? null
+      sc?.fsGroup ?? null,
+      data.locked === true
     ],
   );
   return mapService(rows[0]);
@@ -1414,9 +1427,16 @@ export async function listAllServicesForPoller(
     pipelineOverride: string | null;
   }>
 > {
+  // Locked services are deliberately excluded: the poller's job is to
+  // auto-enqueue builds on new commits, and `locked = true` means "I
+  // want this service on a manual release cadence, ignore my pushes".
+  // listMissingDeploysForAgent (the reconcile path) does NOT filter on
+  // locked — once a manual build has succeeded, redeploying it to a
+  // reconnecting agent is what the operator wants.
   const { rows } = await query(
     `SELECT id, tenant_id, name, git_repo_url, ssh_key_id, branch, pipeline_name, kind, depends_on, pipeline_override
-       FROM monitored_services`,
+       FROM monitored_services
+      WHERE locked = false`,
     []
   );
   return rows.map((r) => ({

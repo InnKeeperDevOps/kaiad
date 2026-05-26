@@ -302,6 +302,12 @@ export type MonitoredService = {
   healthcheck?: Healthcheck | null;
   /** Null/absent = no pod securityContext block rendered. */
   securityContext?: PodSecurityContext | null;
+  /**
+   * When true, the build poller skips this service: new commits to
+   * the watched branch don't auto-enqueue a build, so they don't
+   * auto-deploy either. The "Start build" button still works.
+   */
+  locked?: boolean;
 };
 
 /** Matches server OAuth provider registration (POST /api/v1/settings/oauth-providers). */
@@ -573,6 +579,7 @@ export const api = {
     fixExecutor?: "claude" | "cursor";
     healthcheck?: Healthcheck | null;
     securityContext?: PodSecurityContext | null;
+    locked?: boolean;
   }) =>
     apiFetch<MonitoredService>("/api/v1/services", {
       method: "POST",
@@ -598,6 +605,8 @@ export const api = {
     healthcheck?: Healthcheck | null;
     /** null clears every securityContext column; an object replaces it whole. */
     securityContext?: PodSecurityContext | null;
+    /** Toggles the poller's auto-build behaviour for this service. */
+    locked?: boolean;
   }) =>
     apiFetch<MonitoredService>(`/api/v1/services/${encodeURIComponent(id)}`, {
       method: "PATCH",

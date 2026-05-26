@@ -259,6 +259,16 @@ export const monitoredServiceSchema = z.object({
    * the data volume lives on an NFS export with `root_squash` on.
    */
   securityContext: podSecurityContextSchema.nullable().optional(),
+  /**
+   * When true, the build poller skips this service — new commits to
+   * the watched branch do NOT auto-enqueue a build, so they don't
+   * auto-deploy either. Manual builds (the "Start build" button /
+   * POST /api/v1/services/:id/builds) still work; reconcile against
+   * an existing successful build still re-deploys on agent reconnect.
+   * Use this for services you want to roll on a release cadence
+   * separate from "every push to main".
+   */
+  locked: z.boolean().default(false),
   /** Agents currently bound to this service. Empty until at least one is attached. */
   agents: z.array(agentBindingSchema).default([])
 });
@@ -275,7 +285,8 @@ export const createMonitoredServiceRequestSchema = z.object({
   pipelineName: z.string().min(1).nullable().optional(),
   fixExecutor: z.enum(["claude", "cursor"]).optional(),
   healthcheck: healthcheckSchema.nullable().optional(),
-  securityContext: podSecurityContextSchema.nullable().optional()
+  securityContext: podSecurityContextSchema.nullable().optional(),
+  locked: z.boolean().optional()
 });
 
 export const updateMonitoredServiceRequestSchema = z.object({
@@ -294,7 +305,8 @@ export const updateMonitoredServiceRequestSchema = z.object({
   pipelineName: z.string().min(1).nullable().optional(),
   fixExecutor: z.enum(["claude", "cursor"]).optional(),
   healthcheck: healthcheckSchema.nullable().optional(),
-  securityContext: podSecurityContextSchema.nullable().optional()
+  securityContext: podSecurityContextSchema.nullable().optional(),
+  locked: z.boolean().optional()
 });
 
 export const listMonitoredServicesResponseSchema = z.object({

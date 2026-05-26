@@ -168,6 +168,20 @@ const linkRowStyle = {
             <a :href="`#service/${encodeURIComponent(svc.id)}`" :style="linkRowStyle">
               <Box :size="14" /> {{ svc.name }}
             </a>
+            <span
+              v-if="svc.locked"
+              :title="'Manual builds only — poller ignores new commits on ' + svc.branch"
+              :style="{
+                marginLeft: '0.4rem',
+                fontSize: '0.7rem',
+                padding: '0.05rem 0.4rem',
+                borderRadius: '999px',
+                background: 'color-mix(in srgb, var(--color-warning) 18%, var(--color-surface))',
+                color: 'var(--color-warning)',
+                border: '1px solid var(--color-warning)',
+                verticalAlign: 'middle'
+              }"
+            >🔒 locked</span>
           </td>
           <td :style="{ padding: '0.5rem', fontSize: '0.85rem' }">{{ svc.gitRepoUrl }}</td>
           <td :style="{ padding: '0.5rem', fontSize: '0.85rem' }">{{ svc.branch }}</td>

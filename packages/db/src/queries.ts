@@ -370,12 +370,16 @@ export async function recordFixProgress(
   }
   if (sets.length === 0) return;
   if (patch.incidentId) {
-    // Pinned-id path: every call from one fix-run targets the same row.
+    // Pinned-id path: every call from one fix-run targets the same
+    // row. Match by id + tenant_id only — manual Run-fix synthesizes a
+    // fresh error group whose fingerprint can differ from the original
+    // incident's stored fingerprint, so requiring fingerprint here
+    // silently dropped every event from manual runs.
     values.push(patch.incidentId);
     await query(
       `UPDATE incidents SET ${sets.join(", ")}
          WHERE id = $${values.length}
-           AND tenant_id = $1 AND service_id = $2 AND fingerprint = $3`,
+           AND tenant_id = $1`,
       values,
     );
     return;

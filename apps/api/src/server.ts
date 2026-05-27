@@ -5514,6 +5514,18 @@ if (process.env.NODE_ENV !== "test" && !process.env.VITEST) {
   process.on("SIGINT", () => {
     void shutdownFn();
   });
+  // Last-resort guardrail: log unhandled rejections instead of crashing
+  // the whole kaiad process. A transient redis hiccup (e.g. disk-full
+  // MISCONF) once cascaded a single dangling awaitCommandResult timeout
+  // into a hard exit that took the panel offline for hours. Individual
+  // call sites still own error handling; this just prevents one stray
+  // rejection from tearing the process down.
+  process.on("unhandledRejection", (reason) => {
+    console.error("[unhandledRejection]", reason instanceof Error ? reason.stack ?? reason.message : reason);
+  });
+  process.on("uncaughtException", (err) => {
+    console.error("[uncaughtException]", err.stack ?? err.message);
+  });
   })().catch((err) => {
     console.error(err);
     process.exit(1);

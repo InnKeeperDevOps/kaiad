@@ -235,15 +235,27 @@ export class RealtimeManager {
   /**
    * Wait for a terminal `command_ack` for `commandId`. Resolves with the ack
    * (status + output) or rejects on timeout. Install before `sendCommand`.
+   *
+   * The returned promise pre-attaches a no-op `.catch` so a caller that
+   * bails before awaiting (e.g. `sendCommand` throws → route returns 502
+   * → no one is left to consume the eventual timeout rejection) cannot
+   * blow up the kaiad process with an unhandledRejection. Callers that
+   * DO `await` still see the rejection — attaching a handler to a
+   * settled promise yields a separate chain; the original promise is
+   * still rejected for `await`.
    */
   awaitCommandResult(commandId: string, timeoutMs: number): Promise<CommandAck> {
-    return new Promise((resolve, reject) => {
+    const p = new Promise<CommandAck>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.awaiters.delete(commandId);
         reject(new Error(`Timed out waiting for command_ack on ${commandId} after ${timeoutMs}ms`));
       }, timeoutMs);
       this.awaiters.set(commandId, { resolve, timer });
     });
+    p.catch(() => {
+      /* defang unhandledRejection — callers still see this via their own await */
+    });
+    return p;
   }
 
   async sendCommand(agentId: string, commandJson: string): Promise<DispatchResult> {

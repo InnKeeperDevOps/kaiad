@@ -12,6 +12,11 @@ import { api } from "../../lib/api.js";
 import { parsePipelineYaml, yamlParse, yamlStringify } from "@sm/contracts";
 import Card from "../../components/Card.vue";
 import Button from "../../components/Button.vue";
+import {
+  availableVariablesFor,
+  imageSuggestions,
+  type PipelineVariable
+} from "./pipelineVariables.js";
 
 const props = defineProps<{ serviceId: string; serviceName: string }>();
 
@@ -153,6 +158,46 @@ function syncYamlFromForm() {
 watch(tab, (t) => {
   if (t === "form") loadFormFromYaml();
 });
+
+// Union of every pipeline's `dependsOn` — both real entries and
+// in-progress rows the user just added — so the variables panel and
+// datalists react as soon as the user starts typing a dep name.
+const allDeps = computed<string[]>(() => {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const visit = (p: AnyObj | undefined) => {
+    const deps = p && Array.isArray(p.dependsOn) ? (p.dependsOn as unknown[]) : [];
+    for (const d of deps) {
+      const s = String(d ?? "").trim();
+      if (!s || seen.has(s)) continue;
+      seen.add(s);
+      out.push(s);
+    }
+  };
+  const d = doc.value;
+  if (d && d.services && typeof d.services === "object") {
+    for (const p of Object.values(d.services as Record<string, AnyObj>)) visit(p);
+  } else {
+    visit(d);
+  }
+  return out;
+});
+const availableVars = computed<PipelineVariable[]>(() => availableVariablesFor(allDeps.value));
+const imageOptions = computed<string[]>(() => imageSuggestions(allDeps.value));
+const varsOpen = ref(false);
+const varsCopied = ref<string | null>(null);
+let varsCopyTimer: ReturnType<typeof setTimeout> | undefined;
+function copyVar(name: string) {
+  const text = `{${name}}`;
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    void navigator.clipboard.writeText(text);
+  }
+  if (varsCopyTimer) clearTimeout(varsCopyTimer);
+  varsCopied.value = name;
+  varsCopyTimer = setTimeout(() => {
+    varsCopied.value = null;
+  }, 1200);
+}
 
 // Multi-service doc has `services: {name:{...}}`; single doc is the
 // pipeline itself. Normalise to a list the form edits in place.
@@ -547,6 +592,77 @@ async function clearOverride() {
           </span>
         </div>
       </fieldset>
+      <!-- Available variables reference. Lists every {var} the build
+           worker will substitute before each build. The list reacts
+           to `dependsOn` so per-dep variables appear as soon as the
+           user adds a dep. Click a chip to copy `{var}` to clipboard
+           — handy for pasting into the raw YAML or a form value. -->
+      <details class="pl-vars" :open="varsOpen" @toggle="varsOpen = ($event.target as HTMLDetailsElement).open">
+        <summary class="pl-vars__head">
+          <span class="pl-vars__title">Available variables</span>
+          <span class="pl-vars__count">
+            {{ availableVars.length }}
+            <template v-if="allDeps.length">
+              · {{ allDeps.length }} dep{{ allDeps.length === 1 ? '' : 's' }}
+            </template>
+          </span>
+          <span class="pl-hint pl-vars__hint">
+            click a chip to copy <code>{'{var}'}</code> · use anywhere strings appear in kaiad.yaml
+          </span>
+        </summary>
+        <div class="pl-vars__body">
+          <div class="pl-vars__group">
+            <h5 class="pl-vars__group-title">System <span class="pl-hint">always available</span></h5>
+            <ul class="pl-vars__list">
+              <li v-for="v in availableVars.filter((x) => x.category === 'system')" :key="v.name" class="pl-vars__item">
+                <button
+                  type="button"
+                  class="pl-vars__chip"
+                  :class="{ 'pl-vars__chip--copied': varsCopied === v.name }"
+                  @click="copyVar(v.name)"
+                  :title="`Copy {${v.name}}`"
+                >{{ '{' + v.name + '}' }}</button>
+                <span class="pl-vars__desc">{{ v.description }}</span>
+                <code class="pl-vars__sample">{{ v.sample }}</code>
+              </li>
+            </ul>
+          </div>
+          <div v-if="allDeps.length" class="pl-vars__group">
+            <h5 class="pl-vars__group-title">
+              Per-dependency
+              <span class="pl-hint">from <code>dependsOn:</code> — {{ allDeps.join(', ') }}</span>
+            </h5>
+            <ul class="pl-vars__list">
+              <li v-for="v in availableVars.filter((x) => x.category === 'dep')" :key="v.name" class="pl-vars__item">
+                <button
+                  type="button"
+                  class="pl-vars__chip"
+                  :class="{ 'pl-vars__chip--copied': varsCopied === v.name }"
+                  @click="copyVar(v.name)"
+                  :title="`Copy {${v.name}}`"
+                >{{ '{' + v.name + '}' }}</button>
+                <span class="pl-vars__desc">{{ v.description }}</span>
+                <code class="pl-vars__sample">{{ v.sample }}</code>
+              </li>
+            </ul>
+          </div>
+          <p v-else class="pl-hint pl-vars__empty">
+            Add an entry under <code>dependsOn:</code> (Deployment section) to expose this service's
+            <code>_version</code> / <code>_image_ref</code> variables.
+          </p>
+        </div>
+      </details>
+
+      <!-- Shared autocomplete sources for the form inputs below.
+           datalist gives a native dropdown when the input is focused
+           or partially typed — no extra deps. -->
+      <datalist id="kaiad-vars">
+        <option v-for="v in availableVars" :key="'dl-v-' + v.name" :value="'{' + v.name + '}'">{{ v.description }}</option>
+      </datalist>
+      <datalist id="kaiad-images">
+        <option v-for="img in imageOptions" :key="'dl-i-' + img" :value="img" />
+      </datalist>
+
       <div class="pl-tabs" role="tablist">
         <button
           type="button"
@@ -750,7 +866,7 @@ async function clearOverride() {
             <div v-for="k in envKeys(entry.p)" :key="'e-' + k" class="pl-row">
               <input class="sm-input pl-in" :value="k" readonly />
               <span class="pl-eq">=</span>
-              <input class="sm-input pl-in" v-model="envObj(entry.p)[k]" @input="syncYamlFromForm" />
+              <input class="sm-input pl-in" list="kaiad-vars" v-model="envObj(entry.p)[k]" @input="syncYamlFromForm" />
               <Button variant="ghost" size="sm" @click="removeEnvKey(entry.p, k)">✕</Button>
             </div>
             <div class="pl-row">
@@ -813,7 +929,7 @@ async function clearOverride() {
             </h4>
             <div class="pl-row">
               <label class="pl-label">Image</label>
-              <input class="sm-input pl-in" :value="ensure(entry.p,'runtime',{}).image" @input="ensure(entry.p,'runtime',{}).image = ($event.target as HTMLInputElement).value; syncYamlFromForm()" placeholder="nginx:alpine" />
+              <input class="sm-input pl-in" list="kaiad-images" :value="ensure(entry.p,'runtime',{}).image" @input="ensure(entry.p,'runtime',{}).image = ($event.target as HTMLInputElement).value; syncYamlFromForm()" placeholder="nginx:alpine" />
             </div>
 
             <!-- Entrypoint (optional). When set, it becomes the image's
@@ -826,7 +942,7 @@ async function clearOverride() {
             </p>
             <div v-for="(e, i) in strArr(entry.p, 'runtime', 'entrypoint')" :key="'e'+i" class="pl-row">
               <span class="pl-hint">entrypoint[{{ i }}]</span>
-              <input class="sm-input pl-in" :value="e" @input="setStr(strArr(entry.p,'runtime','entrypoint'), i, $event)" placeholder="/usr/bin/python3" />
+              <input class="sm-input pl-in" list="kaiad-vars" :value="e" @input="setStr(strArr(entry.p,'runtime','entrypoint'), i, $event)" placeholder="/usr/bin/python3" />
               <Button variant="ghost" size="sm" @click="strArr(entry.p,'runtime','entrypoint').splice(i,1); syncYamlFromForm()">✕</Button>
             </div>
             <Button variant="secondary" size="sm" @click="strArr(entry.p,'runtime','entrypoint').push(''); syncYamlFromForm()">+ Entrypoint arg</Button>
@@ -836,7 +952,7 @@ async function clearOverride() {
             </p>
             <div v-for="(c, i) in strArr(entry.p, 'runtime', 'command')" :key="'c'+i" class="pl-row">
               <span class="pl-hint">argv[{{ i }}]</span>
-              <input class="sm-input pl-in" :value="c" @input="setStr(strArr(entry.p,'runtime','command'), i, $event)" placeholder="/start.sh" />
+              <input class="sm-input pl-in" list="kaiad-vars" :value="c" @input="setStr(strArr(entry.p,'runtime','command'), i, $event)" placeholder="/start.sh" />
               <Button variant="ghost" size="sm" @click="strArr(entry.p,'runtime','command').splice(i,1); syncYamlFromForm()">✕</Button>
             </div>
             <Button variant="secondary" size="sm" @click="strArr(entry.p,'runtime','command').push(''); syncYamlFromForm()">+ Command arg</Button>
@@ -869,11 +985,11 @@ async function clearOverride() {
             <h4 class="pl-section__title">Build <span class="pl-hint">repo build step</span></h4>
             <div class="pl-row">
               <label class="pl-label">Build image</label>
-              <input class="sm-input pl-in" :value="ensure(entry.p,'build',{}).image" @input="ensure(entry.p,'build',{}).image = ($event.target as HTMLInputElement).value; syncYamlFromForm()" placeholder="maven:3.9-eclipse-temurin-17" />
+              <input class="sm-input pl-in" list="kaiad-images" :value="ensure(entry.p,'build',{}).image" @input="ensure(entry.p,'build',{}).image = ($event.target as HTMLInputElement).value; syncYamlFromForm()" placeholder="maven:3.9-eclipse-temurin-17" />
             </div>
             <div v-for="(st, i) in strArr(entry.p, 'build', 'steps')" :key="'bs'+i" class="pl-row">
               <span class="pl-hint">step {{ i + 1 }}</span>
-              <input class="sm-input pl-in" :value="st" @input="setStr(strArr(entry.p,'build','steps'), i, $event)" placeholder="mvn -B package" />
+              <input class="sm-input pl-in" list="kaiad-vars" :value="st" @input="setStr(strArr(entry.p,'build','steps'), i, $event)" placeholder="mvn -B package" />
               <Button variant="ghost" size="sm" @click="strArr(entry.p,'build','steps').splice(i,1); syncYamlFromForm()">✕</Button>
             </div>
             <Button variant="secondary" size="sm" @click="strArr(entry.p,'build','steps').push(''); syncYamlFromForm()">+ Build step</Button>
@@ -882,7 +998,7 @@ async function clearOverride() {
               <div v-for="k in Object.keys(kvObj(entry.p,'build','env'))" :key="'be'+k" class="pl-row">
                 <input class="sm-input pl-in pl-in--sm" :value="k" readonly />
                 <span class="pl-eq">=</span>
-                <input class="sm-input pl-in" v-model="kvObj(entry.p,'build','env')[k]" @input="syncYamlFromForm" />
+                <input class="sm-input pl-in" list="kaiad-vars" v-model="kvObj(entry.p,'build','env')[k]" @input="syncYamlFromForm" />
                 <Button variant="ghost" size="sm" @click="delete kvObj(entry.p,'build','env')[k]; syncYamlFromForm()">✕</Button>
               </div>
               <div class="pl-row">
@@ -934,7 +1050,7 @@ async function clearOverride() {
             <div v-for="k in Object.keys(kvObj(entry.p,'dockerfile','args'))" :key="'da'+k" class="pl-row">
               <input class="sm-input pl-in pl-in--sm" :value="k" readonly />
               <span class="pl-eq">=</span>
-              <input class="sm-input pl-in" v-model="kvObj(entry.p,'dockerfile','args')[k]" @input="syncYamlFromForm" />
+              <input class="sm-input pl-in" list="kaiad-vars" v-model="kvObj(entry.p,'dockerfile','args')[k]" @input="syncYamlFromForm" />
               <Button variant="ghost" size="sm" @click="delete kvObj(entry.p,'dockerfile','args')[k]; syncYamlFromForm()">✕</Button>
             </div>
             <div class="pl-row">
@@ -1032,6 +1148,126 @@ async function clearOverride() {
 }
 .pl-foot {
   margin: 0.75rem 0 0;
+}
+
+/* Available-variables reference panel */
+.pl-vars {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface-muted);
+  margin: 0 0 0.85rem;
+  padding: 0;
+}
+.pl-vars__head {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.75rem;
+  user-select: none;
+}
+.pl-vars__head::-webkit-details-marker {
+  display: none;
+}
+.pl-vars__head::before {
+  content: "▸";
+  color: var(--color-text-muted);
+  font-size: 0.7rem;
+  transition: transform 0.15s;
+}
+.pl-vars[open] > .pl-vars__head::before {
+  transform: rotate(90deg);
+}
+.pl-vars__title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-secondary);
+}
+.pl-vars__count {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  padding: 0.05rem 0.4rem;
+  border-radius: 6px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+}
+.pl-vars__hint {
+  margin-left: auto;
+}
+.pl-vars__body {
+  padding: 0 0.75rem 0.7rem;
+  border-top: 1px dashed var(--color-border);
+}
+.pl-vars__group + .pl-vars__group {
+  margin-top: 0.6rem;
+}
+.pl-vars__group-title {
+  margin: 0.5rem 0 0.35rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-secondary);
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.pl-vars__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.3rem;
+}
+.pl-vars__item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.pl-vars__chip {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.78rem;
+  padding: 0.18rem 0.5rem;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 14px;
+  background: var(--color-surface);
+  cursor: pointer;
+  color: var(--color-primary);
+  flex: 0 0 auto;
+}
+.pl-vars__chip:hover {
+  border-color: var(--color-primary);
+}
+.pl-vars__chip--copied {
+  background: color-mix(in srgb, var(--color-success, var(--color-primary)) 18%, transparent);
+  border-color: var(--color-success, var(--color-primary));
+  color: var(--color-success, var(--color-primary));
+}
+.pl-vars__desc {
+  font-size: 0.78rem;
+  color: var(--color-text);
+  flex: 1 1 12rem;
+  min-width: 12rem;
+}
+.pl-vars__sample {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 5px;
+  padding: 0.05rem 0.4rem;
+  max-width: 18rem;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.pl-vars__empty {
+  margin: 0.4rem 0 0;
 }
 
 /* Tabs — segmented control */

@@ -502,8 +502,13 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
     const serviceOverride = svc.pipelineOverride?.trim();
     const repoOverride = serviceOverride
       ? undefined
-      : (await getRepoPipelineOverride(query, svc.tenantId, svc.gitRepoUrl, svc.branch))?.trim() ||
-        undefined;
+      : (await getRepoPipelineOverride(
+          query,
+          svc.tenantId,
+          svc.gitRepoUrl,
+          svc.branch,
+          svc.kaiadYamlPath || "kaiad.yaml"
+        ))?.trim() || undefined;
     let yamlText: string;
     if (serviceOverride) {
       yamlText = svc.pipelineOverride as string;

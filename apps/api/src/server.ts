@@ -4044,7 +4044,13 @@ export function buildServer(opts: BuildServerOptions = {}) {
         };
       }
       const serviceOverride = await getServicePipelineOverride(q, session.tenantId, req.params.id);
-      const repoOverride = await getRepoPipelineOverride(q, session.tenantId, svc.gitRepoUrl, svc.branch);
+      const repoOverride = await getRepoPipelineOverride(
+        q,
+        session.tenantId,
+        svc.gitRepoUrl,
+        svc.branch,
+        svc.kaiadYamlPath
+      );
       // No override anywhere → the latest build's captured pipeline_yaml
       // is the repo's kaiad.yaml at that commit; preload it so the editor
       // shows the real current config, not a placeholder.
@@ -4052,7 +4058,13 @@ export function buildServer(opts: BuildServerOptions = {}) {
         serviceOverride == null && repoOverride == null
           ? await getLatestBuildPipelineYaml(q, session.tenantId, req.params.id)
           : null;
-      const repoServices = await listServicesForRepo(q, session.tenantId, svc.gitRepoUrl, svc.branch);
+      const repoServices = await listServicesForRepo(
+        q,
+        session.tenantId,
+        svc.gitRepoUrl,
+        svc.branch,
+        svc.kaiadYamlPath
+      );
       return {
         // current effective scope for THIS service
         scope: serviceOverride != null ? ("service" as const) : ("repo" as const),
@@ -4118,8 +4130,21 @@ export function buildServer(opts: BuildServerOptions = {}) {
         }
         return { ok: true, scope, affectedServices: [{ id: svc.id, name: svc.name }] };
       }
-      await setRepoPipelineOverride(q, session.tenantId, svc.gitRepoUrl, svc.branch, yaml);
-      const repoServices = await listServicesForRepo(q, session.tenantId, svc.gitRepoUrl, svc.branch);
+      await setRepoPipelineOverride(
+        q,
+        session.tenantId,
+        svc.gitRepoUrl,
+        svc.branch,
+        svc.kaiadYamlPath,
+        yaml
+      );
+      const repoServices = await listServicesForRepo(
+        q,
+        session.tenantId,
+        svc.gitRepoUrl,
+        svc.branch,
+        svc.kaiadYamlPath
+      );
       // Repo scope is shadowed for any service with its own explicit
       // override; report which actually take effect.
       const affectedServices = repoServices
@@ -4159,7 +4184,14 @@ export function buildServer(opts: BuildServerOptions = {}) {
         await setServicePipelineOverride(q, session.tenantId, req.params.id, null);
       }
       if (scope === "repo" || scope === "all") {
-        await setRepoPipelineOverride(q, session.tenantId, svc.gitRepoUrl, svc.branch, null);
+        await setRepoPipelineOverride(
+          q,
+          session.tenantId,
+          svc.gitRepoUrl,
+          svc.branch,
+          svc.kaiadYamlPath,
+          null
+        );
       }
       return { ok: true, scope };
     }

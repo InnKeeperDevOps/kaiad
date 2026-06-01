@@ -240,9 +240,14 @@ alter table monitored_services add column if not exists security_fs_group bigint
 -- auto-build behaviour unchanged.
 alter table monitored_services add column if not exists locked boolean not null default false;
 
--- Repo-scoped kaiad.yaml override (the default scope). Keyed by
--- (tenant, git_repo_url, branch) so all services from that repo+branch
--- pick it up. A service's own pipeline_override (above) overrides this.
+-- Repo-scoped kaiad.yaml override (the default scope). Originally
+-- keyed by (tenant, git_repo_url, branch) — but once a single repo
+-- can host multiple kaiad.yaml files at different paths, that key
+-- bled a service-A override onto service-B which read a different
+-- file. The key now includes kaiad_yaml_path so each (repo, branch,
+-- path) tuple gets its own override slot. Existing rows backfill to
+-- 'kaiad.yaml' so the historical "one yaml at the root" repos keep
+-- their saved overrides unchanged.
 create table if not exists repo_pipeline_overrides (
   tenant_id text not null,
   git_repo_url text not null,
@@ -251,6 +256,30 @@ create table if not exists repo_pipeline_overrides (
   updated_at timestamptz not null default now(),
   primary key (tenant_id, git_repo_url, branch)
 );
+alter table repo_pipeline_overrides
+  add column if not exists kaiad_yaml_path text not null default 'kaiad.yaml';
+-- Swap the PK to include kaiad_yaml_path. Idempotent on re-run: drop
+-- the old 3-col PK only if it's still in place, then add the new one
+-- only if no PK currently exists.
+do $$
+begin
+  if exists (
+    select 1 from pg_constraint
+    where conname = 'repo_pipeline_overrides_pkey'
+      and conrelid = 'repo_pipeline_overrides'::regclass
+      and array_length(conkey, 1) = 3
+  ) then
+    alter table repo_pipeline_overrides drop constraint repo_pipeline_overrides_pkey;
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'repo_pipeline_overrides'::regclass
+      and contype = 'p'
+  ) then
+    alter table repo_pipeline_overrides
+      add primary key (tenant_id, git_repo_url, branch, kaiad_yaml_path);
+  end if;
+end$$;
 
 -- agent ↔ service binding is many-to-many. The join table is the single
 -- source of truth. The legacy monitored_services.agent_id column

@@ -858,59 +858,75 @@ export async function setServicePipelineOverride(
   return rows.length > 0;
 }
 
-/** Repo-scoped override (default scope): shared by every service built from this git_repo_url+branch. */
+/**
+ * Repo-scoped override (default scope): shared by every service built
+ * from the same git_repo_url+branch AND reading the same kaiad.yaml
+ * path. Two services in the same repo pointing at different paths
+ * (e.g. `deploy/kaiad.yaml` vs `infra/kaiad.yaml`) each get their own
+ * repo-scoped override slot. Defaults `kaiadYamlPath` to `kaiad.yaml`
+ * for legacy callers.
+ */
 export async function getRepoPipelineOverride(
   query: QueryFn,
   tenantId: string,
   gitRepoUrl: string,
-  branch: string
+  branch: string,
+  kaiadYamlPath: string = "kaiad.yaml"
 ): Promise<string | null> {
   const { rows } = await query(
     `SELECT pipeline_override FROM repo_pipeline_overrides
-      WHERE tenant_id = $1 AND git_repo_url = $2 AND branch = $3`,
-    [tenantId, gitRepoUrl, branch]
+      WHERE tenant_id = $1 AND git_repo_url = $2 AND branch = $3 AND kaiad_yaml_path = $4`,
+    [tenantId, gitRepoUrl, branch, kaiadYamlPath]
   );
   if (rows.length === 0) return null;
   return rows[0].pipeline_override == null ? null : String(rows[0].pipeline_override);
 }
 
-/** Upsert (string) or clear (null) the repo-scoped override. */
+/** Upsert (string) or clear (null) the repo-scoped override for this (repo, branch, path). */
 export async function setRepoPipelineOverride(
   query: QueryFn,
   tenantId: string,
   gitRepoUrl: string,
   branch: string,
+  kaiadYamlPath: string,
   override: string | null
 ): Promise<void> {
   if (override == null) {
     await query(
-      `DELETE FROM repo_pipeline_overrides WHERE tenant_id = $1 AND git_repo_url = $2 AND branch = $3`,
-      [tenantId, gitRepoUrl, branch]
+      `DELETE FROM repo_pipeline_overrides
+        WHERE tenant_id = $1 AND git_repo_url = $2 AND branch = $3 AND kaiad_yaml_path = $4`,
+      [tenantId, gitRepoUrl, branch, kaiadYamlPath]
     );
     return;
   }
   await query(
-    `INSERT INTO repo_pipeline_overrides (tenant_id, git_repo_url, branch, pipeline_override, updated_at)
-     VALUES ($1, $2, $3, $4, now())
-     ON CONFLICT (tenant_id, git_repo_url, branch)
+    `INSERT INTO repo_pipeline_overrides (tenant_id, git_repo_url, branch, kaiad_yaml_path, pipeline_override, updated_at)
+     VALUES ($1, $2, $3, $4, $5, now())
+     ON CONFLICT (tenant_id, git_repo_url, branch, kaiad_yaml_path)
        DO UPDATE SET pipeline_override = EXCLUDED.pipeline_override, updated_at = now()`,
-    [tenantId, gitRepoUrl, branch, override]
+    [tenantId, gitRepoUrl, branch, kaiadYamlPath, override]
   );
 }
 
-/** Services in this tenant built from the same git_repo_url + branch. */
+/**
+ * Services in this tenant that *would share* a repo-scoped override
+ * with the caller — same git_repo_url + branch + kaiad_yaml_path. The
+ * path filter is what keeps two services that read different files in
+ * the same repo from being treated as one override pool.
+ */
 export async function listServicesForRepo(
   query: QueryFn,
   tenantId: string,
   gitRepoUrl: string,
-  branch: string
+  branch: string,
+  kaiadYamlPath: string = "kaiad.yaml"
 ): Promise<Array<{ id: string; name: string; pipelineName: string | null; hasServiceOverride: boolean }>> {
   const { rows } = await query(
     `SELECT id, name, pipeline_name, pipeline_override
        FROM monitored_services
-      WHERE tenant_id = $1 AND git_repo_url = $2 AND branch = $3
+      WHERE tenant_id = $1 AND git_repo_url = $2 AND branch = $3 AND kaiad_yaml_path = $4
       ORDER BY name`,
-    [tenantId, gitRepoUrl, branch]
+    [tenantId, gitRepoUrl, branch, kaiadYamlPath]
   );
   return rows.map((r) => ({
     id: String(r.id),

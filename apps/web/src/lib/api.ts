@@ -398,6 +398,50 @@ export type RegistryTag = {
   platforms?: string[];
 };
 
+export type RegistryImageFile = {
+  path: string;
+  type: "file" | "directory" | "symlink" | "hardlink" | "other";
+  size: number;
+  mode: number;
+  uid: number;
+  gid: number;
+  mtime: number;
+  linkTarget?: string;
+  /** Index into `layers[]` of the layer that wrote this entry. */
+  layerIdx: number;
+};
+
+export type RegistryImageFilesResponse =
+  | {
+      manifestKind: "image";
+      digest: string;
+      configDigest: string | null;
+      layers: Array<{ digest: string; sizeBytes: number; mediaType: string | null }>;
+      files: RegistryImageFile[];
+    }
+  | {
+      /** Manifest list / OCI index — no layers of its own; pick a child manifest. */
+      manifestKind: "index";
+      digest: string;
+      referencedManifestDigests: string[];
+      layers: [];
+      files: [];
+    };
+
+export type RegistryImageFileResponse = {
+  path: string;
+  layerIdx: number;
+  layerDigest: string;
+  mode: number;
+  uid: number;
+  gid: number;
+  /** Original (uncapped) file size in bytes. */
+  size: number;
+  /** True when `bodyBase64` carries only a prefix of the file. */
+  truncated: boolean;
+  bodyBase64: string;
+};
+
 export type AuthProviderEntry = {
   id: string;
   provider: string;
@@ -797,6 +841,35 @@ export const api = {
       `/api/v1/registry/repositories/${encodeURIComponent(name)}/visibility`,
       { method: "PUT", body: JSON.stringify({ public: isPublic }) }
     ),
+
+  /**
+   * List every file in an image tag. Returns `manifestKind: "index"`
+   * for multi-arch manifest lists (the panel then asks the user to
+   * pick a platform); otherwise an `image` payload with a flat,
+   * already-sorted file list.
+   */
+  listRegistryImageFiles: (name: string, tag: string) =>
+    apiFetch<RegistryImageFilesResponse>(
+      `/api/v1/registry/repositories/${encodeURIComponent(name)}/tags/${encodeURIComponent(tag)}/files`
+    ),
+
+  /**
+   * Read one file from a tagged image. `layerIdx` is the index
+   * returned by `listRegistryImageFiles` and lets the server jump
+   * straight to the owning layer.
+   */
+  getRegistryImageFile: (
+    name: string,
+    tag: string,
+    path: string,
+    layerIdx?: number
+  ) => {
+    const q = new URLSearchParams({ path });
+    if (typeof layerIdx === "number") q.set("layer", String(layerIdx));
+    return apiFetch<RegistryImageFileResponse>(
+      `/api/v1/registry/repositories/${encodeURIComponent(name)}/tags/${encodeURIComponent(tag)}/file?${q.toString()}`
+    );
+  },
 
   getSettings: () => getTenantSettings(),
   updateSettings: (data: TenantSettings) =>

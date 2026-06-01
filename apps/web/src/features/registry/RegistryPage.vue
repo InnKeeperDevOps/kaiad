@@ -343,7 +343,17 @@ onMounted(() => {
                   :style="{ borderTop: '1px solid var(--color-border)' }"
                 >
                   <td :style="{ padding: '0.45rem 0.5rem', fontFamily: 'var(--font-mono)' }">
-                    {{ tag.tag }}
+                    <a
+                      :href="`#registry-image/${encodeURIComponent(repo.name)}/${encodeURIComponent(tag.tag)}`"
+                      :title="`Browse files in ${repo.name}:${tag.tag}`"
+                      :style="{
+                        color: 'var(--color-primary)',
+                        textDecoration: 'none',
+                        cursor: 'pointer'
+                      }"
+                      @mouseover="(e: MouseEvent) => ((e.currentTarget as HTMLElement).style.textDecoration = 'underline')"
+                      @mouseleave="(e: MouseEvent) => ((e.currentTarget as HTMLElement).style.textDecoration = 'none')"
+                    >{{ tag.tag }}</a>
                   </td>
                   <td :style="{ padding: '0.45rem 0.5rem' }">
                     <span

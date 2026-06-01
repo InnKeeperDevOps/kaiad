@@ -25,6 +25,7 @@ import ServicesPage from "./features/services/ServicesPage.vue";
 import SshKeysPage from "./features/ssh-keys/SshKeysPage.vue";
 import TenantsPage from "./features/tenants/TenantsPage.vue";
 import RegistryPage from "./features/registry/RegistryPage.vue";
+import ImageFileBrowserPage from "./features/registry/ImageFileBrowserPage.vue";
 import LoadBalancersPage from "./features/load-balancers/LoadBalancersPage.vue";
 import AgentDetailPage from "./features/agents/AgentDetailPage.vue";
 import OperatorPage from "./features/operator/OperatorPage.vue";
@@ -45,6 +46,7 @@ type Route =
   | "serviceDetail"
   | "sshKeys"
   | "registry"
+  | "registryImage"
   | "loadBalancers"
   | "settings"
   | "tenants"
@@ -97,6 +99,7 @@ const PAGE_TITLE: Record<Route, string> = {
   serviceDetail: "Service",
   sshKeys: "SSH Keys",
   registry: "Registry",
+  registryImage: "Image files",
   loadBalancers: "Load Balancers",
   settings: "Settings",
   tenants: "Tenants",
@@ -110,34 +113,47 @@ function readNavFromHash(): {
   tenantConfigTenantId: string | null;
   agentDetailAgentId: string | null;
   serviceDetailServiceId: string | null;
+  registryImageRepo: string | null;
+  registryImageTag: string | null;
 } {
   const raw = window.location.hash.replace(/^#/, "").split("?")[0];
+  const empty = {
+    tenantConfigTenantId: null,
+    agentDetailAgentId: null,
+    serviceDetailServiceId: null,
+    registryImageRepo: null,
+    registryImageTag: null
+  };
   if (raw.startsWith("tenant-config/")) {
     const id = decodeURIComponent(raw.slice("tenant-config/".length).trim());
-    return {
-      route: "tenantConfig",
-      tenantConfigTenantId: id || null,
-      agentDetailAgentId: null,
-      serviceDetailServiceId: null
-    };
+    return { route: "tenantConfig", ...empty, tenantConfigTenantId: id || null };
   }
   if (raw.startsWith("agent/")) {
     const id = decodeURIComponent(raw.slice("agent/".length).trim());
-    return {
-      route: "agentDetail",
-      tenantConfigTenantId: null,
-      agentDetailAgentId: id || null,
-      serviceDetailServiceId: null
-    };
+    return { route: "agentDetail", ...empty, agentDetailAgentId: id || null };
   }
   if (raw.startsWith("service/")) {
     const id = decodeURIComponent(raw.slice("service/".length).trim());
-    return {
-      route: "serviceDetail",
-      tenantConfigTenantId: null,
-      agentDetailAgentId: null,
-      serviceDetailServiceId: id || null
-    };
+    return { route: "serviceDetail", ...empty, serviceDetailServiceId: id || null };
+  }
+  if (raw.startsWith("registry-image/")) {
+    // Shape: registry-image/<encoded repo>/<encoded tag>. Repo names
+    // can contain `/` (e.g. library/alpine) so we keep the part before
+    // the LAST `/` as the repo and the trailing segment as the tag.
+    const rest = raw.slice("registry-image/".length);
+    const slash = rest.lastIndexOf("/");
+    if (slash > 0) {
+      const repo = decodeURIComponent(rest.slice(0, slash)).trim();
+      const tag = decodeURIComponent(rest.slice(slash + 1)).trim();
+      if (repo && tag) {
+        return {
+          route: "registryImage",
+          ...empty,
+          registryImageRepo: repo,
+          registryImageTag: tag
+        };
+      }
+    }
   }
   const base = (raw.split("/")[0] || "dashboard") as Route;
   const allowed: Route[] = [
@@ -155,19 +171,9 @@ function readNavFromHash(): {
     "login"
   ];
   if (allowed.includes(base)) {
-    return {
-      route: base,
-      tenantConfigTenantId: null,
-      agentDetailAgentId: null,
-      serviceDetailServiceId: null
-    };
+    return { route: base, ...empty };
   }
-  return {
-    route: "dashboard",
-    tenantConfigTenantId: null,
-    agentDetailAgentId: null,
-    serviceDetailServiceId: null
-  };
+  return { route: "dashboard", ...empty };
 }
 
 function hasToken(): boolean {
@@ -179,6 +185,8 @@ const route = ref<Route>(hasToken() ? readNavFromHash().route : "login");
 const tenantConfigTenantId = ref<string | null>(hasToken() ? readNavFromHash().tenantConfigTenantId : null);
 const agentDetailAgentId = ref<string | null>(hasToken() ? readNavFromHash().agentDetailAgentId : null);
 const serviceDetailServiceId = ref<string | null>(hasToken() ? readNavFromHash().serviceDetailServiceId : null);
+const registryImageRepo = ref<string | null>(hasToken() ? readNavFromHash().registryImageRepo : null);
+const registryImageTag = ref<string | null>(hasToken() ? readNavFromHash().registryImageTag : null);
 const user = ref<AuthUser | null>(null);
 const meResolved = ref(false);
 
@@ -233,6 +241,8 @@ function onHashChange() {
     tenantConfigTenantId.value = null;
     agentDetailAgentId.value = null;
     serviceDetailServiceId.value = null;
+    registryImageRepo.value = null;
+    registryImageTag.value = null;
     return;
   }
   const nav = readNavFromHash();
@@ -240,6 +250,8 @@ function onHashChange() {
   tenantConfigTenantId.value = nav.tenantConfigTenantId;
   agentDetailAgentId.value = nav.agentDetailAgentId;
   serviceDetailServiceId.value = nav.serviceDetailServiceId;
+  registryImageRepo.value = nav.registryImageRepo;
+  registryImageTag.value = nav.registryImageTag;
 }
 
 function handleTenantSwitch(u: AuthUser) {
@@ -258,7 +270,8 @@ function isActive(itemRoute: Route): boolean {
     route.value === itemRoute ||
     (itemRoute === "tenants" && route.value === "tenantConfig") ||
     (itemRoute === "agents" && route.value === "agentDetail") ||
-    (itemRoute === "services" && route.value === "serviceDetail")
+    (itemRoute === "services" && route.value === "serviceDetail") ||
+    (itemRoute === "registry" && route.value === "registryImage")
   );
 }
 
@@ -493,6 +506,11 @@ const navItemStyle = (active: boolean): CSSProperties => ({
       />
       <SshKeysPage v-else-if="route === 'sshKeys'" />
       <RegistryPage v-else-if="route === 'registry'" />
+      <ImageFileBrowserPage
+        v-else-if="route === 'registryImage' && registryImageRepo && registryImageTag"
+        :repo="registryImageRepo"
+        :tag="registryImageTag"
+      />
       <LoadBalancersPage v-else-if="route === 'loadBalancers'" />
       <TenantsPage v-else-if="route === 'tenants'" @auth-user-updated="(u: AuthUser) => (user = u)" />
       <UsersGroupsPage v-else-if="route === 'users'" />

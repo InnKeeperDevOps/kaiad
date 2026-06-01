@@ -117,6 +117,8 @@ import {
   listTags as registryListTags
 } from "./registry/admin.js";
 import { registerRegistryRoutes } from "./registry/routes.js";
+import { openBlobReadStream } from "./registry/blobStorage.js";
+import { buildImageFileTree, readFileFromLayer } from "./registry/imageFiles.js";
 import { createMemoryAuthStore, seedDevUser } from "./memoryAuthStore.js";
 import { createPostgresAuthStore } from "./postgresAuthStore.js";
 import { readConfig, writeConfig, type KaiadConfig } from "./configPersistence.js";
@@ -143,6 +145,7 @@ import {
   setRegistryRepoVisibility,
   listRegistryRepoVisibility,
   getRegistryManifestByTag,
+  getRegistryBlobMeta,
   getBuild,
   getBuildArtifact,
   listBuildArtifacts,
@@ -1314,6 +1317,213 @@ export function buildServer(opts: BuildServerOptions = {}) {
         );
       }
       return { deleted: true, digest: result.digest };
+    }
+  );
+
+  // ── Image file-tree viewer ──────────────────────────────────────────
+  //
+  // List every file in a tagged image. Walks the manifest's layer
+  // blobs in order, gunzips + tars them, merges with AUFS whiteout
+  // semantics, and returns a flat list the panel renders as a tree.
+  // The tree is computed on demand — there's no cache yet because tag
+  // contents change rarely once pushed and a full walk of a typical
+  // service image (~50 MB compressed) finishes in well under a second.
+  // For multi-arch manifest lists we don't recurse into children: the
+  // returned `manifestKind: "index"` lets the panel show a useful
+  // "pick a platform" hint instead of a confusing empty list.
+  app.get<{ Params: { name: string; tag: string } }>(
+    "/api/v1/registry/repositories/:name/tags/:tag/files",
+    async (req, reply) => {
+      const session = await requireAdminSession(req, reply);
+      if (!session) return;
+      const ctx = await getRegistryAdminContext();
+      if (!ctx) {
+        return reply.status(503).send(
+          apiErrorSchema.parse({
+            code: "REGISTRY_UNAVAILABLE",
+            message: "Registry storage not configured (DATABASE_URL missing)",
+            correlationId: (req as any).correlationId
+          })
+        );
+      }
+      const { name, tag } = req.params;
+      const manifest = await getRegistryManifestByTag(ctx.queryFn, name, tag);
+      if (!manifest) {
+        return reply.status(404).send(
+          apiErrorSchema.parse({
+            code: "NOT_FOUND",
+            message: `tag not found: ${name}:${tag}`,
+            correlationId: (req as any).correlationId
+          })
+        );
+      }
+      // Manifest lists / OCI indexes carry no `layers`. Surface that so
+      // the UI can prompt for a platform; we don't auto-pick one.
+      if (manifest.layerDigests.length === 0 && manifest.referencedManifestDigests.length > 0) {
+        return {
+          manifestKind: "index" as const,
+          digest: manifest.digest,
+          referencedManifestDigests: manifest.referencedManifestDigests,
+          layers: [],
+          files: []
+        };
+      }
+      // Build the open-stream closures up front so the walker doesn't
+      // pay the lookup cost per layer. Bail with 404 on any missing
+      // blob — that means a partial / GC'd image.
+      const layers: Array<{
+        idx: number;
+        digest: string;
+        sizeBytes: number;
+        mediaType: string | null;
+        openStream: () => Promise<NodeJS.ReadableStream>;
+      }> = [];
+      for (let i = 0; i < manifest.layerDigests.length; i++) {
+        const digest = manifest.layerDigests[i];
+        const meta = await getRegistryBlobMeta(ctx.queryFn, digest);
+        if (!meta) {
+          return reply.status(404).send(
+            apiErrorSchema.parse({
+              code: "BLOB_MISSING",
+              message: `layer blob missing: ${digest}`,
+              correlationId: (req as any).correlationId
+            })
+          );
+        }
+        layers.push({
+          idx: i,
+          digest,
+          sizeBytes: meta.sizeBytes,
+          mediaType: meta.mediaType,
+          openStream: async () => {
+            const s = await openBlobReadStream(ctx.pool, meta.contentOid);
+            if (!s) throw new Error(`failed to open blob ${digest}`);
+            return s;
+          }
+        });
+      }
+      try {
+        const tree = await buildImageFileTree(layers);
+        // Sort by path so the panel can render a stable tree without
+        // re-sorting on the client; this is N log N over the file
+        // count which dominates the response size anyway.
+        const files = [...tree.values()].sort((a, b) => a.path.localeCompare(b.path));
+        return {
+          manifestKind: "image" as const,
+          digest: manifest.digest,
+          configDigest: manifest.configDigest,
+          layers: layers.map((l) => ({
+            digest: l.digest,
+            sizeBytes: l.sizeBytes,
+            mediaType: l.mediaType
+          })),
+          files
+        };
+      } catch (err) {
+        return reply.status(500).send(
+          apiErrorSchema.parse({
+            code: "WALK_FAILED",
+            message: `failed to walk image layers: ${(err as Error).message}`,
+            correlationId: (req as any).correlationId
+          })
+        );
+      }
+    }
+  );
+
+  // Return the contents of a single file from a tagged image. `path`
+  // is repo-relative (leading "/" optional). The handler re-walks the
+  // owning layer rather than caching extracted bodies; the layer is
+  // already gunzipped streaming and the walk stops as soon as the
+  // matching entry is read, so for typical config files this is cheap.
+  app.get<{
+    Params: { name: string; tag: string };
+    Querystring: { path?: string; layer?: string };
+  }>(
+    "/api/v1/registry/repositories/:name/tags/:tag/file",
+    async (req, reply) => {
+      const session = await requireAdminSession(req, reply);
+      if (!session) return;
+      const ctx = await getRegistryAdminContext();
+      if (!ctx) {
+        return reply.status(503).send(
+          apiErrorSchema.parse({
+            code: "REGISTRY_UNAVAILABLE",
+            message: "Registry storage not configured (DATABASE_URL missing)",
+            correlationId: (req as any).correlationId
+          })
+        );
+      }
+      const { name, tag } = req.params;
+      const path = typeof req.query.path === "string" ? req.query.path.trim() : "";
+      const layerHint = typeof req.query.layer === "string" ? parseInt(req.query.layer, 10) : NaN;
+      if (!path) {
+        return reply.status(400).send(
+          apiErrorSchema.parse({
+            code: "BAD_REQUEST",
+            message: "Missing ?path query parameter",
+            correlationId: (req as any).correlationId
+          })
+        );
+      }
+      const manifest = await getRegistryManifestByTag(ctx.queryFn, name, tag);
+      if (!manifest) {
+        return reply.status(404).send(
+          apiErrorSchema.parse({ code: "NOT_FOUND", message: `tag not found: ${name}:${tag}`, correlationId: (req as any).correlationId })
+        );
+      }
+      // Try the hinted layer first (the panel passes layerIdx from the
+      // tree response). If that misses — e.g. the manifest changed
+      // since the list was rendered — fall back to scanning layers
+      // top-down so the most recent writer is checked first.
+      const order: number[] = [];
+      if (Number.isFinite(layerHint) && layerHint >= 0 && layerHint < manifest.layerDigests.length) {
+        order.push(layerHint);
+      }
+      for (let i = manifest.layerDigests.length - 1; i >= 0; i--) {
+        if (!order.includes(i)) order.push(i);
+      }
+      const MAX_BYTES = 4 * 1024 * 1024; // 4 MiB cap on inline content
+      try {
+        for (const idx of order) {
+          const digest = manifest.layerDigests[idx];
+          const meta = await getRegistryBlobMeta(ctx.queryFn, digest);
+          if (!meta) continue;
+          const stream = await openBlobReadStream(ctx.pool, meta.contentOid);
+          if (!stream) continue;
+          const found = await readFileFromLayer(stream, path, MAX_BYTES);
+          if (found) {
+            return {
+              path: found.header.name,
+              layerIdx: idx,
+              layerDigest: digest,
+              mode: found.header.mode,
+              uid: found.header.uid,
+              gid: found.header.gid,
+              size: found.size,
+              truncated: found.truncated,
+              // Send bytes as base64 so binary files don't get JSON-
+              // mangled. Client decides whether to render as text.
+              bodyBase64: found.body.toString("base64")
+            };
+          }
+        }
+      } catch (err) {
+        return reply.status(500).send(
+          apiErrorSchema.parse({
+            code: "WALK_FAILED",
+            message: `failed to read file: ${(err as Error).message}`,
+            correlationId: (req as any).correlationId
+          })
+        );
+      }
+      return reply.status(404).send(
+        apiErrorSchema.parse({
+          code: "NOT_FOUND",
+          message: `file not found in image: ${path}`,
+          correlationId: (req as any).correlationId
+        })
+      );
     }
   );
 

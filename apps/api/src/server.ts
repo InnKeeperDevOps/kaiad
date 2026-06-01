@@ -55,6 +55,8 @@ import {
   parsePipelineYaml,
   selectPipeline,
   resolveEnvironment,
+  kaiadYamlPathSchema,
+  normalizeKaiadYamlPath,
   hasPermission,
   permissionsForRole,
   PERMISSIONS,
@@ -3587,6 +3589,25 @@ export function buildServer(opts: BuildServerOptions = {}) {
     const branch = (typeof body.branch === "string" && body.branch.trim()) || "main";
     const sshKeyId =
       typeof body.sshKeyId === "string" && body.sshKeyId.trim() !== "" ? body.sshKeyId : null;
+    // Where the kaiad.yaml lives. Validates the same way as the
+    // service-create field so a wizard preview matches what the
+    // build worker will read post-creation.
+    let kaiadYamlPath = "kaiad.yaml";
+    if (typeof body.kaiadYamlPath === "string" && body.kaiadYamlPath.trim() !== "") {
+      const parsedPath = kaiadYamlPathSchema.safeParse(
+        normalizeKaiadYamlPath(body.kaiadYamlPath)
+      );
+      if (!parsedPath.success) {
+        return reply.status(400).send(
+          apiErrorSchema.parse({
+            code: "BAD_REQUEST",
+            message: `Invalid kaiadYamlPath: ${parsedPath.error.issues[0]?.message ?? "rejected"}`,
+            correlationId: (req as any).correlationId
+          })
+        );
+      }
+      kaiadYamlPath = parsedPath.data;
+    }
     if (!gitRepoUrl) {
       return reply.status(400).send(
         apiErrorSchema.parse({
@@ -3653,17 +3674,19 @@ export function buildServer(opts: BuildServerOptions = {}) {
       }
 
       // Pull kaiad.yaml's blob out of the object DB. A 256 KB cap on
-      // the read keeps a hostile repo from filling memory.
+      // the read keeps a hostile repo from filling memory. Path is
+      // request-driven so the wizard can preview a non-default location
+      // like `deploy/kaiad.yaml`.
       const show = await runShortCommand(
         "git",
-        ["-C", cloneTarget, "show", `${branch}:kaiad.yaml`],
+        ["-C", cloneTarget, "show", `${branch}:${kaiadYamlPath}`],
         { env, timeoutMs: 10_000, maxStdoutBytes: 256 * 1024 }
       );
       if (show.code !== 0) {
         return reply.status(404).send(
           apiErrorSchema.parse({
             code: "PIPELINE_NOT_FOUND",
-            message: `kaiad.yaml not found on ${branch}: ${show.stderr.slice(0, 400)}`,
+            message: `${kaiadYamlPath} not found on ${branch}: ${show.stderr.slice(0, 400)}`,
             correlationId: (req as any).correlationId
           })
         );
@@ -3703,7 +3726,9 @@ export function buildServer(opts: BuildServerOptions = {}) {
         ?? (typeof raw.dockerImage === "string" && raw.dockerImage.trim().length > 0 ? raw.dockerImage : undefined),
       composePath:
         body.composePath
-        ?? (typeof raw.composePath === "string" && raw.composePath.trim().length > 0 ? raw.composePath : undefined)
+        ?? (typeof raw.composePath === "string" && raw.composePath.trim().length > 0 ? raw.composePath : undefined),
+      kaiadYamlPath:
+        body.kaiadYamlPath ? normalizeKaiadYamlPath(body.kaiadYamlPath) : undefined
     });
     return reply.status(201).send(svc);
   });

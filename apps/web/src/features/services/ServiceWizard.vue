@@ -27,6 +27,11 @@ const form = reactive({
   gitRepoUrl: "",
   branch: "main",
   sshKeyId: "",
+  // Where kaiad.yaml lives inside the repo. Default is the root; users
+  // with a non-default layout (deploy/, infra/, etc.) override here.
+  // The preview endpoint reads from this path, and it's persisted on
+  // the MonitoredService row so the build worker uses it too.
+  kaiadYamlPath: "kaiad.yaml",
   // Manual fallback pipeline name when preview fails / user overrides.
   pipelineName: "",
   dockerImage: "",
@@ -53,7 +58,8 @@ async function loadPreview(): Promise<void> {
     const res = await api.previewPipeline({
       gitRepoUrl: form.gitRepoUrl.trim(),
       branch: form.branch.trim() || "main",
-      sshKeyId: form.sshKeyId || null
+      sshKeyId: form.sshKeyId || null,
+      kaiadYamlPath: form.kaiadYamlPath.trim() || undefined
     });
     if (!res.parse.ok) {
       preview.value = { state: "failed", reason: res.parse.reason };
@@ -155,6 +161,7 @@ async function create() {
         dockerImage: form.dockerImage.trim() || undefined,
         composePath: form.composePath.trim() || undefined,
         pipelineName: s.pipelineName ?? undefined,
+        kaiadYamlPath: form.kaiadYamlPath.trim() || undefined,
         agentIds: form.agentIds
       });
       created.push(svc);
@@ -220,6 +227,25 @@ const agentName = (a: Agent) => a.name?.trim() || a.id;
           </select>
         </div>
       </div>
+      <div class="sm-input-wrapper">
+        <label class="sm-input-label">
+          Kaiad config path
+          <span class="wz-hint">repo-relative; default is <code>kaiad.yaml</code> at the root</span>
+        </label>
+        <input
+          class="sm-input"
+          v-model="form.kaiadYamlPath"
+          list="wz-kaiad-paths"
+          placeholder="kaiad.yaml"
+          spellcheck="false"
+        />
+        <datalist id="wz-kaiad-paths">
+          <option value="kaiad.yaml" />
+          <option value="deploy/kaiad.yaml" />
+          <option value="infra/kaiad.yaml" />
+          <option value=".kaiad/kaiad.yaml" />
+        </datalist>
+      </div>
     </div>
 
     <!-- Step 2: Pipeline -->
@@ -230,7 +256,7 @@ const agentName = (a: Agent) => a.name?.trim() || a.id;
       </p>
 
       <div v-if="preview.state === 'loading'" class="wz-preview wz-preview--loading">
-        Reading <code>kaiad.yaml</code> from <code>{{ form.branch }}</code>…
+        Reading <code>{{ form.kaiadYamlPath.trim() || 'kaiad.yaml' }}</code> from <code>{{ form.branch }}</code>…
       </div>
 
       <div v-else-if="preview.state === 'single'" class="wz-preview wz-preview--ok">
@@ -312,6 +338,9 @@ const agentName = (a: Agent) => a.name?.trim() || a.id;
         <div><dt>Repository</dt><dd>{{ form.gitRepoUrl }}</dd></div>
         <div><dt>Branch</dt><dd>{{ form.branch }}</dd></div>
         <div><dt>SSH key</dt><dd>{{ props.sshKeys.find(k => k.id === form.sshKeyId)?.name || 'none (public HTTPS)' }}</dd></div>
+        <div v-if="form.kaiadYamlPath.trim() && form.kaiadYamlPath.trim() !== 'kaiad.yaml'">
+          <dt>Kaiad config path</dt><dd><code>{{ form.kaiadYamlPath.trim() }}</code></dd>
+        </div>
         <div>
           <dt>Services to create</dt>
           <dd>

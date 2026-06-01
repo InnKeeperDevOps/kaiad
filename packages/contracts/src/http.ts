@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { kaiadYamlPathSchema } from "./pipeline.js";
 
 export const healthResponseSchema = z.object({
   status: z.enum(["ok"]),
@@ -239,6 +240,14 @@ export const monitoredServiceSchema = z.object({
    */
   pipelineName: z.string().nullable().optional(),
   /**
+   * Where the kaiad.yaml lives inside the repo. Defaults to
+   * `kaiad.yaml` at the root; services that keep their pipeline file
+   * elsewhere (e.g. `deploy/kaiad.yaml`) set this on creation. The
+   * preview endpoint, the build worker, and the pipeline-override
+   * editor all read from this path.
+   */
+  kaiadYamlPath: kaiadYamlPathSchema.default("kaiad.yaml"),
+  /**
    * Which AI CLI the agent spins up to author an autonomous fix when
    * this service throws an error kaiad can see. Defaults to claude.
    */
@@ -283,6 +292,8 @@ export const createMonitoredServiceRequestSchema = z.object({
   dockerImage: z.string().min(1).optional(),
   composePath: z.string().min(1).optional(),
   pipelineName: z.string().min(1).nullable().optional(),
+  /** Repo-relative path to the pipeline file. Omit for the default (`kaiad.yaml`). */
+  kaiadYamlPath: kaiadYamlPathSchema.optional(),
   fixExecutor: z.enum(["claude", "cursor"]).optional(),
   healthcheck: healthcheckSchema.nullable().optional(),
   securityContext: podSecurityContextSchema.nullable().optional(),
@@ -303,6 +314,8 @@ export const updateMonitoredServiceRequestSchema = z.object({
   dockerImage: z.string().min(1).optional(),
   composePath: z.string().min(1).optional(),
   pipelineName: z.string().min(1).nullable().optional(),
+  /** Repo-relative path to the pipeline file. */
+  kaiadYamlPath: kaiadYamlPathSchema.optional(),
   fixExecutor: z.enum(["claude", "cursor"]).optional(),
   healthcheck: healthcheckSchema.nullable().optional(),
   securityContext: podSecurityContextSchema.nullable().optional(),

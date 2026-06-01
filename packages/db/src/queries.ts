@@ -696,6 +696,12 @@ export interface ServiceRow {
   dockerImage?: string | null;
   composePath?: string | null;
   pipelineName?: string | null;
+  /**
+   * Repo-relative path to the pipeline file. Defaults to
+   * `kaiad.yaml`; overridden for services that keep their pipeline
+   * file outside the repo root (e.g. `deploy/kaiad.yaml`).
+   */
+  kaiadYamlPath: string;
   /** Panel-stored kaiad.yaml override; null = use the repo file. */
   pipelineOverride?: string | null;
   /** AI CLI for autonomous fixes. */
@@ -772,6 +778,7 @@ function mapService(r: Record<string, unknown>): ServiceRow {
     dockerImage: r.docker_image == null ? null : String(r.docker_image),
     composePath: r.compose_path == null ? null : String(r.compose_path),
     pipelineName: r.pipeline_name == null ? null : String(r.pipeline_name),
+    kaiadYamlPath: r.kaiad_yaml_path == null ? "kaiad.yaml" : String(r.kaiad_yaml_path),
     pipelineOverride: r.pipeline_override == null ? null : String(r.pipeline_override),
     fixExecutor: r.fix_executor === "cursor" ? "cursor" : "claude",
     healthcheck: mapHealthcheck(r),
@@ -950,6 +957,7 @@ export async function createService(
     dockerImage?: string;
     composePath?: string;
     pipelineName?: string | null;
+    kaiadYamlPath?: string;
     fixExecutor?: string | null;
     healthcheck?: HealthcheckSpec | null;
     securityContext?: PodSecurityContextSpec | null;
@@ -968,9 +976,9 @@ export async function createService(
        healthcheck_timeout_seconds, healthcheck_failure_threshold,
        healthcheck_success_threshold,
        security_run_as_user, security_run_as_group, security_fs_group,
-       locked
+       locked, kaiad_yaml_path
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
      RETURNING *`,
     [
       id,
@@ -993,7 +1001,8 @@ export async function createService(
       sc?.runAsUser ?? null,
       sc?.runAsGroup ?? null,
       sc?.fsGroup ?? null,
-      data.locked === true
+      data.locked === true,
+      data.kaiadYamlPath ?? "kaiad.yaml"
     ],
   );
   return mapService(rows[0]);
@@ -1440,6 +1449,7 @@ export async function listAllServicesForPoller(
     sshKeyId: string | null;
     branch: string;
     pipelineName: string | null;
+    kaiadYamlPath: string;
     kind: string;
     dependsOn: string[];
     pipelineOverride: string | null;
@@ -1452,7 +1462,7 @@ export async function listAllServicesForPoller(
   // locked — once a manual build has succeeded, redeploying it to a
   // reconnecting agent is what the operator wants.
   const { rows } = await query(
-    `SELECT id, tenant_id, name, git_repo_url, ssh_key_id, branch, pipeline_name, kind, depends_on, pipeline_override
+    `SELECT id, tenant_id, name, git_repo_url, ssh_key_id, branch, pipeline_name, kaiad_yaml_path, kind, depends_on, pipeline_override
        FROM monitored_services
       WHERE locked = false`,
     []
@@ -1465,6 +1475,7 @@ export async function listAllServicesForPoller(
     sshKeyId: r.ssh_key_id == null ? null : String(r.ssh_key_id),
     branch: String(r.branch),
     pipelineName: r.pipeline_name == null ? null : String(r.pipeline_name),
+    kaiadYamlPath: r.kaiad_yaml_path == null ? "kaiad.yaml" : String(r.kaiad_yaml_path),
     kind: r.kind == null ? "deployable" : String(r.kind),
     dependsOn: Array.isArray(r.depends_on) ? (r.depends_on as unknown[]).map((v) => String(v)) : [],
     pipelineOverride: r.pipeline_override == null ? null : String(r.pipeline_override)

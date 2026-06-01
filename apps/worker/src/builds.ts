@@ -520,11 +520,19 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
         "using repo-scoped pipeline override (repo kaiad.yaml ignored)\n"
       );
     } else {
-      const yamlPath = path.join(ws, "kaiad.yaml");
+      // svc.kaiadYamlPath is persisted on creation (default "kaiad.yaml")
+      // and validated as a safe relative path by the contracts schema,
+      // so it's safe to join under the workspace directory.
+      const relPath = svc.kaiadYamlPath || "kaiad.yaml";
+      const yamlPath = path.join(ws, relPath);
       try {
         yamlText = await fs.readFile(yamlPath, "utf8");
       } catch {
-        await appendBuildLog(query, build.id, "kaiad.yaml not found at repo root — skipping build\n");
+        await appendBuildLog(
+          query,
+          build.id,
+          `${relPath} not found in repo — skipping build\n`
+        );
         await finishBuild(query, build.id, { status: "no_pipeline" });
         return;
       }

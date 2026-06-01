@@ -21,6 +21,45 @@ import yaml from "yaml";
 
 export const PIPELINE_FILENAME = "kaiad.yaml";
 
+/**
+ * Where the pipeline file lives inside the repo. Defaults to
+ * {@link PIPELINE_FILENAME} at the root, but services with a
+ * non-default layout (e.g. `deploy/kaiad.yaml`, `infra/kai.yaml`) can
+ * override it on creation. Shared between the API server (preview +
+ * persist), the worker (read on every build), and the web wizard.
+ *
+ * Validation rules — kept narrow because both `git show ${branch}:<p>`
+ * and `path.join(workspace, <p>)` consume it as-is:
+ *   - non-empty,
+ *   - relative (no leading `/` or `\`),
+ *   - no `..` segments (no escaping the repo root),
+ *   - no NUL bytes / `\` separators (POSIX-style only).
+ */
+export const kaiadYamlPathSchema = z
+  .string()
+  .min(1)
+  .max(512)
+  .refine((s) => !s.includes("\0"), { message: "path may not contain NUL bytes" })
+  .refine((s) => !s.startsWith("/") && !s.startsWith("\\"), {
+    message: "path must be relative"
+  })
+  .refine((s) => !s.includes("\\"), {
+    message: "use forward slashes (/) — Windows-style paths are rejected"
+  })
+  .refine((s) => !s.split("/").includes(".."), { message: "path may not contain '..'" });
+
+/**
+ * Strip leading `./`, collapse `//`, trim whitespace. Returns the
+ * canonical form callers should persist. Doesn't enforce validation
+ * — pair with {@link kaiadYamlPathSchema}.
+ */
+export function normalizeKaiadYamlPath(raw: string): string {
+  let s = raw.trim();
+  while (s.startsWith("./")) s = s.slice(2);
+  s = s.replace(/\/{2,}/g, "/");
+  return s;
+}
+
 /** Bump on breaking changes. v1 is the only supported version. */
 const PIPELINE_VERSION = 1 as const;
 

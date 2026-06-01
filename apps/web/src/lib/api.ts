@@ -588,7 +588,13 @@ export const api = {
    * multi-pipeline and lists the pipeline names so the user can decide
    * whether to fan out the create.
    */
-  previewPipeline: (data: { gitRepoUrl: string; branch?: string; sshKeyId?: string | null }) =>
+  previewPipeline: (data: {
+    gitRepoUrl: string;
+    branch?: string;
+    sshKeyId?: string | null;
+    /** Repo-relative path to the pipeline file. Defaults to `kaiad.yaml`. */
+    kaiadYamlPath?: string;
+  }) =>
     apiFetch<{
       pipelineYaml: string;
       parse:
@@ -611,6 +617,8 @@ export const api = {
     composePath?: string;
     /** Required when the repo's kaiad.yaml is multi-pipeline. */
     pipelineName?: string | null;
+    /** Repo-relative path to the pipeline file. Defaults to `kaiad.yaml`. */
+    kaiadYamlPath?: string;
     fixExecutor?: "claude" | "cursor";
     healthcheck?: Healthcheck | null;
     securityContext?: PodSecurityContext | null;

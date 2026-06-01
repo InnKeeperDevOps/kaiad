@@ -168,6 +168,13 @@ alter table monitored_services drop column if exists agent_runtime_backend casca
 -- multi-image project.
 alter table monitored_services add column if not exists pipeline_name text;
 
+-- Where the kaiad.yaml lives inside the repo. Default 'kaiad.yaml' at
+-- the root preserves the historical behavior; services with a
+-- non-default layout (e.g. 'deploy/kaiad.yaml') set this at create
+-- time. Read by the build worker on every build and by the
+-- /preview-pipeline endpoint in the wizard.
+alter table monitored_services add column if not exists kaiad_yaml_path text not null default 'kaiad.yaml';
+
 -- Which AI CLI the agent runs to author an autonomous fix for this
 -- service (see realtime run_fix_plan.executor). Per-service so different
 -- repos/teams can pick Claude or Cursor. Defaults to claude.

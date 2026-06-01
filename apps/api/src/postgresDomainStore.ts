@@ -141,6 +141,7 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
         dockerImage: data.dockerImage,
         composePath: data.composePath,
         pipelineName: data.pipelineName,
+        kaiadYamlPath: data.kaiadYamlPath,
         fixExecutor: data.fixExecutor,
         healthcheck: data.healthcheck ?? null,
         securityContext: data.securityContext ?? null,
@@ -166,6 +167,7 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
       if (patch.dockerImage !== undefined) push("docker_image", patch.dockerImage);
       if (patch.composePath !== undefined) push("compose_path", patch.composePath);
       if (patch.pipelineName !== undefined) push("pipeline_name", patch.pipelineName);
+      if (patch.kaiadYamlPath !== undefined) push("kaiad_yaml_path", patch.kaiadYamlPath);
       if (patch.fixExecutor !== undefined) push("fix_executor", patch.fixExecutor);
       // Healthcheck patch: null clears every column (back to "no probe");
       // an object replaces all seven fields atomically. Undefined leaves

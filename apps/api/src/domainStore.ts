@@ -97,6 +97,7 @@ export type DomainStore = {
       dockerImage?: string;
       composePath?: string;
       pipelineName?: string | null;
+      kaiadYamlPath?: string;
       fixExecutor?: "claude" | "cursor";
       healthcheck?: MonitoredService["healthcheck"] | null;
       securityContext?: MonitoredService["securityContext"] | null;
@@ -120,6 +121,7 @@ export type DomainStore = {
       dockerImage?: string;
       composePath?: string;
       pipelineName?: string | null;
+      kaiadYamlPath?: string;
       fixExecutor?: "claude" | "cursor";
       /** null clears the probe; an object replaces it whole. */
       healthcheck?: MonitoredService["healthcheck"] | null;
@@ -437,6 +439,7 @@ export function createMemoryDomainStore(): DomainStore {
         dockerImage: data.dockerImage ?? null,
         composePath: data.composePath ?? null,
         pipelineName: data.pipelineName ?? null,
+        kaiadYamlPath: data.kaiadYamlPath ?? "kaiad.yaml",
         fixExecutor: data.fixExecutor ?? "claude",
         healthcheck: data.healthcheck ?? null,
         securityContext: data.securityContext ?? null,
@@ -459,6 +462,7 @@ export function createMemoryDomainStore(): DomainStore {
       if (patch.dockerImage !== undefined) svc.dockerImage = patch.dockerImage;
       if (patch.composePath !== undefined) svc.composePath = patch.composePath;
       if (patch.pipelineName !== undefined) svc.pipelineName = patch.pipelineName;
+      if (patch.kaiadYamlPath !== undefined) svc.kaiadYamlPath = patch.kaiadYamlPath;
       if (patch.fixExecutor !== undefined) svc.fixExecutor = patch.fixExecutor;
       if (patch.healthcheck !== undefined) svc.healthcheck = patch.healthcheck;
       if (patch.securityContext !== undefined) svc.securityContext = patch.securityContext;

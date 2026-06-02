@@ -2480,3 +2480,225 @@ export async function getRegistryStats(query: QueryFn): Promise<{
     })),
   };
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// Threat sniffer queries
+// ───────────────────────────────────────────────────────────────────────
+
+export type ThreatSeverityRow = "low" | "medium" | "high" | "critical";
+
+export interface ThreatEventRow {
+  id: string;
+  tenantId: string;
+  agentId: string;
+  serviceId: string;
+  sourceIp: string;
+  attackType: string;
+  severity: ThreatSeverityRow;
+  reason: string;
+  message: string | null;
+  ts: string;
+  createdAt: string;
+}
+
+export interface ThreatIpRow {
+  tenantId: string;
+  ipAddress: string;
+  severity: ThreatSeverityRow;
+  eventCount: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+function mapThreatEvent(r: Record<string, unknown>): ThreatEventRow {
+  return {
+    id: String(r.id),
+    tenantId: String(r.tenant_id),
+    agentId: String(r.agent_id),
+    serviceId: String(r.service_id),
+    sourceIp: String(r.source_ip),
+    attackType: String(r.attack_type),
+    severity: String(r.severity) as ThreatSeverityRow,
+    reason: String(r.reason),
+    message: r.message == null ? null : String(r.message),
+    ts: r.ts instanceof Date ? r.ts.toISOString() : String(r.ts),
+    createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at)
+  };
+}
+
+function mapThreatIp(r: Record<string, unknown>): ThreatIpRow {
+  return {
+    tenantId: String(r.tenant_id),
+    ipAddress: String(r.ip_address),
+    severity: String(r.severity) as ThreatSeverityRow,
+    eventCount: Number(r.event_count),
+    firstSeenAt: r.first_seen_at instanceof Date ? r.first_seen_at.toISOString() : String(r.first_seen_at),
+    lastSeenAt: r.last_seen_at instanceof Date ? r.last_seen_at.toISOString() : String(r.last_seen_at)
+  };
+}
+
+export async function insertThreatEvent(
+  query: QueryFn,
+  data: {
+    tenantId: string;
+    agentId: string;
+    serviceId: string;
+    sourceIp: string;
+    attackType: string;
+    severity: ThreatSeverityRow;
+    reason: string;
+    message: string;
+    ts: string;
+  }
+): Promise<ThreatEventRow> {
+  const id = crypto.randomUUID();
+  const { rows } = await query(
+    `INSERT INTO threat_events
+       (id, tenant_id, agent_id, service_id, source_ip,
+        attack_type, severity, reason, message, ts)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     RETURNING *`,
+    [
+      id,
+      data.tenantId,
+      data.agentId,
+      data.serviceId,
+      data.sourceIp,
+      data.attackType,
+      data.severity,
+      data.reason,
+      data.message,
+      data.ts
+    ]
+  );
+  return mapThreatEvent(rows[0]);
+}
+
+/**
+ * Upsert a per-IP threat record. Severity is monotonic via the
+ * CASE expression: an IP that has ever earned a higher rank stays
+ * there even when a new event is milder. Event count + last_seen
+ * bump on every call.
+ */
+export async function upsertThreatIp(
+  query: QueryFn,
+  data: {
+    tenantId: string;
+    ipAddress: string;
+    severity: ThreatSeverityRow;
+    ts: string;
+  }
+): Promise<ThreatIpRow> {
+  // Severity is monotonic: the inline CASE-rank compares incoming vs
+  // stored severity and keeps the max. Ordering mirrors
+  // threatSniffer.ts:SEVERITY_RANK — low=1 medium=2 high=3 critical=4.
+  const { rows } = await query(
+    `INSERT INTO threat_ips
+       (tenant_id, ip_address, severity, event_count, first_seen_at, last_seen_at)
+     VALUES ($1, $2, $3, 1, $4, $4)
+     ON CONFLICT (tenant_id, ip_address) DO UPDATE
+       SET severity = CASE
+             WHEN (CASE excluded.severity
+                     WHEN 'low' THEN 1 WHEN 'medium' THEN 2
+                     WHEN 'high' THEN 3 WHEN 'critical' THEN 4 ELSE 0 END)
+                > (CASE threat_ips.severity
+                     WHEN 'low' THEN 1 WHEN 'medium' THEN 2
+                     WHEN 'high' THEN 3 WHEN 'critical' THEN 4 ELSE 0 END)
+             THEN excluded.severity ELSE threat_ips.severity END,
+           event_count = threat_ips.event_count + 1,
+           last_seen_at = GREATEST(threat_ips.last_seen_at, excluded.last_seen_at)
+     RETURNING *`,
+    [data.tenantId, data.ipAddress, data.severity, data.ts]
+  );
+  return mapThreatIp(rows[0]);
+}
+
+export interface ListThreatIpsOptions {
+  severity?: ThreatSeverityRow;
+  ipPrefix?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export async function listThreatIps(
+  query: QueryFn,
+  tenantId: string,
+  opts: ListThreatIpsOptions = {}
+): Promise<{ rows: ThreatIpRow[]; total: number }> {
+  const where: string[] = ["tenant_id = $1"];
+  const params: unknown[] = [tenantId];
+  if (opts.severity) {
+    params.push(opts.severity);
+    where.push(`severity = $${params.length}`);
+  }
+  if (opts.ipPrefix) {
+    params.push(opts.ipPrefix + "%");
+    where.push(`ip_address LIKE $${params.length}`);
+  }
+  const limit = Math.min(Math.max(opts.limit ?? 100, 1), 500);
+  const offset = Math.max(opts.offset ?? 0, 0);
+  params.push(limit, offset);
+  const limitIdx = params.length - 1;
+  const offsetIdx = params.length;
+  const { rows } = await query(
+    `SELECT * FROM threat_ips
+      WHERE ${where.join(" AND ")}
+      ORDER BY last_seen_at DESC
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+    params
+  );
+  const countParams = params.slice(0, -2);
+  const { rows: countRows } = await query(
+    `SELECT COUNT(*)::bigint AS n FROM threat_ips WHERE ${where.join(" AND ")}`,
+    countParams
+  );
+  return {
+    rows: rows.map(mapThreatIp),
+    total: Number(countRows[0]?.n ?? 0)
+  };
+}
+
+export interface ListThreatEventsOptions {
+  sourceIp?: string;
+  severity?: ThreatSeverityRow;
+  limit?: number;
+  offset?: number;
+}
+
+export async function listThreatEvents(
+  query: QueryFn,
+  tenantId: string,
+  opts: ListThreatEventsOptions = {}
+): Promise<{ rows: ThreatEventRow[]; total: number }> {
+  const where: string[] = ["tenant_id = $1"];
+  const params: unknown[] = [tenantId];
+  if (opts.sourceIp) {
+    params.push(opts.sourceIp);
+    where.push(`source_ip = $${params.length}`);
+  }
+  if (opts.severity) {
+    params.push(opts.severity);
+    where.push(`severity = $${params.length}`);
+  }
+  const limit = Math.min(Math.max(opts.limit ?? 100, 1), 500);
+  const offset = Math.max(opts.offset ?? 0, 0);
+  params.push(limit, offset);
+  const limitIdx = params.length - 1;
+  const offsetIdx = params.length;
+  const { rows } = await query(
+    `SELECT * FROM threat_events
+      WHERE ${where.join(" AND ")}
+      ORDER BY ts DESC
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+    params
+  );
+  const countParams = params.slice(0, -2);
+  const { rows: countRows } = await query(
+    `SELECT COUNT(*)::bigint AS n FROM threat_events WHERE ${where.join(" AND ")}`,
+    countParams
+  );
+  return {
+    rows: rows.map(mapThreatEvent),
+    total: Number(countRows[0]?.n ?? 0)
+  };
+}

@@ -126,6 +126,7 @@ import { enforcePolicy } from "./policy.js";
 import { createReadinessCheckersFromEnv, type ReadinessChecker } from "./readyChecks.js";
 import { RealtimeManager, type PendingCommandRedis } from "./realtimeManager.js";
 import { ErrorGroupStore, hasUppercaseErrorMarker, isProbablyUserInputError } from "./errorGrouping.js";
+import { scanAndPersistThreats } from "./threatSniffer.js";
 import { dispatchAutoFix, type KaiadFixStart } from "./autoFixDispatcher.js";
 import { runKaiadFix } from "./kaiadFix.js";
 import {
@@ -146,6 +147,8 @@ import {
   listRegistryRepoVisibility,
   getRegistryManifestByTag,
   getRegistryBlobMeta,
+  listThreatIps,
+  listThreatEvents,
   getBuild,
   getBuildArtifact,
   listBuildArtifacts,
@@ -2048,6 +2051,28 @@ export function buildServer(opts: BuildServerOptions = {}) {
               correlationId: (msg as any).correlationId
             })
           ).catch(() => {});
+          // Threat sniffer: scan the line for attack patterns
+          // (path traversal, SQLi, log4shell, scanner UAs, brute
+          // force…). Runs as fire-and-forget so the ack below
+          // doesn't wait on DB writes; failures are swallowed inside
+          // scanAndPersistThreats so a sniffer hiccup can't break
+          // log ingestion.
+          void (async () => {
+            const q = await getBuildsQuery();
+            if (!q) return;
+            await scanAndPersistThreats(
+              q,
+              {
+                tenantId,
+                agentId: msg.agentId,
+                serviceId: msg.serviceId,
+                level: msg.level,
+                ts: msg.ts
+              },
+              msg.message,
+              req.log
+            );
+          })().catch(() => {});
         }
 
         socket.send(JSON.stringify({ type: "ack", accepted: true as const }));
@@ -3144,6 +3169,66 @@ export function buildServer(opts: BuildServerOptions = {}) {
         delivered: dispatchResult.delivered
       })
     );
+  });
+
+  // --- Threat sniffer (read-only views) ---
+  //
+  // Service log lines from the agent are scanned at ingestion (see
+  // the log_event handler upstream). Detections land in threat_events
+  // and roll up into threat_ips. Both endpoints are tenant-scoped.
+  app.get<{
+    Querystring: { severity?: string; ipPrefix?: string; limit?: string; offset?: string };
+  }>("/api/v1/threat-ips", async (req, reply) => {
+    const session = await resolveSession(authStore, req.headers.authorization);
+    if (!session) {
+      return reply.status(401).send(
+        apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId })
+      );
+    }
+    const q = await getBuildsQuery();
+    if (!q) return { ips: [], total: 0 };
+    const sevQ = (req.query.severity ?? "").toLowerCase();
+    const severity =
+      sevQ === "low" || sevQ === "medium" || sevQ === "high" || sevQ === "critical"
+        ? sevQ
+        : undefined;
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : undefined;
+    const offset = req.query.offset ? parseInt(req.query.offset, 10) : undefined;
+    const ipPrefix = (req.query.ipPrefix ?? "").trim() || undefined;
+    const result = await listThreatIps(q, session.tenantId, {
+      severity,
+      ipPrefix,
+      limit: Number.isFinite(limit) ? limit : undefined,
+      offset: Number.isFinite(offset) ? offset : undefined
+    });
+    return { ips: result.rows, total: result.total };
+  });
+
+  app.get<{
+    Querystring: { sourceIp?: string; severity?: string; limit?: string; offset?: string };
+  }>("/api/v1/threat-events", async (req, reply) => {
+    const session = await resolveSession(authStore, req.headers.authorization);
+    if (!session) {
+      return reply.status(401).send(
+        apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId })
+      );
+    }
+    const q = await getBuildsQuery();
+    if (!q) return { events: [], total: 0 };
+    const sevQ = (req.query.severity ?? "").toLowerCase();
+    const severity =
+      sevQ === "low" || sevQ === "medium" || sevQ === "high" || sevQ === "critical"
+        ? sevQ
+        : undefined;
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : undefined;
+    const offset = req.query.offset ? parseInt(req.query.offset, 10) : undefined;
+    const result = await listThreatEvents(q, session.tenantId, {
+      sourceIp: req.query.sourceIp?.trim() || undefined,
+      severity,
+      limit: Number.isFinite(limit) ? limit : undefined,
+      offset: Number.isFinite(offset) ? offset : undefined
+    });
+    return { events: result.rows, total: result.total };
   });
 
   // --- Incidents ---

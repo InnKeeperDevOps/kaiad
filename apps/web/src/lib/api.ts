@@ -124,6 +124,31 @@ export type ComponentLogLine = {
   ts: string;
 };
 
+export type ThreatSeverity = "low" | "medium" | "high" | "critical";
+
+export type ThreatIp = {
+  tenantId: string;
+  ipAddress: string;
+  severity: ThreatSeverity;
+  eventCount: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+};
+
+export type ThreatEvent = {
+  id: string;
+  tenantId: string;
+  agentId: string;
+  serviceId: string;
+  sourceIp: string;
+  attackType: string;
+  severity: ThreatSeverity;
+  reason: string;
+  message: string | null;
+  ts: string;
+  createdAt: string;
+};
+
 export type Incident = {
   id: string;
   tenantId: string;
@@ -509,6 +534,30 @@ export const api = {
     apiFetch<void>(`/api/v1/ssh-keys/${encodeURIComponent(id)}`, {
       method: "DELETE"
     }),
+
+  // --- Threat sniffer ---
+  listThreatIps: (opts: { severity?: ThreatSeverity; ipPrefix?: string; limit?: number; offset?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.severity) q.set("severity", opts.severity);
+    if (opts.ipPrefix) q.set("ipPrefix", opts.ipPrefix);
+    if (typeof opts.limit === "number") q.set("limit", String(opts.limit));
+    if (typeof opts.offset === "number") q.set("offset", String(opts.offset));
+    const suffix = q.toString();
+    return apiFetch<{ ips: ThreatIp[]; total: number }>(
+      `/api/v1/threat-ips${suffix ? `?${suffix}` : ""}`
+    );
+  },
+  listThreatEvents: (opts: { sourceIp?: string; severity?: ThreatSeverity; limit?: number; offset?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.sourceIp) q.set("sourceIp", opts.sourceIp);
+    if (opts.severity) q.set("severity", opts.severity);
+    if (typeof opts.limit === "number") q.set("limit", String(opts.limit));
+    if (typeof opts.offset === "number") q.set("offset", String(opts.offset));
+    const suffix = q.toString();
+    return apiFetch<{ events: ThreatEvent[]; total: number }>(
+      `/api/v1/threat-events${suffix ? `?${suffix}` : ""}`
+    );
+  },
 
   listIncidents: () => apiFetch<{ incidents: Incident[] }>("/api/v1/incidents"),
   updateIncidentStatus: (id: string, status: string) =>

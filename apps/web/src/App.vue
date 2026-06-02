@@ -11,6 +11,7 @@ import {
   LogOut,
   Network,
   Settings,
+  Shield,
   Users,
   Workflow
 } from "lucide-vue-next";
@@ -20,6 +21,7 @@ import { provideAuth, buildAuthState, type AuthUser } from "./lib/useAuth.js";
 import TenantSwitcher from "./components/TenantSwitcher.vue";
 import DashboardPage from "./features/dashboard/DashboardPage.vue";
 import IncidentsPage from "./features/incidents/IncidentsPage.vue";
+import ThreatsPage from "./features/threats/ThreatsPage.vue";
 import AgentsPage from "./features/agents/AgentsPage.vue";
 import ServicesPage from "./features/services/ServicesPage.vue";
 import SshKeysPage from "./features/ssh-keys/SshKeysPage.vue";
@@ -39,6 +41,7 @@ import SetupWizardPage from "./features/setup/SetupWizardPage.vue";
 type Route =
   | "dashboard"
   | "incidents"
+  | "threats"
   | "agents"
   | "agentDetail"
   | "operator"
@@ -65,6 +68,7 @@ const NAV_GROUPS: NavGroup[] = [
       { route: "agents", label: "Agents", icon: Cpu },
       { route: "services", label: "Services", icon: Box },
       { route: "incidents", label: "Incidents", icon: AlertTriangle },
+      { route: "threats", label: "Threats", icon: Shield, adminOnly: true },
       { route: "operator", label: "Operator", icon: Workflow, adminOnly: true }
     ]
   },
@@ -92,6 +96,7 @@ const NAV_GROUPS: NavGroup[] = [
 const PAGE_TITLE: Record<Route, string> = {
   dashboard: "Dashboard",
   incidents: "Incidents",
+  threats: "Threats",
   agents: "Agents",
   agentDetail: "Agent",
   operator: "Operator",
@@ -159,6 +164,7 @@ function readNavFromHash(): {
   const allowed: Route[] = [
     "dashboard",
     "incidents",
+    "threats",
     "agents",
     "operator",
     "services",
@@ -493,6 +499,7 @@ const navItemStyle = (active: boolean): CSSProperties => ({
       <main :style="{ padding: '1.5rem', overflow: 'auto' }">
       <DashboardPage v-if="route === 'dashboard'" />
       <IncidentsPage v-else-if="route === 'incidents'" />
+      <ThreatsPage v-else-if="route === 'threats'" />
       <AgentsPage v-else-if="route === 'agents'" />
       <AgentDetailPage
         v-else-if="route === 'agentDetail' && agentDetailAgentId"

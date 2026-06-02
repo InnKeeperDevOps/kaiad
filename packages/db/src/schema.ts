@@ -364,6 +364,50 @@ create table if not exists remediation_jobs (
   created_at timestamptz not null default now()
 );
 
+-- ── Log threat sniffer ─────────────────────────────────────────────
+-- Service log lines from the agent's log_event stream are scanned
+-- in-process by apps/api/src/threatSniffer.ts. Detections (port
+-- scans, SQLi, log4shell, path traversal, scanner UAs, brute force…)
+-- with an attributable source IP get written here.
+--
+-- Two tables on purpose:
+--   - threat_events: one row per (line, attack_type) — for audit and
+--     drill-down ("show me everything 1.2.3.4 did"). Bounded only by
+--     retention sweeps; the panel queries with limit+offset.
+--   - threat_ips: one row per (tenant, ip) — rolled-up view the
+--     panel uses for the threat-list-with-severity page. Severity is
+--     monotonic (MAX of incoming vs stored) so once an IP earns a
+--     critical rating it stays there even after benign noise.
+create table if not exists threat_events (
+  id text primary key,
+  tenant_id text not null references tenants(id) on delete cascade,
+  agent_id text not null,
+  service_id text not null,
+  source_ip text not null,
+  attack_type text not null,
+  severity text not null check (severity in ('low','medium','high','critical')),
+  reason text not null,
+  message text,
+  ts timestamptz not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists threat_events_tenant_ts_idx
+  on threat_events (tenant_id, ts desc);
+create index if not exists threat_events_tenant_ip_idx
+  on threat_events (tenant_id, source_ip, ts desc);
+
+create table if not exists threat_ips (
+  tenant_id text not null references tenants(id) on delete cascade,
+  ip_address text not null,
+  severity text not null check (severity in ('low','medium','high','critical')),
+  event_count bigint not null default 1,
+  first_seen_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  primary key (tenant_id, ip_address)
+);
+create index if not exists threat_ips_tenant_last_seen_idx
+  on threat_ips (tenant_id, last_seen_at desc);
+
 create table if not exists dedup_keys (
   tenant_id text not null references tenants(id) on delete cascade,
   fingerprint text not null,

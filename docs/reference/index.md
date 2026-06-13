@@ -12,7 +12,7 @@ Material here is **dense and factual**: schemas, flags, queues, and headers. Use
 
 The build pipeline and registry have their own reference pages — start here when onboarding a repo or debugging a build:
 
-- **[`kaiad.yaml` reference]({% link reference/pipeline.md %})** — every field, every option, the build-mode split (`build/runtime` vs `dockerfile:`), `environments:`, `dependsOn:`, `kind:`, validation rules.
+- **[`kaiad.yaml` reference]({% link reference/pipeline.md %})** — a multi-page section covering **every** schema field: the build-mode split (`build/runtime` vs `dockerfile:`), runtime [env/secrets/volumes incl. NFS]({% link reference/pipeline-runtime-config.md %}), [ports/domains/load balancing]({% link reference/pipeline-networking.md %}), [`environments:`]({% link reference/pipeline-environments.md %}), [`dependsOn:`/`kind:`]({% link reference/pipeline-dependencies.md %}), and [validation rules]({% link reference/pipeline-examples.md %}).
 - **[Pipeline variables]({% link reference/pipeline-variables.md %})** — `{var}` substitution, system vars (`kaiad_registry_host`), dependency vars (`{<dep>_version}`, `{<dep>_image_ref}`, …), naming rules.
 - **[Built-in OCI registry]({% link reference/registry.md %})** — `/v2/*` endpoints, JWT auth, Postgres-backed storage, pagination, garbage collection CLI, compose env vars.
 

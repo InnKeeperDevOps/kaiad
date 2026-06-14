@@ -139,6 +139,7 @@ import {
   buildOperatorInstallYaml,
   parseOperatorInstallOptions
 } from "./operatorInstallYaml.js";
+import { registerMcpRoute } from "./mcp/server.js";
 import {
   ensureCoreSchema,
   enqueueManualBuild,
@@ -798,6 +799,76 @@ export function buildServer(opts: BuildServerOptions = {}) {
       }
     })();
   };
+
+  /**
+   * Trigger an in-kaiad auto-fix for an incident. Single-sourced so both the
+   * REST route (`POST /api/v1/incidents/:id/run-fix`) and the MCP
+   * `run_incident_fix` tool drive the exact same lifecycle (synthesize an
+   * error group from the incident, acquire the per-service lock, start the
+   * fix). Returns a discriminated result the caller maps to a status code.
+   */
+  type TriggerIncidentFixResult =
+    | { ok: true; groupId: string }
+    | { ok: false; status: number; code: string; message: string };
+  async function triggerIncidentFix(
+    tenantId: string,
+    incidentId: string
+  ): Promise<TriggerIncidentFixResult> {
+    const inc = await domainStore.getIncident(tenantId, incidentId);
+    if (!inc) return { ok: false, status: 404, code: "NOT_FOUND", message: "Incident not found" };
+    const service = await domainStore.getService(tenantId, inc.serviceId);
+    if (!service) {
+      return { ok: false, status: 404, code: "NOT_FOUND", message: "Service for incident not found" };
+    }
+    if (!service.gitRepoUrl || !service.sshKeyId) {
+      return { ok: false, status: 400, code: "BAD_REQUEST", message: "Service is missing gitRepoUrl or sshKeyId" };
+    }
+    const lockKey = fixServiceKey(tenantId, service.id);
+    const existing = fixInFlightByService.get(lockKey);
+    if (existing) {
+      const detail = isPlaceholder(existing)
+        ? `A fix lock is held for this service but the runner hasn't started yet (acquired ${Math.round((Date.now() - existing.acquiredAt) / 1000)}s ago). Cancel it from the Incidents page's "Autonomous fixes running" panel, or wait — the GC sweeps stuck placeholders after ${Math.round(PLACEHOLDER_TTL_MS / 1000)}s.`
+        : `A fix is already in flight for this service. Cancel it from the Incidents page's "Autonomous fixes running" panel.`;
+      return { ok: false, status: 409, code: "ALREADY_RUNNING", message: detail };
+    }
+    const keyMaterial = await domainStore.getSshKeyMaterial(tenantId, service.sshKeyId);
+    if (!keyMaterial) {
+      return { ok: false, status: 400, code: "BAD_REQUEST", message: "SSH key material not found" };
+    }
+    // Synthesize / refresh an error group from the incident's stored message +
+    // fullLog so startKaiadFix has the same shape it gets from a live
+    // app_log_error.
+    const contextLines = inc.fullLog ? inc.fullLog.split("\n").filter((l) => l !== "") : [];
+    const upsert = errorGroups.upsert({
+      tenantId,
+      agentId: "manual",
+      serviceId: service.id,
+      message: inc.message ?? "(manual fix)",
+      contextLines,
+      ts: new Date().toISOString()
+    });
+    // Force "open" so dispatch isn't suppressed by a stale "fixed" / "paused".
+    errorGroups.setStatus(upsert.group.id, "open");
+    const group = errorGroups.get(upsert.group.id);
+    if (!group) {
+      return { ok: false, status: 500, code: "INTERNAL", message: "Error group missing after upsert" };
+    }
+    acquireFixPlaceholder(tenantId, service.id);
+    errorGroups.setStatus(group.id, "fixing");
+    startKaiadFix({
+      commandId: `cmd-manual-${crypto.randomUUID()}`,
+      tenantId,
+      service,
+      group,
+      sshKeyType: keyMaterial.type,
+      sshKeyValue: keyMaterial.privateKey ?? keyMaterial.localPath ?? null,
+      executor: (service.fixExecutor as "claude" | "cursor") ?? "claude",
+      contextLines: errorGroups.contextLinesFor(group.id),
+      triggeredBy: "manual",
+      incidentId: inc.id
+    });
+    return { ok: true, groupId: group.id };
+  }
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const publicDir = path.join(__dirname, "public");
@@ -3287,75 +3358,13 @@ export function buildServer(opts: BuildServerOptions = {}) {
   app.post<{ Params: { id: string } }>("/api/v1/incidents/:id/run-fix", async (req, reply) => {
     const s = await authorize(req as any, reply as any, { perm: "incidents:write" });
     if (!s) return;
-    const inc = await domainStore.getIncident(s.tenantId, req.params.id);
-    if (!inc) {
-      return reply.status(404).send(
-        apiErrorSchema.parse({ code: "NOT_FOUND", message: "Incident not found", correlationId: (req as any).correlationId })
+    const result = await triggerIncidentFix(s.tenantId, req.params.id);
+    if (!result.ok) {
+      return reply.status(result.status).send(
+        apiErrorSchema.parse({ code: result.code, message: result.message, correlationId: (req as any).correlationId })
       );
     }
-    const service = await domainStore.getService(s.tenantId, inc.serviceId);
-    if (!service) {
-      return reply.status(404).send(
-        apiErrorSchema.parse({ code: "NOT_FOUND", message: "Service for incident not found", correlationId: (req as any).correlationId })
-      );
-    }
-    if (!service.gitRepoUrl || !service.sshKeyId) {
-      return reply.status(400).send(
-        apiErrorSchema.parse({ code: "BAD_REQUEST", message: "Service is missing gitRepoUrl or sshKeyId", correlationId: (req as any).correlationId })
-      );
-    }
-    const lockKey = fixServiceKey(s.tenantId, service.id);
-    const existing = fixInFlightByService.get(lockKey);
-    if (existing) {
-      const detail = isPlaceholder(existing)
-        ? `A fix lock is held for this service but the runner hasn't started yet (acquired ${Math.round((Date.now() - existing.acquiredAt) / 1000)}s ago). Cancel it from the Incidents page's "Autonomous fixes running" panel, or wait — the GC sweeps stuck placeholders after ${Math.round(PLACEHOLDER_TTL_MS / 1000)}s.`
-        : `A fix is already in flight for this service. Cancel it from the Incidents page's "Autonomous fixes running" panel.`;
-      return reply.status(409).send(
-        apiErrorSchema.parse({ code: "ALREADY_RUNNING", message: detail, correlationId: (req as any).correlationId })
-      );
-    }
-    const keyMaterial = await domainStore.getSshKeyMaterial(s.tenantId, service.sshKeyId);
-    if (!keyMaterial) {
-      return reply.status(400).send(
-        apiErrorSchema.parse({ code: "BAD_REQUEST", message: "SSH key material not found", correlationId: (req as any).correlationId })
-      );
-    }
-    // Synthesize / refresh an error group from the incident's stored
-    // message + fullLog so startKaiadFix has the same shape it gets
-    // from a live app_log_error.
-    const contextLines = inc.fullLog ? inc.fullLog.split("\n").filter((l) => l !== "") : [];
-    const upsert = errorGroups.upsert({
-      tenantId: s.tenantId,
-      agentId: "manual",
-      serviceId: service.id,
-      message: inc.message ?? "(manual fix)",
-      contextLines,
-      ts: new Date().toISOString()
-    });
-    // Force "open" so dispatch isn't suppressed by a stale "fixed" /
-    // "paused" — the operator explicitly asked for another shot.
-    errorGroups.setStatus(upsert.group.id, "open");
-    const group = errorGroups.get(upsert.group.id);
-    if (!group) {
-      return reply.status(500).send(
-        apiErrorSchema.parse({ code: "INTERNAL", message: "Error group missing after upsert", correlationId: (req as any).correlationId })
-      );
-    }
-    acquireFixPlaceholder(s.tenantId, service.id);
-    errorGroups.setStatus(group.id, "fixing");
-    startKaiadFix({
-      commandId: `cmd-manual-${crypto.randomUUID()}`,
-      tenantId: s.tenantId,
-      service,
-      group,
-      sshKeyType: keyMaterial.type,
-      sshKeyValue: keyMaterial.privateKey ?? keyMaterial.localPath ?? null,
-      executor: (service.fixExecutor as "claude" | "cursor") ?? "claude",
-      contextLines: errorGroups.contextLinesFor(group.id),
-      triggeredBy: "manual",
-      incidentId: inc.id
-    });
-    return { ok: true, groupId: group.id };
+    return { ok: true, groupId: result.groupId };
   });
 
   // List autonomous fixes currently running inside this kaiad process.
@@ -5288,6 +5297,65 @@ export function buildServer(opts: BuildServerOptions = {}) {
     }
   );
 
+  /**
+   * Detach a service from an agent and best-effort tear down what the agent
+   * had deployed for it. Single-sourced so both the REST route
+   * (`DELETE /api/v1/agents/:agentId/services/:serviceId`) and the MCP
+   * `detach_service_from_agent` tool unbind AND dispatch teardown identically.
+   * Returns false when no binding existed (caller maps to 404). Teardown
+   * failures are logged but never fail the detach — the binding is gone either
+   * way and an operator can clean up manually if the agent is offline.
+   */
+  async function detachServiceWithTeardown(
+    tenantId: string,
+    agentId: string,
+    serviceId: string,
+    log?: { warn?: (obj: unknown, msg: string) => void }
+  ): Promise<boolean> {
+    const removed = await domainStore.detachServiceFromAgent(tenantId, agentId, serviceId);
+    if (!removed) return false;
+    try {
+      const q = await getBuildsQuery();
+      if (q) {
+        const last = await popLoadBalancerStatusForAgentService(q, tenantId, agentId, serviceId);
+        // Look up the service's display name so the agent can match k8s
+        // Services by metadata.name (now the service name, not the UUID).
+        // Best-effort: if the service row was already deleted, the agent
+        // falls back to UUID-based match.
+        const svcRow = await domainStore.getService(tenantId, serviceId).catch(() => null);
+        const apiUrl =
+          process.env.INTERNAL_API_URL?.trim() ?? `http://127.0.0.1:${process.env.PORT ?? "8092"}`;
+        const internalToken = process.env.INTERNAL_API_TOKEN?.trim() || "dev-token";
+        const commandId = crypto.randomUUID();
+        const job: AgentCommandJob = {
+          agentId,
+          commandId,
+          payload: {
+            type: "teardown_service",
+            commandId,
+            serviceId,
+            serviceName: svcRow?.name ?? "",
+            environment: last?.environment ?? "",
+            namespace: last?.namespace ?? ""
+          }
+        };
+        fetch(`${apiUrl}/api/v1/internal/agent-commands`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${internalToken}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(job)
+        }).catch((err) =>
+          log?.warn?.({ err: (err as Error).message, agentId, serviceId }, "teardown_service dispatch failed")
+        );
+      }
+    } catch (err) {
+      log?.warn?.({ err: (err as Error).message, agentId, serviceId }, "teardown popLoadBalancerStatus failed");
+    }
+    return true;
+  }
+
   app.delete<{ Params: { agentId: string; serviceId: string } }>(
     "/api/v1/agents/:agentId/services/:serviceId",
     async (req, reply) => {
@@ -5295,72 +5363,15 @@ export function buildServer(opts: BuildServerOptions = {}) {
       if (!session) {
         return reply.status(401).send(apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId }));
       }
-      const removed = await domainStore.detachServiceFromAgent(
+      const removed = await detachServiceWithTeardown(
         session.tenantId,
         req.params.agentId,
-        req.params.serviceId
+        req.params.serviceId,
+        req.log
       );
       if (!removed) {
         return reply.status(404).send(apiErrorSchema.parse({ code: "NOT_FOUND", message: "Binding not found", correlationId: (req as any).correlationId }));
       }
-
-      // Tear down what the agent had deployed for this service. We
-      // pop the last-known status row so the agent gets the right
-      // namespace/env to clean up, then dispatch the teardown_service
-      // command. Failures are logged but don't fail the detach — the
-      // binding is gone either way and an operator can manually
-      // clean up if the agent is offline.
-      try {
-        const q = await getBuildsQuery();
-        if (q) {
-          const last = await popLoadBalancerStatusForAgentService(
-            q,
-            session.tenantId,
-            req.params.agentId,
-            req.params.serviceId
-          );
-          // Look up the service's display name so the agent can match
-          // k8s Services by metadata.name (which is now the service
-          // name, not the UUID). Best-effort: if the service row was
-          // already deleted, the agent falls back to UUID-based match.
-          const svcRow = await domainStore.getService(session.tenantId, req.params.serviceId).catch(() => null);
-          const apiUrl =
-            process.env.INTERNAL_API_URL?.trim() ?? `http://127.0.0.1:${process.env.PORT ?? "8092"}`;
-          const internalToken = process.env.INTERNAL_API_TOKEN?.trim() || "dev-token";
-          const commandId = crypto.randomUUID();
-          const job: AgentCommandJob = {
-            agentId: req.params.agentId,
-            commandId,
-            payload: {
-              type: "teardown_service",
-              commandId,
-              serviceId: req.params.serviceId,
-              serviceName: svcRow?.name ?? "",
-              environment: last?.environment ?? "",
-              namespace: last?.namespace ?? ""
-            }
-          };
-          fetch(`${apiUrl}/api/v1/internal/agent-commands`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${internalToken}`,
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify(job)
-          }).catch((err) =>
-            req.log?.warn?.(
-              { err: (err as Error).message, agentId: req.params.agentId, serviceId: req.params.serviceId },
-              "teardown_service dispatch failed"
-            )
-          );
-        }
-      } catch (err) {
-        req.log?.warn?.(
-          { err: (err as Error).message, agentId: req.params.agentId, serviceId: req.params.serviceId },
-          "teardown popLoadBalancerStatus failed"
-        );
-      }
-
       return reply.status(204).send();
     }
   );
@@ -5720,6 +5731,21 @@ export function buildServer(opts: BuildServerOptions = {}) {
   stuckFixTimer.unref?.();
   app.addHook("onClose", async () => {
     clearInterval(stuckFixTimer);
+  });
+
+  // Hosted Model Context Protocol endpoint (POST /mcp). Wraps the same domain
+  // logic the REST routes use; gated by the mcp.read / mcp.write scopes.
+  registerMcpRoute(app, {
+    authStore,
+    domainStore,
+    getBuildsQuery,
+    getRegistryAdminContext,
+    triggerIncidentFix,
+    detachServiceWithTeardown,
+    createEnrollmentToken: createEnrollmentTokenForTenant,
+    getConnectedAgentIds: () => realtimeManager.getConnectedAgentIds(),
+    forcedPublicRepos: FORCED_PUBLIC_REPOS,
+    logger: app.log
   });
 
   app.setNotFoundHandler(async (req, reply) => {

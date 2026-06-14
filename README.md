@@ -36,6 +36,7 @@ Endpoints after startup:
 - Web UI: `http://localhost:4173`
 - API health: `http://localhost:3001/health`
 - API readiness: `http://localhost:3001/ready`
+- MCP server (Streamable HTTP): `http://localhost:3001/mcp` (see `docs/admin/mcp.md`)
 - Worker health: `http://localhost:9090/health`
 
 ## Quick Start (Single Container)

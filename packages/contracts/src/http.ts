@@ -475,7 +475,13 @@ export const apiCredentialScopeSchema = z.enum([
   // OCI registry access for machine callers (CI, mirrors, custom
   // tooling). `registry.push` implies `registry.pull` server-side.
   "registry.pull",
-  "registry.push"
+  "registry.push",
+  // Model Context Protocol endpoint (`POST /mcp`). `mcp.read` grants the
+  // read/inspect tools; `mcp.write` additionally grants the mutating tools
+  // (create/update/delete, deploy, trigger builds, run fixes). `mcp.write`
+  // implies `mcp.read` server-side. Owner/admin sessions hold both implicitly.
+  "mcp.read",
+  "mcp.write"
 ]);
 
 export const apiCredentialMetadataSchema = z.object({

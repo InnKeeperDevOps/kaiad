@@ -32,6 +32,8 @@ creation time — nothing more.
 | `agents.read` | `GET /api/v1/agents`, `GET /api/v1/agents/:id` — status polling; the scope the kaiad operator credential needs. |
 | `registry.pull` | `docker pull` from the built-in OCI registry via `/registry/token`. Any repo. See [Using the registry]({% link getting-started/using-the-registry.md %}). |
 | `registry.push` | `docker push` AND pull (push implies pull) to the built-in OCI registry. Any repo. |
+| `mcp.read` | Call the [MCP server]({% link admin/mcp.md %}) (`POST /mcp`) and run its read/inspect tools. |
+| `mcp.write` | Call the MCP server and run its mutating tools (create/delete, deploy, trigger builds, run fixes). Implies `mcp.read`. |
 
 The scope set is intentionally narrow and grows by deliberate addition.
 If you need an action a machine integration can't perform today, open an

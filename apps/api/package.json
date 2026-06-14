@@ -17,6 +17,7 @@
     "@fastify/cors": "^10.0.2",
     "@fastify/static": "^9.0.0",
     "@fastify/websocket": "^11.0.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@sm/contracts": "workspace:*",
     "@sm/db": "workspace:*",
     "@sm/domain": "workspace:*",
@@ -26,7 +27,8 @@
     "@sm/worker": "workspace:*",
     "fastify": "^5.2.1",
     "fastify-plugin": "^5.1.0",
-    "pg": "^8.14.1"
+    "pg": "^8.14.1",
+    "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

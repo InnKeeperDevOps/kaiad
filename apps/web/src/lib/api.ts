@@ -102,7 +102,9 @@ export type ApiCredentialScope =
   | "enrollment-tokens.create"
   | "agents.read"
   | "registry.pull"
-  | "registry.push";
+  | "registry.push"
+  | "mcp.read"
+  | "mcp.write";
 export type ApiCredential = {
   id: string;
   tenantId: string;

@@ -17,6 +17,11 @@ const SCOPES: { value: ApiCredentialScope; label: string }[] = [
   {
     value: "registry.push",
     label: "Registry push — push (and pull) images to the built-in OCI registry"
+  },
+  { value: "mcp.read", label: "MCP read — call POST /mcp and run read/inspect tools" },
+  {
+    value: "mcp.write",
+    label: "MCP write — run mutating MCP tools (create/delete, deploy, builds, fixes). Implies mcp.read"
   }
 ];
 

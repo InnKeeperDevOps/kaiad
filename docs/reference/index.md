@@ -66,7 +66,6 @@ See [Install Agent]({% link agent/install.md %}) for packaging and systemd.
 | `WORKER_HEALTH_PORT` / `WORKER_HEALTH_HOST` | Worker HTTP health bind. |
 | `GITHUB_APP_PRIVATE_KEY` | PEM for GitHub App (worker GitHub client). |
 | `SM_GITHUB_SIMULATE` | When set to `1`, simulates GitHub where implemented. |
-| `SM_EXECUTOR_SIMULATE` | Simulates executors when set to `1`. |
 | `REDIS_DISABLED` | Worker entry may skip Redis in special modes—see worker entry for behavior. |
 
 ### Agent
@@ -82,7 +81,6 @@ Logical names are defined in `@sm/contracts` (`QUEUE_NAMES`):
 
 | Key | Queue name string |
 |-----|-------------------|
-| `remediation` | `remediation` |
 | `github` | `github` |
 | `agentCommands` | `agent-commands` |
 | `logIngestion` | `log-ingestion` |

@@ -24,7 +24,6 @@ import {
   meResponseSchema,
   monitoredServiceSchema,
   platformToAgentMessageSchema,
-  remediationJobSchema,
   tenantSettingsSchema,
   updateIncidentStatusRequestSchema,
   upsertTenantSettingsRequestSchema
@@ -38,7 +37,6 @@ describe("constants.ts", () => {
   });
 
   it("exports QUEUE_NAMES", () => {
-    expect(QUEUE_NAMES.remediation).toBe("remediation");
     expect(QUEUE_NAMES.github).toBe("github");
     expect(QUEUE_NAMES.agentCommands).toBe("agent-commands");
     expect(QUEUE_NAMES.logIngestion).toBe("log-ingestion");
@@ -125,24 +123,6 @@ describe("http.ts", () => {
         tenantSettingsSchema.parse({
           tenantId: "t-1",
           docsUrl: "not-a-url"
-        })
-      ).toThrow();
-    });
-
-    it("accepts preferredExecutor", () => {
-      expect(() =>
-        tenantSettingsSchema.parse({
-          tenantId: "t-1",
-          preferredExecutor: "claude"
-        })
-      ).not.toThrow();
-    });
-
-    it("rejects invalid preferredExecutor", () => {
-      expect(() =>
-        tenantSettingsSchema.parse({
-          tenantId: "t-1",
-          preferredExecutor: "vscode"
         })
       ).toThrow();
     });
@@ -643,38 +623,6 @@ describe("realtime.ts", () => {
       ).not.toThrow();
     });
 
-    it("accepts run_cursor_plan", () => {
-      expect(() =>
-        platformToAgentMessageSchema.parse({
-          type: "run_cursor_plan",
-          commandId: "c-5",
-          prompt: "Investigate crash and prepare patch",
-          workspacePath: "/workspace/svc-1",
-          env: { SM_INCIDENT_ID: "inc-1" },
-          permissionsProfile: "repo",
-          gitRepoUrl: "https://example.com/repo.git",
-          sshKeyType: "uploaded",
-          sshKeyValue: "secret"
-        })
-      ).not.toThrow();
-    });
-
-    it("accepts run_claude_plan", () => {
-      expect(() =>
-        platformToAgentMessageSchema.parse({
-          type: "run_claude_plan",
-          commandId: "c-6",
-          prompt: "Draft and apply fix for failing tests",
-          workspacePath: "/workspace/svc-2",
-          env: { SM_INCIDENT_ID: "inc-2" },
-          permissionsProfile: "restricted",
-          gitRepoUrl: "https://example.com/repo.git",
-          sshKeyType: "uploaded",
-          sshKeyValue: null
-        })
-      ).not.toThrow();
-    });
-
     it("accepts run_toolchain", () => {
       expect(() =>
         platformToAgentMessageSchema.parse({
@@ -745,39 +693,6 @@ describe("realtime.ts", () => {
 });
 
 describe("jobs.ts", () => {
-  describe("remediationJobSchema", () => {
-    it("accepts valid job", () => {
-      expect(() =>
-        remediationJobSchema.parse({
-          remediationJobId: "rj-1",
-          tenantId: "t-1",
-          incidentId: "inc-1",
-          fingerprint: "fp",
-          executor: "cursor",
-          prompt: "fix it",
-          gitRepoUrl: "https://example.com/repo.git",
-          sshKeyType: "uploaded",
-          sshKeyValue: "secret"
-        })
-      ).not.toThrow();
-    });
-
-    it("rejects missing prompt", () => {
-      expect(() =>
-        remediationJobSchema.parse({
-          remediationJobId: "rj-1",
-          tenantId: "t-1",
-          incidentId: "inc-1",
-          fingerprint: "fp",
-          executor: "claude",
-          gitRepoUrl: "https://example.com/repo.git",
-          sshKeyType: "uploaded",
-          sshKeyValue: "secret"
-        })
-      ).toThrow();
-    });
-  });
-
   describe("agentCommandJobSchema", () => {
     it("accepts command job", () => {
       expect(() =>

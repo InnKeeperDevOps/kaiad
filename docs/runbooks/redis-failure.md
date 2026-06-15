@@ -10,13 +10,13 @@ Redis backs **BullMQ** (job orchestration) and may support sessions, rate limits
 
 ## Symptoms
 
-- Jobs remain **queued** or **stalled**; remediation and GitHub-related work does not progress.
+- Jobs remain **queued** or **stalled**; GitHub-related and agent-command work does not progress.
 - API errors referencing Redis connection, timeouts, or `ECONNREFUSED` / `NOAUTH`.
 - Sudden **memory** or **eviction** alerts; elevated latency on queue operations.
 
 ## Impact
 
-- **High**: No durable queue progress—remediation jobs, webhooks, and scheduled tasks back up.
+- **High**: No durable queue progress—agent-command jobs, webhooks, and scheduled tasks back up.
 - **Medium** (if Redis only used for optional cache/session): degraded auth or throttling behavior depending on deployment.
 
 ## Immediate actions

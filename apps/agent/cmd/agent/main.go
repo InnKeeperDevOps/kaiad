@@ -340,7 +340,7 @@ func main() {
 					// kaiad.dev/service-id label. The old docker.sock
 					// path only worked on Docker-runtime nodes; on
 					// CRI-O/containerd there is no daemon, so pods were
-					// never tailed and no incident/auto-fix ever fired.
+					// never tailed and the failure was never surfaced.
 					// We still best-effort the docker path first in
 					// case a node genuinely runs Docker (it no-ops
 					// harmlessly when the socket is absent).

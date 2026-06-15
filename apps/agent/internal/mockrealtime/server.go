@@ -14,8 +14,6 @@ import (
 // HelloPayload mirrors the first-frame hello from apps/api buildRealtimeAgentHello (see packages/contracts agentHelloMessageSchema).
 type HelloPayload struct {
 	RuntimeBackend string // docker, kubernetes, shell — default "docker"
-	// PreferredExecutor is the AI CLI for automated fix plans ("cursor" or "claude"). Omitted when empty.
-	PreferredExecutor string
 }
 
 // DefaultHello returns a dev-friendly hello matching typical Kaiad defaults.
@@ -26,12 +24,11 @@ func DefaultHello() HelloPayload {
 }
 
 type helloWire struct {
-	Type              string `json:"type"`
-	Service           string `json:"service"`
-	Runtime           struct {
+	Type    string `json:"type"`
+	Service string `json:"service"`
+	Runtime struct {
 		Backend string `json:"backend"`
 	} `json:"runtime"`
-	PreferredExecutor string `json:"preferredExecutor,omitempty"`
 }
 
 func (h HelloPayload) marshalJSON() ([]byte, error) {
@@ -43,7 +40,6 @@ func (h HelloPayload) marshalJSON() ([]byte, error) {
 	hw.Type = "hello"
 	hw.Service = "realtime"
 	hw.Runtime.Backend = backend
-	hw.PreferredExecutor = h.PreferredExecutor
 
 	return json.Marshal(hw)
 }

@@ -6,7 +6,7 @@ For runbooks, env vars, and CI coverage expectations, see [README.md](README.md)
 
 ## Role in the system
 
-The agent is an **outbound WebSocket client**. It connects to Kaiad’s `/realtime` endpoint, sends heartbeats and log events, and **executes remote commands** (shell steps, Docker operations, desired-state sync stubs, and plan runners). It does not expose an inbound HTTP server for the control plane; all control traffic is initiated by maintaining the WebSocket session.
+The agent is an **outbound WebSocket client**. It connects to Kaiad’s `/realtime` endpoint, sends heartbeats and log events, and **executes remote commands** (shell steps, Docker operations, desired-state sync stubs, and toolchain runs). It does not expose an inbound HTTP server for the control plane; all control traffic is initiated by maintaining the WebSocket session.
 
 ```mermaid
 flowchart LR
@@ -27,7 +27,7 @@ flowchart LR
 |------|----------------|
 | [`cmd/agent/main.go`](cmd/agent/main.go) | Process entry: env, credentials, Docker client, transport client, hello callback, log streaming bootstrap |
 | [`internal/transport`](internal/transport) | WebSocket client: dial, session loop, heartbeats, inbound message dispatch, `command_ack`, exponential backoff reconnect |
-| [`internal/executor`](internal/executor) | Implements `transport.CommandHandler`: command routing, shell/Docker/plan execution |
+| [`internal/executor`](internal/executor) | Implements `transport.CommandHandler`: command routing, shell/Docker/toolchain execution |
 | [`internal/docker`](internal/docker) | Minimal Docker Engine HTTP API over the unix socket; container list/start/stop; log stream attachment |
 | [`internal/credentials`](internal/credentials) | Optional on-disk enrollment persistence (`SM_AGENT_PERSIST_CREDENTIALS`) |
 
@@ -56,7 +56,7 @@ The read loop unmarshals a small envelope (`type`, `commandId`), then:
 |--------|----------|
 | `hello` | Parsed as `AgentHello`; `onHello` runs (main wires executor configuration and optional log streaming). |
 | `heartbeat_ack` / `ack` | Triggers `onFirstAck` once (e.g. persist credentials after first successful server acknowledgment). |
-| `run_step`, `docker_op`, `cancel_run`, `sync_desired_state`, `run_cursor_plan`, `run_claude_plan` | Deduplicated by `commandId`, then handled asynchronously via `CommandHandler`; result sent as `command_ack`. |
+| `run_step`, `docker_op`, `cancel_run`, `sync_desired_state` | Deduplicated by `commandId`, then handled asynchronously via `CommandHandler`; result sent as `command_ack`. |
 
 Unknown or malformed messages are ignored or dropped safely; duplicate `commandId`s are ignored after the first execution.
 
@@ -80,9 +80,6 @@ The executor is the **single implementation** of `transport.CommandHandler`. It 
 | `run_toolchain` | Run a script or binary with a named host toolchain (`language` + `path` + optional `args`, `cwd`, `env`). Supports `python3`, `java` (`.jar` only via `java -jar`), `node`, `go` (`go run` for `.go`, else execute path), `php`, `typescript` (default `npx --yes tsx`, override `SM_TYPESCRIPT_RUNNER`), `rust` (`.rs` compiled with `rustc` then executed), `swift`, `kotlin` (default `kotlin`, override `SM_KOTLIN_RUNNER`). Requires the tools on the agent `PATH`. |
 | `docker_op` | Dispatch by `operation` and `args` (e.g. start/stop container, `docker`/`docker-compose` CLI wrappers). Behavior depends on `RuntimeBackend`. |
 | `sync_desired_state` | Validates `desiredContainers` array; stub success message with entry count. |
-| `run_cursor_plan` / `run_claude_plan` | Invoke Cursor or Claude CLI (or isolated Docker runner) with prompt and workspace; artifacts under `<workspace>/.sm/logs/`. |
-
-Plan execution supports optional **container isolation** (`SM_EXECUTOR_ISOLATE_CONTAINERS`) with runner images and timeouts via env (see README).
 
 ## Docker integration (`internal/docker`)
 

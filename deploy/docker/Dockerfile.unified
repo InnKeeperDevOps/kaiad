@@ -55,27 +55,15 @@ RUN curl -sSfL https://github.com/google/go-containerregistry/releases/download/
     | tar -xz -C /usr/local/bin crane
 
 # ── Build stage: kaiad-agent runtime rootfs ────────────────
-# The bundled k8s agent image must be able to run the autonomous-fix
-# path (executeRunFixPlan): clone the service repo, run the AI CLI,
-# commit and push. That needs git + openssh-client and the Claude Code
-# CLI. Claude Code ships as a glibc Node program, so the base is Debian
-# (NOT alpine/musl) with Node 20 — mirroring apps/agent/Dockerfile,
-# which is the documented intent but was never what the bundle built.
+# The bundled k8s agent runs shell steps, Docker operations, and k8s
+# reconciliation against a workspace, which needs git + openssh-client.
+# Base is Debian (NOT alpine/musl) with Node 20, mirroring
+# apps/agent/Dockerfile.
 FROM node:20-bookworm-slim AS agent-runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git openssh-client ca-certificates ripgrep curl \
  && rm -rf /var/lib/apt/lists/*
-# Claude Code CLI on PATH for the "claude" fix executor (the per-service
-# default). The "cursor" executor expects `cursor-agent` on PATH; its
-# installer is a curl|bash that isn't reliable inside the build sandbox,
-# so it is NOT baked here — set fix_executor=cursor only on agents where
-# cursor-agent has been provisioned separately.
-RUN npm install -g @anthropic-ai/claude-code
-# executeRunFixPlan runs the AI CLI as uid 1000 (the CLI refuses to run
-# as root). node:20-bookworm-slim already ships a `node` user at uid
-# 1000 with a home dir, which is exactly that unprivileged identity —
-# no extra useradd needed (and -u 1000 would collide).
 ARG AGENT_KUBECTL_VERSION=v1.30.5
 RUN curl -fsSL "https://dl.k8s.io/release/${AGENT_KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
       -o /usr/local/bin/kubectl \
@@ -151,13 +139,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       openssh-client \
       ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-
-# Claude Code CLI — the autonomous fix runs IN this container
-# (apps/api/src/kaiadFix.ts), not on the agent. The CLI authenticates
-# via its own logged-in session (mount/persist ~/.claude), NOT an API
-# key. node:22-slim already provides node + npm. The "cursor" executor
-# expects `cursor-agent` on PATH; provision that separately if used.
-RUN npm install -g @anthropic-ai/claude-code
 
 # Docker CLI binary (no daemon — the daemon is on the host, accessed
 # via the socket bind-mounted by compose). Static-linked, ~50 MB.

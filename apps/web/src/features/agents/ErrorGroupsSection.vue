@@ -24,11 +24,11 @@ const STATUS_ICON: Record<ErrorGroupStatus, Component> = {
   missing_auth: KeyRound
 };
 const STATUS_HINT: Record<ErrorGroupStatus, string> = {
-  open: "Detected. Awaiting auto-fix dispatch.",
-  fixing: "A claude session is rewriting the repo and will push to main.",
-  fixed: "Fix pushed. Watching for re-occurrence within 30 minutes.",
-  paused: "Same error reappeared shortly after a fix — auto-fix paused. Investigate manually.",
-  missing_auth: "Service has no SSH key. Add one in Services to enable auto-fix."
+  open: "Detected.",
+  fixing: "In progress.",
+  fixed: "Resolved. Watching for re-occurrence within 30 minutes.",
+  paused: "Same error reappeared shortly after — paused. Investigate manually.",
+  missing_auth: "Service has no SSH key. Add one in Services."
 };
 
 function formatRelativeTime(iso: string | null | undefined): string {
@@ -94,8 +94,7 @@ const tdStyle = { padding: "0.5rem", verticalAlign: "top", fontSize: "0.85rem" }
   </p>
   <p v-else-if="error" :style="{ margin: 0, color: 'var(--color-danger)', fontSize: '0.8rem' }">{{ error }}</p>
   <p v-else-if="merged.length === 0" :style="{ margin: 0, fontSize: '0.8rem', color: 'var(--color-text-secondary)' }">
-    No error groups for this agent. Auto-fix triggers when a managed app emits an error log and the service has an SSH
-    key configured for git push.
+    No error groups for this agent. Error groups appear when a managed app emits an error log.
   </p>
   <div v-else :style="{ overflowX: 'auto' }">
     <table :style="{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem', minWidth: '800px' }">
@@ -137,11 +136,11 @@ const tdStyle = { padding: "0.5rem", verticalAlign: "top", fontSize: "0.85rem" }
             <div
               v-if="g.status === 'missing_auth'"
               :style="{ marginTop: '4px', color: 'var(--color-danger)', fontSize: '0.75rem' }"
-            >Auto-fix disabled: this service has no SSH key. Configure one in Services.</div>
+            >This service has no SSH key. Configure one in Services.</div>
             <div
               v-if="g.status === 'paused'"
               :style="{ marginTop: '4px', color: 'var(--color-danger)', fontSize: '0.75rem' }"
-            >A previous fix did not stop this error. Auto-fix paused to avoid a loop.</div>
+            >This error reappeared and has been paused to avoid a loop.</div>
           </td>
           <td :style="tdStyle">{{ g.count }}</td>
           <td :style="tdStyle">{{ formatRelativeTime(g.lastSeenAt) }}</td>

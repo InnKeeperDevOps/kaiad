@@ -24,11 +24,6 @@ import { listEnrollmentTokensForTenant } from "../enrollmentStore.js";
 import { hasScope, resolveSession, type AuthStore, type SessionInfo } from "../auth.js";
 import type { DomainStore } from "../domainStore.js";
 
-/** Result shape returned by the shared incident-fix trigger in server.ts. */
-type TriggerIncidentFixResult =
-  | { ok: true; groupId: string }
-  | { ok: false; status: number; code: string; message: string };
-
 /**
  * Dependencies the MCP tools need. These are the same closures/stores the REST
  * routes use, threaded in from `buildServer` so the tools wrap real domain
@@ -41,8 +36,6 @@ export type McpRouteDeps = {
   getBuildsQuery: () => Promise<QueryFn | null>;
   /** Registry admin context (pool + queryFn); null when storage isn't configured. */
   getRegistryAdminContext: () => Promise<{ pool: import("pg").Pool; queryFn: QueryFn } | null>;
-  /** Shared run-fix lifecycle (synthesize error group, lock, start fix). */
-  triggerIncidentFix: (tenantId: string, incidentId: string) => Promise<TriggerIncidentFixResult>;
   /** Shared detach + teardown dispatch. Returns false when no binding existed. */
   detachServiceWithTeardown: (tenantId: string, agentId: string, serviceId: string) => Promise<boolean>;
   /** Mint an agent enrollment token for the tenant. */
@@ -139,7 +132,6 @@ export function buildMcpServer(deps: McpRouteDeps, session: SessionInfo): McpSer
         composePath: z.string().optional(),
         pipelineName: z.string().nullish(),
         kaiadYamlPath: z.string().optional(),
-        fixExecutor: z.enum(["claude", "cursor"]).optional(),
         agentIds: z.array(z.string()).optional().describe("Initial agent bindings")
       },
       annotations: MUTATING
@@ -156,7 +148,6 @@ export function buildMcpServer(deps: McpRouteDeps, session: SessionInfo): McpSer
         composePath: args.composePath,
         pipelineName: args.pipelineName ?? null,
         kaiadYamlPath: args.kaiadYamlPath,
-        fixExecutor: args.fixExecutor,
         agentIds: args.agentIds
       });
       return jsonResult(svc);
@@ -178,7 +169,6 @@ export function buildMcpServer(deps: McpRouteDeps, session: SessionInfo): McpSer
         composePath: z.string().optional(),
         pipelineName: z.string().nullish(),
         kaiadYamlPath: z.string().optional(),
-        fixExecutor: z.enum(["claude", "cursor"]).optional(),
         locked: z.boolean().optional(),
         agentIds: z.array(z.string()).optional()
       },
@@ -469,17 +459,6 @@ export function buildMcpServer(deps: McpRouteDeps, session: SessionInfo): McpSer
       if (denied) return denied;
       const ok = await deps.domainStore.deleteIncident(tenantId, id);
       return ok ? jsonResult({ deleted: true, id }) : errorResult(`Incident not found: ${id}`);
-    }
-  );
-
-  server.registerTool(
-    "run_incident_fix",
-    { title: "Run autonomous fix", description: "Trigger an in-kaiad autonomous fix for an incident (clone → AI CLI → commit → push). Respects the per-service in-flight lock.", inputSchema: { id: z.string() }, annotations: MUTATING },
-    async ({ id }) => {
-      const denied = ensureWrite();
-      if (denied) return denied;
-      const result = await deps.triggerIncidentFix(tenantId, id);
-      return result.ok ? jsonResult({ ok: true, groupId: result.groupId }) : errorResult(`[${result.code}] ${result.message}`);
     }
   );
 

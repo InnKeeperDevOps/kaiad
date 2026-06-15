@@ -50,8 +50,7 @@ per repo.
 If you've configured the **GitHub App** path
 ([`getting-started/github-app.md`]({% link getting-started/github-app.md %})),
 public repos can sometimes be cloned without an SSH key. Most operators
-still set one — auto-fix mutations need write access through the App or
-the key.
+still set one so builds have reliable read access to the repo.
 
 ## 2. Add the service in the panel
 

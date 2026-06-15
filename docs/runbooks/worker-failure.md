@@ -16,7 +16,7 @@ nav_order: 4
 
 ## Impact
 
-- **High**: Remediation and automation stop; incidents may be detected but not resolved.
+- **High**: Automation jobs stop; incidents may be detected but no GitHub or agent-command work completes.
 - **Partial**: Only some queues or tenants affected—check **concurrency**, **rate limits**, and **per-tenant** failures.
 
 ## Immediate actions

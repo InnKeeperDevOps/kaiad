@@ -9,7 +9,6 @@ import {
   createSshKeyRequestSchema,
   healthResponseSchema,
   listEnrollmentTokensResponseSchema,
-  remediationJobSchema,
   tenantSettingsSchema
 } from "../src/index.js";
 
@@ -43,13 +42,6 @@ describe("contracts", () => {
         uptimeSeconds: 10
       })
     ).toBeTruthy();
-  });
-
-  it("rejects invalid remediation jobs", () => {
-    const result = remediationJobSchema.safeParse({
-      tenantId: "t1"
-    });
-    expect(result.success).toBe(false);
   });
 
   it("parses enrollment token create/list responses", () => {

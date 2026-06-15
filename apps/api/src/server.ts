@@ -127,8 +127,6 @@ import { createReadinessCheckersFromEnv, type ReadinessChecker } from "./readyCh
 import { RealtimeManager, type PendingCommandRedis } from "./realtimeManager.js";
 import { ErrorGroupStore, hasUppercaseErrorMarker, isProbablyUserInputError } from "./errorGrouping.js";
 import { scanAndPersistThreats } from "./threatSniffer.js";
-import { dispatchAutoFix, type KaiadFixStart } from "./autoFixDispatcher.js";
-import { runKaiadFix } from "./kaiadFix.js";
 import {
   getTenantSettings,
   upsertTenantSettings
@@ -184,7 +182,6 @@ import {
   updateRegistryRetentionPolicy,
   applyRegistryRetention,
   getRegistryStats,
-  reapStuckFixAttempts,
   type QueryFn,
   type LoadBalancerStatusRow
 } from "@sm/db";
@@ -289,9 +286,6 @@ export type BuildServerOptions = {
   redis?: PendingCommandRedis;
   authStore?: AuthStore;
   onSetupComplete?: SetupCompleteCallback;
-  /** Override the in-kaiad fix runner (tests stub this). Defaults to
-   *  the real clone → AI CLI → commit → push. */
-  runFix?: typeof runKaiadFix;
 };
 
 export type RuntimeQueueWiring = {
@@ -300,13 +294,6 @@ export type RuntimeQueueWiring = {
 };
 
 export type { ReadinessChecker } from "./readyChecks.js";
-
-/** Best-effort extraction of a 7+ char hex SHA from agent run_fix_plan output.
- *  The agent prints `commit=<sha>` on a successful push; if absent, return null. */
-function extractCommitShaFromOutput(output: string): string | null {
-  const m = output.match(/commit=([0-9a-f]{7,40})/i);
-  return m ? m[1] : null;
-}
 
 /**
  * Two `resolveEnvironment` outputs that mean the same deployment.
@@ -377,13 +364,7 @@ function createLazyDomainStore(resolve: () => Promise<DomainStore>): DomainStore
     updateIncidentStatus: (tenantId, id, status) =>
       get().then((s) => s.updateIncidentStatus(tenantId, id, status)),
     deleteIncident: (tenantId, id) => get().then((s) => s.deleteIncident(tenantId, id)),
-    resolveIncidentByFingerprint: (tenantId, serviceId, fingerprint) =>
-      get().then((s) => s.resolveIncidentByFingerprint(tenantId, serviceId, fingerprint)),
     resolveStaleIncidents: (cutoff) => get().then((s) => s.resolveStaleIncidents(cutoff)),
-    recordFixProgress: (tenantId, serviceId, fingerprint, patch) =>
-      get().then((s) => s.recordFixProgress(tenantId, serviceId, fingerprint, patch)),
-    getCurrentIncidentId: (tenantId, serviceId, fingerprint) =>
-      get().then((s) => s.getCurrentIncidentId(tenantId, serviceId, fingerprint)),
     listAgents: (tenantId) => get().then((s) => s.listAgents(tenantId)),
     getAgent: (tenantId, id) => get().then((s) => s.getAgent(tenantId, id)),
     recordAgentHeartbeat: (tenantId, data) =>
@@ -522,353 +503,11 @@ export function buildServer(opts: BuildServerOptions = {}) {
   const authStore = opts.authStore ?? createMemoryAuthStore();
   const realtimeManager = new RealtimeManager({ redis: opts.redis });
   const errorGroups = new ErrorGroupStore();
-  /** Map of in-flight fix command_id → errorGroupId, so the WS command_ack
-   *  handler can mark the right group fixed/open and emit onFixCreated. */
-  const fixCommandToGroup = new Map<string, { tenantId: string; serviceId: string; agentId: string; errorGroupId: string }>();
 
-  /**
-   * Per-service auto-fix concurrency gate. Key is `<tenantId>:<serviceId>`.
-   *
-   * One physical incident (e.g. a thrown NullPointerException) typically
-   * lands as multiple error groups — Spring emits a "Servlet.service()
-   * threw exception" wrapper, the NPE itself, and the top stack frame
-   * each as a distinct ERROR-level line. Without this lock, every group
-   * fires its own `run_fix_plan` and we end up with N concurrent Claude
-   * runs racing to push to the same branch — N-1 of them lose the race
-   * and report "no changes" because the first push already fixed the
-   * file. The lock is acquired SYNCHRONOUSLY before dispatchAutoFix's
-   * first await so concurrent app_log_error handlers can't both observe
-   * the unlocked state. Released by the command_ack handler regardless
-   * of fix outcome (a stuck "fixing" lock would starve future incidents
-   * for that service until process restart).
-   */
-  type FixInFlightMeta = {
-    tenantId: string;
-    serviceId: string;
-    serviceName: string;
-    groupId: string;
-    fingerprint: string;
-    incidentId: string | null;
-    executor: "claude" | "cursor";
-    startedAt: string;
-    triggeredBy: "auto" | "manual";
-    abort: AbortController;
-  };
-  /** Placeholder entry held during the synchronous acquire window
-   *  between lock acquisition and startKaiadFix populating the full
-   *  meta. Tracks `acquiredAt` so a stuck placeholder (startKaiadFix
-   *  never landed) can be swept by the GC below — without that an
-   *  orphaned placeholder permanently jams "Run fix" on the service. */
-  type FixInFlightPlaceholder = {
-    placeholder: true;
-    tenantId: string;
-    serviceId: string;
-    acquiredAt: number;
-  };
-  const isPlaceholder = (v: FixInFlightMeta | FixInFlightPlaceholder): v is FixInFlightPlaceholder =>
-    (v as FixInFlightPlaceholder).placeholder === true;
-  const fixInFlightByService = new Map<string, FixInFlightMeta | FixInFlightPlaceholder>();
-  const fixServiceKey = (tenantId: string, serviceId: string) => `${tenantId}:${serviceId}`;
-  const acquireFixPlaceholder = (tenantId: string, serviceId: string): boolean => {
-    const key = fixServiceKey(tenantId, serviceId);
-    if (fixInFlightByService.has(key)) return false;
-    fixInFlightByService.set(key, {
-      placeholder: true,
-      tenantId,
-      serviceId,
-      acquiredAt: Date.now()
-    });
-    return true;
-  };
-
-  // Sweep orphaned placeholders — if startKaiadFix never landed within
-  // 60s the acquire window is well past; release the lock so "Run fix"
-  // isn't permanently 409'd. 60s comfortably exceeds the longest
-  // observed path between set(placeholder) and the meta-swap (synchronous
-  // map writes + a single getCurrentIncidentId await).
-  const PLACEHOLDER_TTL_MS = 60_000;
-  const placeholderSweepTimer = setInterval(() => {
-    const now = Date.now();
-    for (const [key, val] of fixInFlightByService) {
-      if (isPlaceholder(val) && now - val.acquiredAt > PLACEHOLDER_TTL_MS) {
-        fixInFlightByService.delete(key);
-        console.warn("[kaiad_fix]", JSON.stringify({
-          event: "fix_lock.placeholder_swept",
-          key,
-          ageMs: now - val.acquiredAt
-        }));
-      }
-    }
-  }, 15_000);
-  // Test-mode helper: tests that import the bound server can stop the
-  // timer. unref so the timer doesn't keep the process alive on its own.
-  placeholderSweepTimer.unref?.();
   const app = Fastify();
   app.register(cors);
   app.register(websocket);
   app.register(correlationIdPlugin);
-
-  // The autonomous fix runs HERE, in the kaiad container (clone → AI
-  // CLI → commit → push) — never dispatched to the agent. dispatchAutoFix
-  // fires this fire-and-forget; it owns the post-fix lifecycle:
-  // group status, incident resolution, and releasing the per-service
-  // in-flight lock so the next incident isn't starved.
-  const resolvedRunFix = opts.runFix ?? runKaiadFix;
-  const broadcastGroup = (tenantId: string, groupId: string) => {
-    const g = errorGroups.get(groupId);
-    if (g) {
-      realtimeManager.broadcastToTenant(
-        tenantId,
-        JSON.stringify(uiTelemetryEventSchema.parse({ type: "error_group_updated", group: g }))
-      );
-    }
-  };
-  // Fastify's logger is disabled (app.log is a no-op here), so the fix
-  // pipeline logs to the console explicitly — same pattern as
-  // logAuthStep — otherwise the whole flow is undebuggable in prod.
-  const fixLog = (o: Record<string, unknown>) =>
-    console.log("[kaiad_fix]", JSON.stringify(o));
-  // Map fix runner step → persistent incident status. "running" is the
-  // umbrella state while a step is in-flight; each ok-step transitions
-  // to the next; the terminal states (succeeded / failed / no_changes /
-  // *_failed) freeze the timeline for the Incidents UI.
-  const stepToStatus: Record<string, string> = {
-    started: "running",
-    cloning: "cloning",
-    cli: "cli",
-    no_changes: "no_changes",
-    committing: "committing",
-    pushing: "pushing",
-    succeeded: "succeeded",
-    failed: "failed"
-  };
-  const startKaiadFix = (a: KaiadFixStart): void => {
-    void (async () => {
-      const lockKey = fixServiceKey(a.tenantId, a.service.id);
-      const branch = a.service.branch || "main";
-      // Pin the incident id ONCE at fix-start. Without this, every
-      // recordFixProgress call resolved "most recent incident for the
-      // fingerprint" independently — so when the agent shipped a new
-      // error mid-run a fresh incident appeared and events split
-      // across rows. Manual/retry callers pass `a.incidentId` directly
-      // because the upserted group's fingerprint can mismatch the
-      // original incident's fingerprint (the synthetic group recomputes
-      // it from inc.message + inc.fullLog), which produced "incidentId:
-      // null" runs that detached the fix timeline from the incident.
-      let incidentId: string | null = a.incidentId ?? null;
-      if (!incidentId) {
-        try {
-          incidentId = await domainStore.getCurrentIncidentId(
-            a.tenantId,
-            a.service.id,
-            a.group.fingerprint
-          );
-        } catch (e) {
-          fixLog({ event: "fix_progress.lookup_failed", err: String(e) });
-        }
-      }
-      // Promote the placeholder lock to a full in-flight entry now that
-      // we have an AbortController and (best-effort) the incident id.
-      const abort = new AbortController();
-      fixInFlightByService.set(lockKey, {
-        tenantId: a.tenantId,
-        serviceId: a.service.id,
-        serviceName: a.service.name,
-        groupId: a.group.id,
-        fingerprint: a.group.fingerprint,
-        incidentId,
-        executor: a.executor,
-        startedAt: new Date().toISOString(),
-        triggeredBy: a.triggeredBy ?? "auto",
-        abort
-      });
-      fixLog({
-        event: "kaiad_fix.start",
-        groupId: a.group.id,
-        serviceId: a.service.id,
-        incidentId,
-        repo: a.service.gitRepoUrl,
-        branch,
-        executor: a.executor
-      });
-      // Seed the fix-progress timeline on the pinned incident.
-      try {
-        await domainStore.recordFixProgress(a.tenantId, a.service.id, a.group.fingerprint, {
-          incidentId: incidentId ?? undefined,
-          status: "running",
-          executor: a.executor,
-          startedAt: new Date().toISOString(),
-          finishedAt: undefined,
-          commitSha: null,
-          output: null,
-          resetEvents: true
-        });
-      } catch (e) {
-        fixLog({ event: "fix_progress.seed_failed", err: String(e) });
-      }
-      let result: Awaited<ReturnType<typeof runKaiadFix>>;
-      try {
-        result = await resolvedRunFix({
-          repoUrl: a.service.gitRepoUrl,
-          branch,
-          sshKeyType: a.sshKeyType,
-          sshKeyValue: a.sshKeyValue,
-          executor: a.executor,
-          errorMessage: a.group.sampleMessage,
-          contextLines: a.contextLines,
-          signal: abort.signal,
-          logger: {
-            info: (...m: unknown[]) => fixLog({ event: "kaiad_fix.info", m }),
-            warn: (...m: unknown[]) => fixLog({ event: "kaiad_fix.warn", m })
-          },
-          // Each step appends an event AND advances incident.last_fix_status.
-          onProgress: (ev) => {
-            const nextStatus = stepToStatus[ev.step];
-            const patch: Parameters<typeof domainStore.recordFixProgress>[3] = {
-              incidentId: incidentId ?? undefined,
-              event: ev
-            };
-            // Move the umbrella status forward when a step *starts*
-            // (ev.ok undefined). When ev.ok === false, the timeline
-            // freezes at that step until the final result is recorded
-            // below; ev.ok === true keeps the previous "running" -ish
-            // status (next emit will overwrite).
-            if (ev.ok === undefined && nextStatus) patch.status = nextStatus;
-            void domainStore
-              .recordFixProgress(a.tenantId, a.service.id, a.group.fingerprint, patch)
-              .catch((e) => fixLog({ event: "fix_progress.update_failed", err: String(e) }));
-          }
-        });
-      } catch (err) {
-        result = { ok: false, reason: "error", output: String((err as Error)?.message ?? err) };
-      }
-      // Resolve to a terminal status for the incident.
-      const finalStatus = result.ok
-        ? "succeeded"
-        : result.reason === "auth"
-        ? "auth_failed"
-        : result.reason === "no_changes"
-        ? "no_changes"
-        : result.reason === "clone_failed"
-        ? "clone_failed"
-        : result.reason === "cli_failed"
-        ? "cli_failed"
-        : result.reason === "push_failed"
-        ? "push_failed"
-        : result.reason === "cancelled"
-        ? "cancelled"
-        : "failed";
-      try {
-        if (result.ok) {
-          errorGroups.setStatus(a.group.id, "fixed", result.commitSha ?? undefined);
-          try {
-            await domainStore.resolveIncidentByFingerprint(a.tenantId, a.service.id, a.group.fingerprint);
-          } catch (e) {
-            fixLog({ event: "incident.resolve_failed", err: String(e) });
-          }
-        } else if (result.reason === "auth") {
-          errorGroups.setStatus(a.group.id, "missing_auth");
-        } else {
-          errorGroups.setStatus(a.group.id, "open");
-        }
-        // Persist the final fix progress (status, finishedAt, output,
-        // commit sha) so the UI shows the result + last CLI output.
-        try {
-          await domainStore.recordFixProgress(a.tenantId, a.service.id, a.group.fingerprint, {
-            incidentId: incidentId ?? undefined,
-            status: finalStatus,
-            finishedAt: new Date().toISOString(),
-            commitSha: result.commitSha ?? null,
-            output: result.output?.slice(0, 4000) ?? null
-          });
-        } catch (e) {
-          fixLog({ event: "fix_progress.finalize_failed", err: String(e) });
-        }
-        fixLog({
-          event: "kaiad_fix.done",
-          groupId: a.group.id,
-          serviceId: a.service.id,
-          ok: result.ok,
-          reason: result.reason,
-          commitSha: result.commitSha,
-          output: result.output?.slice(0, 800)
-        });
-        broadcastGroup(a.tenantId, a.group.id);
-      } finally {
-        fixInFlightByService.delete(lockKey);
-      }
-    })();
-  };
-
-  /**
-   * Trigger an in-kaiad auto-fix for an incident. Single-sourced so both the
-   * REST route (`POST /api/v1/incidents/:id/run-fix`) and the MCP
-   * `run_incident_fix` tool drive the exact same lifecycle (synthesize an
-   * error group from the incident, acquire the per-service lock, start the
-   * fix). Returns a discriminated result the caller maps to a status code.
-   */
-  type TriggerIncidentFixResult =
-    | { ok: true; groupId: string }
-    | { ok: false; status: number; code: string; message: string };
-  async function triggerIncidentFix(
-    tenantId: string,
-    incidentId: string
-  ): Promise<TriggerIncidentFixResult> {
-    const inc = await domainStore.getIncident(tenantId, incidentId);
-    if (!inc) return { ok: false, status: 404, code: "NOT_FOUND", message: "Incident not found" };
-    const service = await domainStore.getService(tenantId, inc.serviceId);
-    if (!service) {
-      return { ok: false, status: 404, code: "NOT_FOUND", message: "Service for incident not found" };
-    }
-    if (!service.gitRepoUrl || !service.sshKeyId) {
-      return { ok: false, status: 400, code: "BAD_REQUEST", message: "Service is missing gitRepoUrl or sshKeyId" };
-    }
-    const lockKey = fixServiceKey(tenantId, service.id);
-    const existing = fixInFlightByService.get(lockKey);
-    if (existing) {
-      const detail = isPlaceholder(existing)
-        ? `A fix lock is held for this service but the runner hasn't started yet (acquired ${Math.round((Date.now() - existing.acquiredAt) / 1000)}s ago). Cancel it from the Incidents page's "Autonomous fixes running" panel, or wait — the GC sweeps stuck placeholders after ${Math.round(PLACEHOLDER_TTL_MS / 1000)}s.`
-        : `A fix is already in flight for this service. Cancel it from the Incidents page's "Autonomous fixes running" panel.`;
-      return { ok: false, status: 409, code: "ALREADY_RUNNING", message: detail };
-    }
-    const keyMaterial = await domainStore.getSshKeyMaterial(tenantId, service.sshKeyId);
-    if (!keyMaterial) {
-      return { ok: false, status: 400, code: "BAD_REQUEST", message: "SSH key material not found" };
-    }
-    // Synthesize / refresh an error group from the incident's stored message +
-    // fullLog so startKaiadFix has the same shape it gets from a live
-    // app_log_error.
-    const contextLines = inc.fullLog ? inc.fullLog.split("\n").filter((l) => l !== "") : [];
-    const upsert = errorGroups.upsert({
-      tenantId,
-      agentId: "manual",
-      serviceId: service.id,
-      message: inc.message ?? "(manual fix)",
-      contextLines,
-      ts: new Date().toISOString()
-    });
-    // Force "open" so dispatch isn't suppressed by a stale "fixed" / "paused".
-    errorGroups.setStatus(upsert.group.id, "open");
-    const group = errorGroups.get(upsert.group.id);
-    if (!group) {
-      return { ok: false, status: 500, code: "INTERNAL", message: "Error group missing after upsert" };
-    }
-    acquireFixPlaceholder(tenantId, service.id);
-    errorGroups.setStatus(group.id, "fixing");
-    startKaiadFix({
-      commandId: `cmd-manual-${crypto.randomUUID()}`,
-      tenantId,
-      service,
-      group,
-      sshKeyType: keyMaterial.type,
-      sshKeyValue: keyMaterial.privateKey ?? keyMaterial.localPath ?? null,
-      executor: (service.fixExecutor as "claude" | "cursor") ?? "claude",
-      contextLines: errorGroups.contextLinesFor(group.id),
-      triggeredBy: "manual",
-      incidentId: inc.id
-    });
-    return { ok: true, groupId: group.id };
-  }
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const publicDir = path.join(__dirname, "public");
@@ -1837,75 +1476,6 @@ export function buildServer(opts: BuildServerOptions = {}) {
           void realtimeManager
             .acknowledgeCommand(registeredAgentId, msg.commandId, { status: msg.status, output: msg.output })
             .catch(() => {});
-
-          // If this ack belongs to a fix command we dispatched, transition
-          // the error group and (on success) emit onFixCreated.
-          const fixMeta = fixCommandToGroup.get(msg.commandId);
-          if (fixMeta) {
-            fixCommandToGroup.delete(msg.commandId);
-            // Release the per-service auto-fix lock so the NEXT
-            // incident on this service can dispatch. Runs on every
-            // ack (completed / failed / cancelled) so a single bad
-            // fix won't jam the gate. fixMeta.serviceId is whatever
-            // the agent reported (usually the kaiad service NAME via
-            // the service-name label); resolve to the canonical
-            // MonitoredService.id with the same id-then-name lookup
-            // we used at dispatch time.
-            let lockSvc: Awaited<ReturnType<typeof domainStore.getService>> | undefined;
-            try {
-              lockSvc = await domainStore.getService(fixMeta.tenantId, fixMeta.serviceId);
-              if (!lockSvc) {
-                const all = await domainStore.listServices(fixMeta.tenantId);
-                lockSvc = all.find((s) => s.name === fixMeta.serviceId);
-              }
-              if (lockSvc) {
-                fixInFlightByService.delete(fixServiceKey(fixMeta.tenantId, lockSvc.id));
-              }
-            } catch {
-              // Best effort. Worst case the lock leaks for this
-              // service until the next process restart.
-            }
-            if (msg.status === "completed") {
-              const commitSha = extractCommitShaFromOutput(msg.output ?? "");
-              const updated = errorGroups.setStatus(fixMeta.errorGroupId, "fixed", commitSha ?? undefined);
-              // Close the visible incident now the fix pushed a commit.
-              if (lockSvc && updated) {
-                try {
-                  await domainStore.resolveIncidentByFingerprint(
-                    fixMeta.tenantId,
-                    lockSvc.id,
-                    updated.fingerprint
-                  );
-                } catch (err) {
-                  req.log?.warn?.({ event: "incident.resolve_failed", err: String(err) });
-                }
-              }
-              if (updated) {
-                realtimeManager.broadcastToTenant(
-                  fixMeta.tenantId,
-                  JSON.stringify(
-                    uiTelemetryEventSchema.parse({
-                      type: "error_group_updated",
-                      group: updated
-                    })
-                  )
-                );
-              }
-            } else if (msg.status === "failed" || msg.status === "cancelled") {
-              const updated = errorGroups.setStatus(fixMeta.errorGroupId, "open");
-              if (updated) {
-                realtimeManager.broadcastToTenant(
-                  fixMeta.tenantId,
-                  JSON.stringify(
-                    uiTelemetryEventSchema.parse({
-                      type: "error_group_updated",
-                      group: updated
-                    })
-                  )
-                );
-              }
-            }
-          }
         }
 
         if (msg.type === "app_log_error") {
@@ -1916,10 +1486,10 @@ export function buildServer(opts: BuildServerOptions = {}) {
             !hasUppercaseErrorMarker(msg.message, msg.contextLines) &&
             isProbablyUserInputError(msg.message)
           ) {
-            // User-input errors are not auto-fix candidates — no error
-            // group, no incident. The Fastify logger is a no-op in prod,
-            // so log via console too: a dropped error otherwise leaves
-            // zero trace and looks like incident tracking is broken.
+            // User-input errors are filtered out — no error group, no
+            // incident. The Fastify logger is a no-op in prod, so log
+            // via console too: a dropped error otherwise leaves zero
+            // trace and looks like incident tracking is broken.
             //
             // The uppercase-ERROR/FATAL override above means an
             // application that EXPLICITLY stamped this as an error log
@@ -1929,7 +1499,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
             // (Spring's `UnsatisfiedDependencyException: ... Validation
             // failed for query for method ...` is a real bean bug).
             req.log?.info?.({
-              event: "auto_fix.skip_user_input",
+              event: "app_log_error.skip_user_input",
               serviceId: msg.serviceId,
               message: msg.message
             });
@@ -1968,19 +1538,17 @@ export function buildServer(opts: BuildServerOptions = {}) {
               service = all.find((s) => s.name === msg.serviceId);
             }
 
-            // Create / bump a visible Incident regardless of auto-fix
-            // gating so the Incidents page reflects the live failure even
-            // when auto-fix is disabled or can't run.
+            // Create / bump a visible Incident so the Incidents page
+            // reflects the live failure.
             if (service) {
               try {
                 await domainStore.upsertIncident(tenantId, {
                   serviceId: service.id,
                   fingerprint: upsert.group.fingerprint,
                   message: upsert.group.sampleMessage,
-                  // The agent now ships the whole error burst (the
-                  // stack trace incl. "Caused by:") in contextLines —
-                  // store it so the Incidents page can show the full
-                  // log and the AI fix prompt has the real exception.
+                  // The agent ships the whole error burst (the stack
+                  // trace incl. "Caused by:") in contextLines — store it
+                  // so the Incidents page can show the full log.
                   fullLog:
                     Array.isArray(msg.contextLines) && msg.contextLines.length > 0
                       ? msg.contextLines.join("\n")
@@ -1988,88 +1556,6 @@ export function buildServer(opts: BuildServerOptions = {}) {
                 });
               } catch (err) {
                 req.log?.warn?.({ event: "incident.upsert_failed", err: String(err) });
-              }
-            }
-
-            // Auto-fix dispatch — only on a NEW group or when status was open.
-            // Paused / fixing groups are skipped by the dispatcher itself.
-            // Env knob `SM_AUTO_FIX_DISABLED=1` short-circuits the entire
-            // dispatch so incidents accumulate in the queue without the
-            // server triggering fix plans — useful for testing dedup
-            // behaviour where you want to SEE incidents land without
-            // them being mutated mid-test.
-            const autoFixDisabled = process.env.SM_AUTO_FIX_DISABLED === "1";
-            if (autoFixDisabled) {
-              req.log?.info?.({
-                event: "auto_fix.disabled",
-                groupId: upsert.group.id,
-                serviceId: msg.serviceId
-              });
-            } else if (upsert.isNew || upsert.group.status === "open") {
-              const svcKey = service ? fixServiceKey(tenantId, service.id) : null;
-              // Optimistic synchronous acquire so concurrent
-              // app_log_error handlers (3+ per NPE due to Spring's
-              // multi-line error output) can't all observe the
-              // unlocked state and race into parallel dispatches.
-              let weAcquired = false;
-              if (svcKey) {
-                if (fixInFlightByService.has(svcKey)) {
-                  req.log?.info?.({
-                    event: "auto_fix.skip_in_flight_for_service",
-                    groupId: upsert.group.id,
-                    serviceId: service?.id
-                  });
-                } else {
-                  weAcquired = acquireFixPlaceholder(tenantId, service!.id);
-                }
-              }
-              const outcome = (svcKey && !weAcquired)
-                ? ({ kind: "skipped_in_flight" } as const)
-                : await dispatchAutoFix(
-                    {
-                      domainStore,
-                      errorGroups,
-                      readSshKeyMaterial: (tid, kid) => domainStore.getSshKeyMaterial(tid, kid),
-                      startFix: startKaiadFix
-                    },
-                    upsert.group,
-                    service
-                  );
-              // For dispatched fixes the in-flight lock is released by
-              // startKaiadFix when the in-kaiad fix settles. For every
-              // other (declined) outcome, release it now or the service
-              // is jammed until process restart.
-              if (weAcquired && outcome.kind !== "dispatched" && svcKey) {
-                fixInFlightByService.delete(svcKey);
-              }
-              if (outcome.kind === "dispatched") {
-                // Fix is now running inside kaiad (startKaiadFix); just
-                // surface the "fixing" status the dispatcher set.
-                const fixing = errorGroups.get(upsert.group.id);
-                if (fixing) {
-                  realtimeManager.broadcastToTenant(
-                    tenantId,
-                    JSON.stringify(
-                      uiTelemetryEventSchema.parse({
-                        type: "error_group_updated",
-                        group: fixing
-                      })
-                    )
-                  );
-                }
-              } else if (outcome.kind === "skipped_missing_auth") {
-                const updated = errorGroups.get(upsert.group.id);
-                if (updated) {
-                  realtimeManager.broadcastToTenant(
-                    tenantId,
-                    JSON.stringify(
-                      uiTelemetryEventSchema.parse({
-                        type: "error_group_updated",
-                        group: updated
-                      })
-                    )
-                  );
-                }
               }
             }
           }
@@ -3350,210 +2836,6 @@ export function buildServer(opts: BuildServerOptions = {}) {
     return { ok: true };
   });
 
-  // Manually trigger an in-kaiad fix for this incident (operator on the
-  // Incidents page). Reuses the existing startKaiadFix lifecycle so the
-  // timeline animates exactly like an auto-fix. Respects the per-service
-  // in-flight lock — if a fix is already running for the service, the
-  // second click returns 409 instead of stacking concurrent runs.
-  app.post<{ Params: { id: string } }>("/api/v1/incidents/:id/run-fix", async (req, reply) => {
-    const s = await authorize(req as any, reply as any, { perm: "incidents:write" });
-    if (!s) return;
-    const result = await triggerIncidentFix(s.tenantId, req.params.id);
-    if (!result.ok) {
-      return reply.status(result.status).send(
-        apiErrorSchema.parse({ code: result.code, message: result.message, correlationId: (req as any).correlationId })
-      );
-    }
-    return { ok: true, groupId: result.groupId };
-  });
-
-  // List autonomous fixes currently running inside this kaiad process.
-  // Tenant-scoped. Surfaces both fully-running fixes AND placeholder
-  // locks (acquire-window entries) — the latter as `pending: true` so
-  // the operator can see + cancel a stuck acquire that otherwise hides
-  // and jams "Run fix".
-  app.get("/api/v1/auto-fix/in-flight", async (req, reply) => {
-    const s = await authorize(req as any, reply as any, { perm: "incidents:read" });
-    if (!s) return;
-    type Out = {
-      tenantId: string;
-      serviceId: string;
-      serviceName: string;
-      groupId: string | null;
-      fingerprint: string | null;
-      incidentId: string | null;
-      executor: "claude" | "cursor" | null;
-      startedAt: string;
-      triggeredBy: "auto" | "manual" | null;
-      elapsedMs: number;
-      pending?: boolean;
-    };
-    const out: Out[] = [];
-    const now = Date.now();
-    // Resolve service names for placeholders lazily — most callsites
-    // either have a tiny number of placeholders or none. Pull the
-    // tenant's services once if needed.
-    let tenantServices: { id: string; name: string }[] | null = null;
-    const resolveServiceName = async (serviceId: string): Promise<string> => {
-      if (!tenantServices) {
-        tenantServices = (await domainStore.listServices(s.tenantId)).map((svc) => ({ id: svc.id, name: svc.name }));
-      }
-      return tenantServices.find((x) => x.id === serviceId)?.name ?? serviceId;
-    };
-    for (const entry of fixInFlightByService.values()) {
-      if (entry.tenantId !== s.tenantId) continue;
-      if (isPlaceholder(entry)) {
-        out.push({
-          tenantId: entry.tenantId,
-          serviceId: entry.serviceId,
-          serviceName: await resolveServiceName(entry.serviceId),
-          groupId: null,
-          fingerprint: null,
-          incidentId: null,
-          executor: null,
-          startedAt: new Date(entry.acquiredAt).toISOString(),
-          triggeredBy: null,
-          elapsedMs: now - entry.acquiredAt,
-          pending: true
-        });
-      } else {
-        out.push({
-          tenantId: entry.tenantId,
-          serviceId: entry.serviceId,
-          serviceName: entry.serviceName,
-          groupId: entry.groupId,
-          fingerprint: entry.fingerprint,
-          incidentId: entry.incidentId,
-          executor: entry.executor,
-          startedAt: entry.startedAt,
-          triggeredBy: entry.triggeredBy,
-          elapsedMs: now - new Date(entry.startedAt).getTime()
-        });
-      }
-    }
-    return { fixes: out };
-  });
-
-  // Cancel an in-flight fix. ?action=retry re-dispatches a fresh run as
-  // soon as the SIGKILL'd run releases the lock; ?action=delete removes
-  // the underlying incident after the cancel settles. Default ("none")
-  // just kills the in-flight run and leaves the incident at status
-  // `cancelled` for the operator to act on.
-  app.post<{
-    Params: { serviceId: string };
-    Querystring: { action?: "retry" | "delete" };
-  }>("/api/v1/auto-fix/in-flight/:serviceId/cancel", async (req, reply) => {
-    const s = await authorize(req as any, reply as any, { perm: "incidents:write" });
-    if (!s) return;
-    const action = req.query.action ?? "none";
-    const lockKey = fixServiceKey(s.tenantId, req.params.serviceId);
-    const entry = fixInFlightByService.get(lockKey);
-    if (!entry) {
-      return reply.status(404).send(
-        apiErrorSchema.parse({ code: "NOT_FOUND", message: "No in-flight fix for this service", correlationId: (req as any).correlationId })
-      );
-    }
-    if (entry.tenantId !== s.tenantId) {
-      return reply.status(403).send(
-        apiErrorSchema.parse({ code: "FORBIDDEN", message: "Fix belongs to another tenant", correlationId: (req as any).correlationId })
-      );
-    }
-    const incidentIdSnapshot = isPlaceholder(entry) ? null : entry.incidentId;
-    const serviceIdSnapshot = entry.serviceId;
-    if (isPlaceholder(entry)) {
-      // Orphaned acquire-window lock — startKaiadFix never landed (or
-      // crashed before populating meta). Just release the key; there's
-      // no child to SIGKILL and no incident timeline to finalize.
-      fixInFlightByService.delete(lockKey);
-    } else {
-      // Pull the trigger. The runner's SIGKILL'd child resolves with
-      // reason:"cancelled"; the finally block in startKaiadFix releases
-      // the lock and writes the terminal status.
-      entry.abort.abort();
-      // Wait briefly for the runner's cleanup to land (lock released +
-      // incident status persisted) so the follow-up retry/delete sees a
-      // clean state. 8s upper bound matches the slowest SIGKILL+chown+rm
-      // path observed; the runner usually settles in <1s.
-      const deadline = Date.now() + 8000;
-      while (fixInFlightByService.has(lockKey) && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 100));
-      }
-    }
-    if (action === "delete" && incidentIdSnapshot) {
-      try {
-        await domainStore.deleteIncident(s.tenantId, incidentIdSnapshot);
-      } catch (e) {
-        fixLog({ event: "cancel.delete_failed", err: String(e), incidentId: incidentIdSnapshot });
-      }
-    }
-    if (action === "retry") {
-      // Re-dispatch via the same manual-fix path the panel's "Run fix"
-      // button uses. If the lock hasn't released yet (rare — runner
-      // finalize stuck) the retry returns 409 and the operator can
-      // click again once the cancel finishes.
-      if (fixInFlightByService.has(lockKey)) {
-        return reply.status(409).send(
-          apiErrorSchema.parse({ code: "STILL_CANCELLING", message: "Cancel hasn't settled yet — retry in a moment", correlationId: (req as any).correlationId })
-        );
-      }
-      if (!incidentIdSnapshot) {
-        return reply.status(400).send(
-          apiErrorSchema.parse({ code: "NO_INCIDENT", message: "Cancelled fix had no incident to retry", correlationId: (req as any).correlationId })
-        );
-      }
-      const service = await domainStore.getService(s.tenantId, serviceIdSnapshot);
-      const inc = await domainStore.getIncident(s.tenantId, incidentIdSnapshot);
-      if (!service || !inc) {
-        return reply.status(404).send(
-          apiErrorSchema.parse({ code: "NOT_FOUND", message: "Incident or service vanished mid-cancel", correlationId: (req as any).correlationId })
-        );
-      }
-      if (!service.gitRepoUrl || !service.sshKeyId) {
-        return reply.status(400).send(
-          apiErrorSchema.parse({ code: "BAD_REQUEST", message: "Service is missing gitRepoUrl or sshKeyId", correlationId: (req as any).correlationId })
-        );
-      }
-      const keyMaterial = await domainStore.getSshKeyMaterial(s.tenantId, service.sshKeyId);
-      if (!keyMaterial) {
-        return reply.status(400).send(
-          apiErrorSchema.parse({ code: "BAD_REQUEST", message: "SSH key material not found", correlationId: (req as any).correlationId })
-        );
-      }
-      const ctx = inc.fullLog ? inc.fullLog.split("\n").filter((l) => l !== "") : [];
-      const upsert = errorGroups.upsert({
-        tenantId: s.tenantId,
-        agentId: "manual",
-        serviceId: service.id,
-        message: inc.message ?? "(retry)",
-        contextLines: ctx,
-        ts: new Date().toISOString()
-      });
-      errorGroups.setStatus(upsert.group.id, "open");
-      const group = errorGroups.get(upsert.group.id);
-      if (!group) {
-        return reply.status(500).send(
-          apiErrorSchema.parse({ code: "INTERNAL", message: "Error group missing after upsert", correlationId: (req as any).correlationId })
-        );
-      }
-      acquireFixPlaceholder(s.tenantId, serviceIdSnapshot);
-      errorGroups.setStatus(group.id, "fixing");
-      startKaiadFix({
-        commandId: `cmd-retry-${crypto.randomUUID()}`,
-        tenantId: s.tenantId,
-        service,
-        group,
-        sshKeyType: keyMaterial.type,
-        sshKeyValue: keyMaterial.privateKey ?? keyMaterial.localPath ?? null,
-        executor: (service.fixExecutor as "claude" | "cursor") ?? "claude",
-        contextLines: errorGroups.contextLinesFor(group.id),
-        triggeredBy: "manual",
-        incidentId: incidentIdSnapshot
-      });
-      return { ok: true, action: "retry", groupId: group.id };
-    }
-    return { ok: true, action };
-  });
-
   // --- Registry retention (admin) ---
 
   app.get("/api/v1/admin/registry-retention", async (req, reply) => {
@@ -3873,8 +3155,8 @@ export function buildServer(opts: BuildServerOptions = {}) {
   // per pipeline, prefixed by the name you typed".
   //
   // Shallow-clones into a tmpdir, reads kaiad.yaml, parsePipelineYaml's
-  // it, deletes the tmpdir. Same SSH-key flow as kaiadFix — uploaded
-  // keys go to a 0600 tmpfile and GIT_SSH_COMMAND points at it.
+  // it, deletes the tmpdir. Uploaded keys go to a 0600 tmpfile and
+  // GIT_SSH_COMMAND points at it.
   app.post("/api/v1/services/preview-pipeline", async (req, reply) => {
     const session = await resolveSession(authStore, req.headers.authorization);
     if (!session) {
@@ -3923,7 +3205,7 @@ export function buildServer(opts: BuildServerOptions = {}) {
     }
 
     // Resolve SSH key material (uploaded → bytes; local_path → path).
-    // Same surface autoFix uses; null when the URL doesn't need a key.
+    // Null when the URL doesn't need a key.
     let keyMaterial:
       | { type: "uploaded"; privateKey: string | null; localPath: string | null }
       | { type: "local_path"; privateKey: string | null; localPath: string | null }
@@ -5622,9 +4904,9 @@ export function buildServer(opts: BuildServerOptions = {}) {
   });
 
   // Auto-resolve incidents whose error hasn't recurred for a while: the
-  // service is presumed healthy again (the auto-fix worked, an operator
-  // intervened, or it was transient). Threshold + sweep cadence are env
-  // tunable so this is testable without waiting hours.
+  // service is presumed healthy again (an operator intervened, or it was
+  // transient). Threshold + sweep cadence are env tunable so this is
+  // testable without waiting hours.
   const incidentStaleMs =
     Number(process.env.SM_INCIDENT_AUTORESOLVE_MS) ||
     4 * 60 * 60 * 1000; // 4h default
@@ -5700,39 +4982,6 @@ export function buildServer(opts: BuildServerOptions = {}) {
     clearInterval(registryGcTimer);
   });
 
-  // Stuck-fix reaper — flip any incident whose last_fix_status has been
-  // in a running-ish state past the reaper window to "failed". Handles
-  // runner crashes / container restarts / hung child processes that
-  // would otherwise freeze the Incidents UI on "Fix running…".
-  const stuckFixMs = Number(process.env.SM_FIX_STUCK_MS) || 20 * 60 * 1000; // 20m
-  const stuckFixSweepMs = Number(process.env.SM_FIX_STUCK_SWEEP_MS) || 2 * 60 * 1000; // 2m
-  let stuckFixInFlight = false;
-  const stuckFixTimer = setInterval(() => {
-    if (stuckFixInFlight) return;
-    stuckFixInFlight = true;
-    void (async () => {
-      try {
-        const q = await getBuildsQuery();
-        if (!q) return;
-        const n = await reapStuckFixAttempts(q, stuckFixMs);
-        if (n > 0) {
-          app.log.info?.(
-            { event: "stuck_fix.reaped", count: n, stuckMs: stuckFixMs },
-            "reaped stuck fix attempts"
-          );
-        }
-      } catch (err) {
-        app.log.warn?.({ event: "stuck_fix.failed", err: (err as Error).message });
-      } finally {
-        stuckFixInFlight = false;
-      }
-    })();
-  }, stuckFixSweepMs);
-  stuckFixTimer.unref?.();
-  app.addHook("onClose", async () => {
-    clearInterval(stuckFixTimer);
-  });
-
   // Hosted Model Context Protocol endpoint (POST /mcp). Wraps the same domain
   // logic the REST routes use; gated by the mcp.read / mcp.write scopes.
   registerMcpRoute(app, {
@@ -5740,7 +4989,6 @@ export function buildServer(opts: BuildServerOptions = {}) {
     domainStore,
     getBuildsQuery,
     getRegistryAdminContext,
-    triggerIncidentFix,
     detachServiceWithTeardown,
     createEnrollmentToken: createEnrollmentTokenForTenant,
     getConnectedAgentIds: () => realtimeManager.getConnectedAgentIds(),

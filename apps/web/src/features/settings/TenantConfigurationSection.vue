@@ -16,17 +16,14 @@ const props = defineProps<{
 }>();
 
 const docsUrl = ref("");
-const preferredExecutor = ref<"" | "cursor" | "claude">("");
 
 watch(
   () => props.data,
   (d) => {
     if (d) {
       docsUrl.value = d.docsUrl ?? "";
-      preferredExecutor.value = d.preferredExecutor ?? "";
     } else {
       docsUrl.value = "";
-      preferredExecutor.value = "";
     }
   },
   { immediate: true }
@@ -37,8 +34,7 @@ async function handleSubmit(e: Event) {
   props.onClearError();
   try {
     await props.savePatch({
-      docsUrl: docsUrl.value.trim() ? docsUrl.value.trim() : null,
-      preferredExecutor: preferredExecutor.value === "" ? null : preferredExecutor.value
+      docsUrl: docsUrl.value.trim() ? docsUrl.value.trim() : null
     });
   } catch {
     /* error shown via prop */
@@ -105,26 +101,6 @@ const inputStyle = {
           aria-label="Documentation URL"
           type="url"
         />
-      </label>
-      <label :style="{ display: 'flex', flexDirection: 'column', gap: '0.25rem', fontSize: '0.8rem', marginBottom: '0.65rem' }">
-        <span :style="{ color: 'var(--color-text-secondary)' }">Preferred executor (optional)</span>
-        <select
-          v-model="preferredExecutor"
-          :disabled="!canEdit || loading || isSaving"
-          aria-label="Preferred executor"
-          :style="{
-            border: '1px solid var(--color-border)',
-            borderRadius: '6px',
-            padding: '0.35rem 0.45rem',
-            background: 'var(--color-surface)',
-            color: 'var(--color-text-primary)',
-            maxWidth: '420px'
-          }"
-        >
-          <option value="">No preference</option>
-          <option value="cursor">Cursor</option>
-          <option value="claude">Claude</option>
-        </select>
       </label>
 
       <button

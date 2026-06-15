@@ -153,13 +153,6 @@ const statValue = computed(() => (n: number) => {
       </li>
     </ul>
 
-    <Card title="Recent Remediation Plans" :style="{ marginTop: '1.5rem' }">
-      <p :style="{ color: 'var(--color-text-secondary)', margin: 0, fontSize: '0.9rem' }">
-        Remediation plans are queued automatically when incidents are detected. View plan status in the Incidents
-        detail view.
-      </p>
-    </Card>
-
     <p :style="{ color: 'var(--color-text-secondary)', marginTop: '1.25rem' }">
       Navigate using the sidebar to manage agents, services, and incidents.
     </p>

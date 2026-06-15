@@ -9,7 +9,7 @@ nav_order: 3
 >
 > Want to know what each runtime (Docker / Podman / Shell / Kubernetes) actually does? See [Agent runtimes]({% link agent/runtimes.md %}).
 
-The **Kaiad agent** is a small **Go** process that runs on infrastructure you control (bare metal, VM, or container host). It maintains an **outbound** WebSocket connection to the control plane **realtime** endpoint, receives **AgentCommand** messages, and can run shell steps, Docker operations, and plan executors (Cursor / Claude) against a workspace.
+The **Kaiad agent** is a small **Go** process that runs on infrastructure you control (bare metal, VM, or container host). It maintains an **outbound** WebSocket connection to the control plane **realtime** endpoint, receives **AgentCommand** messages, and can run shell steps and Docker operations against a workspace.
 
 You do **not** open an inbound port from the internet for the SaaS path: the agent only **dials out**. See [Agent networking]({% link security/agent-networking.md %}) for firewall and TLS expectations.
 
@@ -87,10 +87,6 @@ The image entrypoint runs `/usr/local/bin/agent` with no default shell; pass con
 | `SM_DOCKER_SOCKET` | Optional | Path to the Docker API socket (default `/var/run/docker.sock`). |
 | `SM_ENABLE_LOG_STREAMING` | Optional | Set to `0` to disable streaming logs from existing containers on startup. |
 | `SM_AGENT_VERSION` | Optional | Reported agent version in heartbeats (defaults to `0.1.0` in code if unset). |
-
-### Optional: plan executors and isolation
-
-For `run_cursor_plan` / `run_claude_plan` and related behavior, the agent reads additional variables (timeouts, binary paths, optional container-isolated runners). See [`apps/agent/README.md`](https://github.com/InnKeeperDevOps/kaiad/blob/main/apps/agent/README.md) in the repository for `SM_EXECUTOR_*`, `SM_CURSOR_BIN`, and `SM_CLAUDE_BIN`.
 
 ## Enrollment and credentials
 

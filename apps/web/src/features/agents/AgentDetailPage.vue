@@ -455,7 +455,7 @@ const cellValue: CSSProperties = {
         />
       </Card>
 
-      <Card title="Error groups (auto-fix)">
+      <Card title="Error groups">
         <ErrorGroupsSection :agent-id="merged.id" :live-groups="live.errorGroups" />
       </Card>
 

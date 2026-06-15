@@ -195,25 +195,6 @@ export interface IncidentRow {
   eventCount: number;
   firstSeenAt: string;
   lastSeenAt: string;
-  lastFixStatus?: string;
-  lastFixExecutor?: string;
-  lastFixStartedAt?: string;
-  lastFixFinishedAt?: string;
-  lastFixCommitSha?: string;
-  lastFixOutput?: string;
-  /** Step events of the latest fix attempt (oldest first). Each event
-   *  can carry the exact `cmd` that was executed plus its truncated
-   *  `output` and exit `code` so the Incidents UI can show "what was
-   *  run" alongside the step name. */
-  lastFixEvents: {
-    at: string;
-    step: string;
-    ok?: boolean;
-    message?: string;
-    cmd?: string;
-    output?: string;
-    code?: number;
-  }[];
 }
 
 function mapIncident(r: Record<string, unknown>): IncidentRow {
@@ -234,29 +215,6 @@ function mapIncident(r: Record<string, unknown>): IncidentRow {
       r.last_seen_at instanceof Date
         ? r.last_seen_at.toISOString()
         : String(r.last_seen_at),
-    lastFixStatus: (r.last_fix_status as string | null) ?? undefined,
-    lastFixExecutor: (r.last_fix_executor as string | null) ?? undefined,
-    lastFixStartedAt:
-      r.last_fix_started_at instanceof Date
-        ? r.last_fix_started_at.toISOString()
-        : (r.last_fix_started_at as string | null) ?? undefined,
-    lastFixFinishedAt:
-      r.last_fix_finished_at instanceof Date
-        ? r.last_fix_finished_at.toISOString()
-        : (r.last_fix_finished_at as string | null) ?? undefined,
-    lastFixCommitSha: (r.last_fix_commit_sha as string | null) ?? undefined,
-    lastFixOutput: (r.last_fix_output as string | null) ?? undefined,
-    lastFixEvents: Array.isArray(r.last_fix_events)
-      ? (r.last_fix_events as {
-          at: string;
-          step: string;
-          ok?: boolean;
-          message?: string;
-          cmd?: string;
-          output?: string;
-          code?: number;
-        }[])
-      : [],
   };
 }
 
@@ -319,164 +277,6 @@ export async function upsertIncident(
     [id, tenantId, data.serviceId, data.fingerprint, data.message ?? null, data.fullLog ?? null],
   );
   return mapIncident(rows[0]);
-}
-
-/** Record one step of an in-kaiad fix attempt on the matching incident.
- *  Patch fields are partial: any provided field is overwritten; an
- *  `event` is appended to last_fix_events. `resetEvents` clears the
- *  array first (used when starting a fresh attempt). Matches on the
- *  most recent open/acknowledged incident for (tenant, service,
- *  fingerprint). Idempotent if no incident matches. */
-export async function recordFixProgress(
-  query: QueryFn,
-  tenantId: string,
-  serviceId: string,
-  fingerprint: string,
-  patch: {
-    /** Pin to a specific incident id (chosen at fix-start). Without
-     *  this, mid-run patches landed on whichever incident was most-recent
-     *  AT EACH CALL — so events split across rows when a fresh error
-     *  arrived during the fix. Always pass this for new code. */
-    incidentId?: string;
-    status?: string;
-    executor?: string;
-    startedAt?: string;
-    finishedAt?: string;
-    commitSha?: string | null;
-    output?: string | null;
-    event?: { step: string; ok?: boolean; message?: string; cmd?: string; output?: string; code?: number };
-    resetEvents?: boolean;
-  },
-): Promise<void> {
-  // Build the SET clause + its values independently of the WHERE
-  // clause's params. The pinned-id path only needs tenant_id + id, and
-  // the legacy fallback needs (tenant, service, fingerprint); driving
-  // both off one shared `values` array caused unreferenced placeholders
-  // ("could not determine data type of parameter $2") when the pinned
-  // path stripped service_id/fingerprint from its WHERE.
-  const setClauses: string[] = [];
-  const setValues: unknown[] = [];
-  const push = (col: string, v: unknown) => {
-    setValues.push(v);
-    setClauses.push(`${col} = $${setValues.length}`);
-  };
-  if (patch.status !== undefined) push("last_fix_status", patch.status);
-  if (patch.executor !== undefined) push("last_fix_executor", patch.executor);
-  if (patch.startedAt !== undefined) push("last_fix_started_at", patch.startedAt);
-  if (patch.finishedAt !== undefined) push("last_fix_finished_at", patch.finishedAt);
-  if (patch.commitSha !== undefined) push("last_fix_commit_sha", patch.commitSha);
-  if (patch.output !== undefined) push("last_fix_output", patch.output);
-
-  if (patch.resetEvents) setClauses.push(`last_fix_events = '[]'::jsonb`);
-  if (patch.event) {
-    const ev = { at: new Date().toISOString(), ...patch.event };
-    setValues.push(JSON.stringify(ev));
-    setClauses.push(
-      `last_fix_events = COALESCE(last_fix_events, '[]'::jsonb) || $${setValues.length}::jsonb`,
-    );
-  }
-  if (setClauses.length === 0) return;
-
-  if (patch.incidentId) {
-    // Pinned-id path: every call from one fix-run targets the same
-    // row. Match by id + tenant_id only — manual Run-fix synthesizes a
-    // fresh error group whose fingerprint can differ from the original
-    // incident's stored fingerprint, so requiring fingerprint here
-    // silently dropped every event from manual runs.
-    const values = [...setValues, tenantId, patch.incidentId];
-    const tenantIdx = setValues.length + 1;
-    const incidentIdx = setValues.length + 2;
-    await query(
-      `UPDATE incidents SET ${setClauses.join(", ")}
-         WHERE id = $${incidentIdx}
-           AND tenant_id = $${tenantIdx}`,
-      values,
-    );
-    return;
-  }
-  // Legacy fallback: update the most recent incident for this
-  // (tenant, service, fingerprint) regardless of status. Kept for
-  // back-compat; callers should pass `incidentId` whenever possible.
-  const values = [...setValues, tenantId, serviceId, fingerprint];
-  const tenantIdx = setValues.length + 1;
-  const serviceIdx = setValues.length + 2;
-  const fingerprintIdx = setValues.length + 3;
-  await query(
-    `UPDATE incidents SET ${setClauses.join(", ")}
-       WHERE id = (
-         SELECT id FROM incidents
-         WHERE tenant_id = $${tenantIdx} AND service_id = $${serviceIdx} AND fingerprint = $${fingerprintIdx}
-         ORDER BY last_seen_at DESC LIMIT 1
-       )`,
-    values,
-  );
-}
-
-/** Resolve the most-recent incident id for (tenant, service, fingerprint).
- *  Called at fix-start to pin every subsequent recordFixProgress call to
- *  the same row, so events from one fix run can't split across siblings
- *  if the agent ships a fresh error mid-run. */
-export async function getCurrentIncidentId(
-  query: QueryFn,
-  tenantId: string,
-  serviceId: string,
-  fingerprint: string,
-): Promise<string | null> {
-  const { rows } = await query(
-    `SELECT id FROM incidents
-       WHERE tenant_id = $1 AND service_id = $2 AND fingerprint = $3
-       ORDER BY last_seen_at DESC LIMIT 1`,
-    [tenantId, serviceId, fingerprint],
-  );
-  return rows.length > 0 ? String(rows[0].id) : null;
-}
-
-/** Mark any in-kaiad fix that has been "running"/cloning/cli/committing/
- *  pushing for longer than `olderThanMs` as failed (the runner is gone
- *  — container restart, crash, hung child). Appends a synthetic event
- *  so the UI shows why and frees the timeline for a fresh attempt.
- *  Returns the number of incidents reaped. */
-export async function reapStuckFixAttempts(
-  query: QueryFn,
-  olderThanMs: number,
-): Promise<number> {
-  const cutoff = new Date(Date.now() - olderThanMs).toISOString();
-  const event = {
-    at: new Date().toISOString(),
-    step: "failed",
-    ok: false,
-    message: `fix attempt timed out after ${Math.round(olderThanMs / 60000)} min — runner went away`
-  };
-  const { rows } = await query(
-    `UPDATE incidents
-        SET last_fix_status = 'failed',
-            last_fix_finished_at = now(),
-            last_fix_events = COALESCE(last_fix_events, '[]'::jsonb) || $2::jsonb
-      WHERE last_fix_status IN ('running','cloning','cli','committing','pushing')
-        AND last_fix_started_at IS NOT NULL
-        AND last_fix_started_at < $1::timestamptz
-      RETURNING id`,
-    [cutoff, JSON.stringify(event)],
-  );
-  return rows.length;
-}
-
-/** Resolve any open/acknowledged incident for this service+fingerprint
- *  (called when an autonomous fix lands). Returns the count closed. */
-export async function resolveIncidentByFingerprint(
-  query: QueryFn,
-  tenantId: string,
-  serviceId: string,
-  fingerprint: string,
-): Promise<number> {
-  const { rows } = await query(
-    `UPDATE incidents SET status = 'resolved', last_seen_at = now()
-     WHERE tenant_id = $1 AND service_id = $2 AND fingerprint = $3
-       AND status IN ('open', 'acknowledged')
-     RETURNING id`,
-    [tenantId, serviceId, fingerprint],
-  );
-  return rows.length;
 }
 
 /** Auto-resolve incidents whose error hasn't been seen since `cutoff`
@@ -704,8 +504,6 @@ export interface ServiceRow {
   kaiadYamlPath: string;
   /** Panel-stored kaiad.yaml override; null = use the repo file. */
   pipelineOverride?: string | null;
-  /** AI CLI for autonomous fixes. */
-  fixExecutor: "claude" | "cursor";
   /**
    * HTTP readiness check (resolved from kaiad.yaml or the panel form).
    * Null when neither path nor port is set — the agent then renders no
@@ -780,7 +578,6 @@ function mapService(r: Record<string, unknown>): ServiceRow {
     pipelineName: r.pipeline_name == null ? null : String(r.pipeline_name),
     kaiadYamlPath: r.kaiad_yaml_path == null ? "kaiad.yaml" : String(r.kaiad_yaml_path),
     pipelineOverride: r.pipeline_override == null ? null : String(r.pipeline_override),
-    fixExecutor: r.fix_executor === "cursor" ? "cursor" : "claude",
     healthcheck: mapHealthcheck(r),
     securityContext: mapSecurityContext(r),
     locked: r.locked === true
@@ -974,7 +771,6 @@ export async function createService(
     composePath?: string;
     pipelineName?: string | null;
     kaiadYamlPath?: string;
-    fixExecutor?: string | null;
     healthcheck?: HealthcheckSpec | null;
     securityContext?: PodSecurityContextSpec | null;
     locked?: boolean;
@@ -986,7 +782,7 @@ export async function createService(
   const { rows } = await query(
     `INSERT INTO monitored_services (
        id, tenant_id, name, git_repo_url, ssh_key_id, branch,
-       docker_image, compose_path, pipeline_name, fix_executor,
+       docker_image, compose_path, pipeline_name,
        healthcheck_path, healthcheck_port,
        healthcheck_initial_delay_seconds, healthcheck_period_seconds,
        healthcheck_timeout_seconds, healthcheck_failure_threshold,
@@ -994,7 +790,7 @@ export async function createService(
        security_run_as_user, security_run_as_group, security_fs_group,
        locked, kaiad_yaml_path
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
      RETURNING *`,
     [
       id,
@@ -1006,7 +802,6 @@ export async function createService(
       data.dockerImage ?? null,
       data.composePath ?? null,
       data.pipelineName ?? null,
-      data.fixExecutor ?? "claude",
       hc?.path ?? null,
       hc?.port ?? null,
       hc?.initialDelaySeconds ?? null,

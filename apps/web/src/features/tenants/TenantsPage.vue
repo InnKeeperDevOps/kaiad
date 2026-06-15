@@ -88,7 +88,7 @@ const rowStyle = {
       <Building2 :size="20" /> Tenants
     </h2>
     <p :style="{ ...muted, marginBottom: '1rem' }">
-      Workspaces you belong to. Open configuration for repo defaults, automation policy, and executors.
+      Workspaces you belong to. Open configuration for repo defaults.
     </p>
 
     <div :style="{ marginBottom: '1.25rem', display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center' }">

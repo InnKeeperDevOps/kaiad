@@ -120,9 +120,8 @@ const linkRowStyle = {
         color: 'var(--color-text-primary)'
       }"
     >
-      <strong>Auto-fix is disabled for some services.</strong> Services without an SSH key can still be monitored,
-      but Kaiad cannot push fix commits to their repos. Open the service and assign an SSH key to enable the
-      automated error → fix loop.
+      <strong>Some services have no SSH key.</strong> Services without an SSH key can still be monitored,
+      but Kaiad cannot access private repos for them. Open the service and assign an SSH key.
     </div>
 
     <ServiceWizard

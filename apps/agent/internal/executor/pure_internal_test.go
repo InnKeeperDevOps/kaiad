@@ -19,44 +19,7 @@ func TestRunShellHelper(t *testing.T) {
 	}
 }
 
-func TestPlanAndBinaryHelpers(t *testing.T) {
-	if a := planArgs("cursor", "p", "/w"); a[0] != "--prompt" || a[3] != "/w" {
-		t.Fatalf("planArgs cursor = %v", a)
-	}
-	if a := planArgs("claude", "p", "/w"); a[2] != "--cwd" {
-		t.Fatalf("planArgs claude = %v", a)
-	}
-	if planBinary("cursor") != "cursor" || planBinary("claude") != "claude" {
-		t.Fatal("planBinary defaults")
-	}
-	os.Setenv("SM_CURSOR_BIN", "/x/cursor")
-	if planBinary("cursor") != "/x/cursor" {
-		t.Fatal("planBinary env override")
-	}
-	os.Unsetenv("SM_CURSOR_BIN")
-	if dockerBinary() != "docker" {
-		t.Fatal("dockerBinary default")
-	}
-	if containerIsolationEnabled("claude") {
-		t.Fatal("isolation should default off")
-	}
-	os.Setenv("SM_EXECUTOR_ISOLATE_CONTAINERS", "1")
-	if !containerIsolationEnabled("claude") {
-		t.Fatal("isolation should be on")
-	}
-	os.Unsetenv("SM_EXECUTOR_ISOLATE_CONTAINERS")
-	_ = runnerImage("claude")
-	_ = planTimeout()
-}
-
 func TestPayloadHelpers(t *testing.T) {
-	m := payloadStringMap(map[string]interface{}{"a": "x", "n": 1})
-	if m["a"] != "x" || len(m) != 1 {
-		t.Fatalf("payloadStringMap = %v", m)
-	}
-	if len(payloadStringMap("notamap")) != 0 {
-		t.Fatal("payloadStringMap non-map")
-	}
 	if stringValue("s") != "s" || stringValue(42) != "" {
 		t.Fatal("stringValue")
 	}
@@ -107,15 +70,6 @@ func TestTarPathHelpers(t *testing.T) {
 	}
 }
 
-func TestTruncateForLog(t *testing.T) {
-	if truncateForLog("a\nb", 100) != "a ⏎ b" {
-		t.Fatal("truncateForLog newline replace")
-	}
-	if !strings.HasSuffix(truncateForLog(strings.Repeat("x", 50), 10), "…") {
-		t.Fatal("truncateForLog cap")
-	}
-}
-
 func TestNewExecutorAndWorkspace(t *testing.T) {
 	if NewExecutor(docker.NewClient("/nonexistent.sock")) == nil {
 		t.Fatal("NewExecutor nil")
@@ -138,9 +92,6 @@ func TestExecuteDispatch(t *testing.T) {
 		{"cancel_run", map[string]interface{}{}},
 		{"sync_desired_state", map[string]interface{}{"desiredContainers": []interface{}{}}},
 		{"sync_desired_state", map[string]interface{}{}}, // missing → error branch
-		{"run_cursor_plan", map[string]interface{}{"prompt": "p", "executorId": "cursor"}},
-		{"run_claude_plan", map[string]interface{}{"prompt": "p"}},
-		{"run_fix_plan", map[string]interface{}{"prompt": "p"}},
 		{"docker_op", map[string]interface{}{"op": "ps"}},
 		{"receive_source_archive", map[string]interface{}{"url": "ftp://bad/x"}},
 		{"run_toolchain", map[string]interface{}{}},

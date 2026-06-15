@@ -28,7 +28,7 @@ signed-in **session token** or, more typically for automation, an
 | Scope | Grants |
 |---|---|
 | `mcp.read` | Connect to `/mcp` and run read/inspect tools. |
-| `mcp.write` | Connect to `/mcp` and run mutating tools too (create/update/delete, deploy, trigger builds, run fixes). Implies `mcp.read`. |
+| `mcp.write` | Connect to `/mcp` and run mutating tools too (create/update/delete, deploy, trigger builds). Implies `mcp.read`. |
 
 A credential with neither scope is rejected at connect time (`403`). A
 `mcp.read`-only credential can list and inspect but every mutating tool returns
@@ -93,7 +93,7 @@ All tools are tenant-scoped to the calling credential.
 
 ### Incidents
 - `list_incidents`, `get_incident` *(read)*
-- `update_incident_status`, `delete_incident`, `run_incident_fix` *(write)*
+- `update_incident_status`, `delete_incident` *(write)*
 
 > Registry and build tools require a Postgres-backed deployment
 > (`DATABASE_URL` set); without it they return a clear "not configured" error.

@@ -11,7 +11,7 @@ Guidance for in-product copy, errors, and documentation so the admin experience 
 
 - **Direct, calm, precise.** Say what the user needs to know without filler.
 - **Prefer plain language.** Avoid jargon where possible. When a technical term is required, **link to the glossary or reference** so readers can go deeper.
-- **Active voice.** Prefer “We queued the remediation plan” over passive constructions.
+- **Active voice.** Prefer “We queued the deploy” over passive constructions.
 - **Errors** should briefly explain **what happened**, include a **stable code** (and **correlation ID** when available), and suggest a **concrete next action** (where to click or what to change).
 
 ## Terminology map
@@ -21,7 +21,6 @@ Use the preferred term on the left in UI, API messages, and docs. Avoid the alte
 | Preferred | Avoid |
 |-----------|--------|
 | **incident** | “alert”, “issue” |
-| **remediation plan** | “fix”, “patch” |
 | **agent** | “client”, “daemon” |
 | **enrollment** | “registration”, “onboarding” |
 | **policy deny** | “blocked”, “forbidden” |

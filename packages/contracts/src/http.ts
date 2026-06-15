@@ -43,8 +43,7 @@ export type CreateTenantRequest = z.infer<typeof createTenantRequestSchema>;
 
 export const tenantSettingsSchema = z.object({
   tenantId: z.string(),
-  docsUrl: z.string().url().optional(),
-  preferredExecutor: z.enum(["cursor", "claude"]).optional()
+  docsUrl: z.string().url().optional()
 });
 
 export const upsertTenantSettingsRequestSchema = tenantSettingsSchema;
@@ -109,49 +108,6 @@ export const incidentSchema = z.object({
   message: z.string().optional(),
   /** Full captured log / stack trace for the incident. */
   fullLog: z.string().optional(),
-  /** Live progress of the latest in-kaiad autonomous fix attempt. */
-  lastFixStatus: z
-    .enum([
-      "running",
-      "cloning",
-      "cli",
-      "committing",
-      "pushing",
-      "succeeded",
-      "no_changes",
-      "auth_failed",
-      "clone_failed",
-      "cli_failed",
-      "push_failed",
-      "failed"
-    ])
-    .optional(),
-  lastFixExecutor: z.enum(["claude", "cursor"]).optional(),
-  // Datetime fields here are intentionally LOOSE — they're written from
-  // a few different paths (Date.toISOString, agent frames, ad-hoc SQL
-  // backfills) and a single non-ISO timestamp would otherwise blow up
-  // `listIncidents` and take the Incidents page down. The UI parses
-  // them with `new Date(...)` which is also forgiving.
-  lastFixStartedAt: z.string().optional(),
-  lastFixFinishedAt: z.string().optional(),
-  lastFixCommitSha: z.string().optional(),
-  lastFixOutput: z.string().optional(),
-  lastFixEvents: z
-    .array(
-      z.object({
-        at: z.string(),
-        step: z.string(),
-        ok: z.boolean().optional(),
-        message: z.string().optional(),
-        /** Exact command line executed (e.g. "git clone …", "claude -p …"). */
-        cmd: z.string().optional(),
-        /** Truncated stdout+stderr from that command. */
-        output: z.string().optional(),
-        /** Process exit code. */
-        code: z.number().int().optional()
-      })
-    )
-    .default([]),
   firstSeenAt: z.string().datetime(),
   lastSeenAt: z.string().datetime(),
   eventCount: z.number().int().nonnegative().default(1)
@@ -248,11 +204,6 @@ export const monitoredServiceSchema = z.object({
    */
   kaiadYamlPath: kaiadYamlPathSchema.default("kaiad.yaml"),
   /**
-   * Which AI CLI the agent spins up to author an autonomous fix when
-   * this service throws an error kaiad can see. Defaults to claude.
-   */
-  fixExecutor: z.enum(["claude", "cursor"]).default("claude"),
-  /**
    * HTTP readiness check used by the agent's rolling deploy. When set,
    * the rendered Deployment carries a readinessProbe so a new replica
    * gets no traffic until /<path>:<port> returns 2xx, and the strategy
@@ -294,7 +245,6 @@ export const createMonitoredServiceRequestSchema = z.object({
   pipelineName: z.string().min(1).nullable().optional(),
   /** Repo-relative path to the pipeline file. Omit for the default (`kaiad.yaml`). */
   kaiadYamlPath: kaiadYamlPathSchema.optional(),
-  fixExecutor: z.enum(["claude", "cursor"]).optional(),
   healthcheck: healthcheckSchema.nullable().optional(),
   securityContext: podSecurityContextSchema.nullable().optional(),
   locked: z.boolean().optional()
@@ -316,7 +266,6 @@ export const updateMonitoredServiceRequestSchema = z.object({
   pipelineName: z.string().min(1).nullable().optional(),
   /** Repo-relative path to the pipeline file. */
   kaiadYamlPath: kaiadYamlPathSchema.optional(),
-  fixExecutor: z.enum(["claude", "cursor"]).optional(),
   healthcheck: healthcheckSchema.nullable().optional(),
   securityContext: podSecurityContextSchema.nullable().optional(),
   locked: z.boolean().optional()
@@ -478,7 +427,7 @@ export const apiCredentialScopeSchema = z.enum([
   "registry.push",
   // Model Context Protocol endpoint (`POST /mcp`). `mcp.read` grants the
   // read/inspect tools; `mcp.write` additionally grants the mutating tools
-  // (create/update/delete, deploy, trigger builds, run fixes). `mcp.write`
+  // (create/update/delete, deploy, trigger builds). `mcp.write`
   // implies `mcp.read` server-side. Owner/admin sessions hold both implicitly.
   "mcp.read",
   "mcp.write"

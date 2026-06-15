@@ -5,7 +5,7 @@
 // reads container logs off a Docker daemon via /var/run/docker.sock. On a
 // CRI-O / containerd cluster there is no Docker daemon and the agent pod
 // has no docker.sock, so that path silently tails nothing — the platform
-// never sees a crashing pod and no incident / auto-fix is ever raised.
+// never sees a crashing pod and the failure is never surfaced.
 //
 // This package instead enumerates the pods Kaiad deployed (labelled
 // kaiad.dev/service-id, same as appstats.K8sSampler) via kubectl and

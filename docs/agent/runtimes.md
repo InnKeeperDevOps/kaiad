@@ -7,9 +7,8 @@ parent: Install Agent
 # Agent runtimes
 
 The Kaiad agent supports four runtime backends. The runtime decides
-how the agent executes container operations, runs the auto-fix and plan
-executors (`run_cursor_plan`, `run_claude_plan`, `run_fix_plan`), and
-reconciles `sync_desired_state` updates from the platform.
+how the agent executes container operations, runs `run_step` commands,
+and reconciles `sync_desired_state` updates from the platform.
 
 You pick the runtime when you generate the enrollment token in the
 panel. The choice is just a set of environment variables baked into the
@@ -17,12 +16,12 @@ agent's start command — nothing on the platform side changes.
 
 ## At a glance
 
-| Runtime | What the agent talks to | Container ops | `run_step` | Auto-fix / plan | Best for |
-|---|---|---|---|---|---|
-| **Docker** (default) | local Docker daemon socket | yes | yes | yes (containerized when isolation enabled) | VMs, single-host servers, the common case |
-| **Podman** | local podman socket | yes (via Docker-compatible API) | yes | yes (no rootful daemon) | RHEL/Fedora hosts, rootless setups |
-| **Shell** | the host shell directly | no (`docker_op` is rejected) | yes | yes (uncontained, host PATH) | hosts without Docker; supervisor-managed processes |
-| **Kubernetes** | kube API via mounted SA token | not mapped yet (use `run_step` + `kubectl`) | yes | yes (uncontained inside the agent pod) | clusters; managed by the [Kaiad operator]({% link agent/kubernetes.md %}) |
+| Runtime | What the agent talks to | Container ops | `run_step` | Best for |
+|---|---|---|---|---|
+| **Docker** (default) | local Docker daemon socket | yes | yes | VMs, single-host servers, the common case |
+| **Podman** | local podman socket | yes (via Docker-compatible API) | yes | RHEL/Fedora hosts, rootless setups |
+| **Shell** | the host shell directly | no (`docker_op` is rejected) | yes | hosts without Docker; supervisor-managed processes |
+| **Kubernetes** | kube API via mounted SA token | not mapped yet (use `run_step` + `kubectl`) | yes | clusters; managed by the [Kaiad operator]({% link agent/kubernetes.md %}) |
 
 Mechanism: every runtime is selected via `SM_AGENT_RUNTIME_OVERRIDE`,
 except Docker (which is the default) and Podman (which uses the Docker
@@ -46,10 +45,9 @@ the original runtime and the most fully-featured.
   `run`, `compose_up`, `compose_down`.
 - The agent streams logs from existing containers on enrollment so the
   panel sees app log lines immediately.
-- Plan executors (`run_cursor_plan`, `run_claude_plan`) and auto-fix
-  (`run_fix_plan`) run in disposable workspaces. When container
-  isolation is enabled (the agent runs the executor inside a sibling
-  container) the workspace is fully sandboxed.
+- `run_step` commands run against the local daemon. When container
+  isolation is enabled the agent runs steps inside a sibling container
+  for a fully sandboxed workspace.
 
 **Prerequisites**
 
@@ -139,7 +137,7 @@ SM_DOCKER_SOCKET=$XDG_RUNTIME_DIR/podman/podman.sock /usr/local/bin/agent
   `DOCKER_HOST=unix:///run/podman/podman.sock` so it talks to the
   Podman socket.
 - Rootless Podman's networking model differs from Docker (slirp4netns
-  by default). If your auto-fix workflow assumes host networking,
+  by default). If your workload assumes host networking,
   validate it on a real Podman host before relying on it.
 
 **Verify**
@@ -154,9 +152,8 @@ SM_DOCKER_SOCKET=/run/podman/podman.sock \
 ## Shell
 
 The agent runs commands directly on the host. There is no container
-indirection — `run_step` shells out via `bash -c`, plan executors run
-the configured CLI in a temp workspace under `/tmp`, and there is
-**no** `docker_op` support.
+indirection — `run_step` shells out via `bash -c` in a temp workspace
+under `/tmp`, and there is **no** `docker_op` support.
 
 A small process supervisor (`internal/processsup`) handles the
 `sync_desired_state` flow: it reconciles desired processes against
@@ -167,17 +164,16 @@ shipper Docker hosts use.
 **What you get**
 
 - Works on any Linux/macOS host with no container runtime.
-- Plan executors run with the agent's own UID and PATH — no isolation
-  per execution. This is convenient for development hosts and
+- `run_step` commands run with the agent's own UID and PATH — no
+  isolation per execution. This is convenient for development hosts and
   appropriate when the agent itself is the workload boundary.
 - Suitable for shell-only services (a Java or Python process with no
-  Docker wrapper) where Kaiad's job is mostly observation + auto-fix.
+  Docker wrapper) where Kaiad's job is mostly observation.
 
 **Prerequisites**
 
 - The CLIs the agent needs to execute on your host's PATH:
-  - `git` for plan/fix workspaces.
-  - `cursor` and/or `claude` if you use the corresponding executors.
+  - `git` for `run_step` workspaces.
   - Whatever the workload itself uses (`go`, `node`, `python3`, etc.).
 
 **Environment**
@@ -195,9 +191,9 @@ SM_AGENT_RUNTIME_OVERRIDE=shell /usr/local/bin/agent
 
 - `docker_op` is disabled and the agent reports it as such on each
   call. If you need container ops, use Docker or Podman.
-- The plan executors run uncontained. Treat the agent host as a trust
+- `run_step` commands run uncontained. Treat the agent host as a trust
   boundary; don't run shell-runtime agents on hosts you wouldn't give
-  the configured AI CLI shell access to.
+  the platform shell access to.
 - Process supervision uses `/tmp/sm-agent`. On hosts that wipe `/tmp`
   on reboot, agent-managed processes restart from scratch on each
   reboot — fine for dev, surprising for prod.
@@ -267,7 +263,7 @@ re-enrolls under the new credential.
 Most teams want **Docker**. Pick **Podman** if your host policy
 forbids the Docker daemon. Pick **Shell** for hosts with no container
 runtime, or where the workload itself runs as a host process and you
-want supervised tailing + auto-fix without a container layer. Use
+want supervised tailing without a container layer. Use
 **Kubernetes** when you have a cluster — and prefer the
 [operator install]({% link agent/kubernetes.md %}) over hand-rolling
 the manifests.

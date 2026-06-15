@@ -6,7 +6,7 @@ has_children: true
 
 # Getting started
 
-Kaiad is a **multi-tenant SaaS control plane**: your team operates the platform in your environment, while **customer agents** run beside their workloads (typically Docker-based services), stream logs for error detection, and execute remediation you define. The plane **deduplicates incidents** (fingerprint + cooldown), **queues remediation and automation** jobs, and ties everything to **tenants**, **services**, and **GitHub** installations when you use the GitHub App path.
+Kaiad is a **multi-tenant SaaS control plane**: your team operates the platform in your environment, while **customer agents** run beside their workloads (typically Docker-based services), stream logs for error detection, and execute commands you send. The plane **deduplicates incidents** (fingerprint + cooldown), **queues automation** jobs, and ties everything to **tenants**, **services**, and **GitHub** installations when you use the GitHub App path.
 
 ## What you are operating
 
@@ -15,7 +15,7 @@ Kaiad is a **multi-tenant SaaS control plane**: your team operates the platform 
 | **Admin SPA** | Operators use the browser UI for configuration, incidents, agents, and services. |
 | **API + realtime** | HTTP API for auth, settings, services, incidents, agents, GitHub metadata; **WebSocket** endpoint for long-lived agent sessions. |
 | **Agents** | Connect **outbound** (WSS) to the control plane—no inbound firewall holes for agents. |
-| **Workers** | Consume **BullMQ** queues on **Redis**: remediation runs, GitHub mutations, agent commands, log ingestion. |
+| **Workers** | Consume **BullMQ** queues on **Redis**: GitHub mutations, agent commands, log ingestion. |
 | **Postgres** | Durable tenant and domain data when configured; otherwise dev-oriented in-memory stores may apply. |
 | **Redis** | Job queues and realtime coordination (e.g. pending agent commands). |
 
@@ -24,7 +24,7 @@ Progressive disclosure: start here for the mental model, then [configure the con
 ## Data and control flow (high level)
 
 1. **Agents** send heartbeats and log lines over the **WSS** channel; the platform evaluates **error-level** logs, applies **deduplication**, and opens or updates **incidents** as configured.
-2. **Workers** pick up jobs from **BullMQ** to run remediation tasks, call **GitHub** when policy allows, and dispatch **agent commands** through the realtime tier.
+2. **Workers** pick up jobs from **BullMQ** to call **GitHub** when policy allows and dispatch **agent commands** through the realtime tier.
 3. **Operators** use the SPA and **REST API** under `/api/v1` for day-2 configuration and incident handling.
 
 ## Next steps

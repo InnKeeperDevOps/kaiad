@@ -1,63 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch, type Component } from "vue";
+import { computed, onMounted, ref, watch, type Component } from "vue";
 import { AlertTriangle, CheckCircle, Clock } from "lucide-vue-next";
 import { api, type Incident } from "../../lib/api.js";
 import { useAuth } from "../../lib/useAuth.js";
-
-// Fix-progress step → display label + icon glyph + colour. The glyph is
-// inline text (kept dep-free) so the timeline renders even without a
-// fresh icon import. ok flag flips ✓/✗.
-const fixStepLabel: Record<string, string> = {
-  started: "Started",
-  cloning: "Cloning repo",
-  cli: "Running AI CLI",
-  no_changes: "No changes proposed",
-  committing: "Committing fix",
-  pushing: "Pushing to branch",
-  succeeded: "Fix pushed",
-  failed: "Fix failed"
-};
-const fixStatusLabel: Record<string, string> = {
-  running: "Running",
-  cloning: "Cloning repo…",
-  cli: "Running AI CLI…",
-  committing: "Committing…",
-  pushing: "Pushing…",
-  succeeded: "Pushed ✓",
-  no_changes: "AI made no changes",
-  auth_failed: "Auth failed",
-  clone_failed: "Clone failed",
-  cli_failed: "AI CLI failed",
-  push_failed: "Push failed",
-  cancelled: "Cancelled",
-  failed: "Failed"
-};
-const fixStatusColor: Record<string, string> = {
-  running: "var(--color-info, var(--color-primary))",
-  cloning: "var(--color-info, var(--color-primary))",
-  cli: "var(--color-info, var(--color-primary))",
-  committing: "var(--color-info, var(--color-primary))",
-  pushing: "var(--color-info, var(--color-primary))",
-  succeeded: "var(--color-success)",
-  no_changes: "var(--color-warning)",
-  auth_failed: "var(--color-danger)",
-  clone_failed: "var(--color-danger)",
-  cli_failed: "var(--color-danger)",
-  push_failed: "var(--color-danger)",
-  cancelled: "var(--color-warning)",
-  failed: "var(--color-danger)"
-};
-function fixGlyph(ev: { step: string; ok?: boolean }): string {
-  if (ev.ok === true) return "✓";
-  if (ev.ok === false) return "✗";
-  return "•";
-}
-function fixGlyphColor(ev: { step: string; ok?: boolean }): string {
-  if (ev.ok === true) return "var(--color-success)";
-  if (ev.ok === false) return "var(--color-danger)";
-  return "var(--color-text-secondary)";
-}
-const FIX_RUNNING_STATUSES = new Set(["running", "cloning", "cli", "committing", "pushing"]);
 
 const statusIcon: Record<string, Component> = {
   open: AlertTriangle,
@@ -79,52 +24,9 @@ const expandedId = ref<string | null>(null);
 const auth = useAuth();
 const isViewer = computed(() => auth.value.isViewer);
 
-// Live list of fixes currently running inside kaiad — `null` until the
-// first /api/v1/auto-fix/in-flight response so the panel doesn't flash
-// an empty state on first paint.
-type InFlightFix = Awaited<ReturnType<typeof api.listInFlightAutoFixes>>["fixes"][number];
-const inFlightFixes = ref<InFlightFix[] | null>(null);
-const cancelBusyServiceId = ref<string | null>(null);
-
-async function refreshInFlight() {
-  try {
-    const r = await api.listInFlightAutoFixes();
-    inFlightFixes.value = r.fixes;
-  } catch (e: unknown) {
-    // Don't clobber the incidents-page error banner — silently
-    // ignore; the next tick retries.
-    inFlightFixes.value = [];
-    console.warn("listInFlightAutoFixes failed", e);
-  }
-}
-
-function formatElapsed(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  const sr = s % 60;
-  return `${m}m ${sr}s`;
-}
-
-async function handleCancelFix(serviceId: string, action: "none" | "retry" | "delete") {
-  if (action === "delete" && !window.confirm("Cancel the in-flight fix AND delete the incident? This cannot be undone.")) {
-    return;
-  }
-  cancelBusyServiceId.value = serviceId;
-  try {
-    await api.cancelInFlightAutoFix(serviceId, action);
-    await Promise.all([refreshInFlight(), refreshIncidents()]);
-  } catch (e: unknown) {
-    error.value = (e as Error).message;
-  } finally {
-    cancelBusyServiceId.value = null;
-  }
-}
-
 // "Advanced" view — surfaces every field the Incident schema carries
 // instead of the curated summary view: full incident IDs and
-// fingerprints, exact ISO timestamps, auto-opened command outputs,
-// full commit SHAs, fix executor, full started/finished timestamps.
+// fingerprints, exact ISO timestamps.
 // Persisted across visits in localStorage so power users don't
 // re-toggle every time they open the page.
 const ADV_KEY = "kaiad.incidents.advanced";
@@ -155,38 +57,7 @@ async function refreshIncidents() {
 }
 onMounted(() => {
   void refreshIncidents();
-  void refreshInFlight();
 });
-
-// Refresh the in-flight panel every 3s so an operator sees a fix
-// appear/disappear without manual reload. Same cadence as the
-// expanded-row poll for incident timeline progress.
-const inFlightTimer = setInterval(() => {
-  void refreshInFlight();
-}, 3000);
-onUnmounted(() => clearInterval(inFlightTimer));
-
-// While an expanded incident's fix is in-flight, poll every 3s so the
-// timeline animates without the user clicking refresh. Stops as soon
-// as the fix terminates or the row collapses.
-let pollTimer: ReturnType<typeof setInterval> | null = null;
-function stopPoll() {
-  if (pollTimer) {
-    clearInterval(pollTimer);
-    pollTimer = null;
-  }
-}
-watch(expandedId, (id) => {
-  stopPoll();
-  if (!id) return;
-  const tick = () => {
-    const inc = incidents.value.find((i) => i.id === id);
-    if (inc && (!inc.lastFixStatus || !FIX_RUNNING_STATUSES.has(inc.lastFixStatus))) return;
-    void refreshIncidents();
-  };
-  pollTimer = setInterval(tick, 3000);
-});
-onUnmounted(stopPoll);
 
 async function handleStatusChange(id: string, status: string) {
   try {
@@ -206,26 +77,6 @@ async function handleDelete(id: string) {
   } catch (e: unknown) {
     error.value = (e as Error).message;
   }
-}
-
-async function handleRunFix(id: string) {
-  try {
-    // Optimistic: mark the timeline as running so the button greys out
-    // and the auto-poll kicks in before the next refresh.
-    incidents.value = incidents.value.map((i) =>
-      i.id === id ? { ...i, lastFixStatus: "running", lastFixEvents: [] } : i
-    );
-    await api.runIncidentFix(id);
-    if (expandedId.value !== id) expandedId.value = id; // surface the timeline
-    await refreshIncidents();
-  } catch (e: unknown) {
-    error.value = (e as Error).message;
-    // Revert the optimistic state on failure.
-    await refreshIncidents();
-  }
-}
-function isFixRunning(inc: Incident): boolean {
-  return Boolean(inc.lastFixStatus && FIX_RUNNING_STATUSES.has(inc.lastFixStatus));
 }
 
 const headers = computed(() =>
@@ -282,119 +133,6 @@ const btnStyle = {
       </button>
     </div>
     <div v-if="error" :style="{ color: 'var(--color-danger)', marginBottom: '0.5rem' }">{{ error }}</div>
-
-    <!-- In-flight autonomous fixes. Always rendered when the array is
-         non-empty; hidden between runs so it doesn't add chrome. -->
-    <section
-      v-if="!isViewer && inFlightFixes && inFlightFixes.length > 0"
-      :style="{
-        border: '1px solid var(--color-border)',
-        borderLeft: '3px solid var(--color-primary)',
-        borderRadius: '8px',
-        padding: '0.65rem 0.85rem',
-        marginBottom: '1rem',
-        background: 'var(--color-surface-muted)'
-      }"
-    >
-      <div :style="{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.45rem' }">
-        <span :style="{ fontWeight: 600, fontSize: '0.85rem' }">Autonomous fixes running</span>
-        <span :style="{ fontSize: '0.78rem', color: 'var(--color-text-secondary)' }">
-          {{ inFlightFixes.length }} in flight
-        </span>
-      </div>
-      <table :style="{ width: '100%', borderCollapse: 'collapse', fontSize: '0.83rem' }">
-        <thead>
-          <tr :style="{ color: 'var(--color-text-secondary)', textAlign: 'left' }">
-            <th :style="{ padding: '0.3rem 0.4rem', fontWeight: 500 }">Service</th>
-            <th :style="{ padding: '0.3rem 0.4rem', fontWeight: 500 }">Incident</th>
-            <th :style="{ padding: '0.3rem 0.4rem', fontWeight: 500 }">Executor</th>
-            <th :style="{ padding: '0.3rem 0.4rem', fontWeight: 500 }">Trigger</th>
-            <th :style="{ padding: '0.3rem 0.4rem', fontWeight: 500 }">Elapsed</th>
-            <th :style="{ padding: '0.3rem 0.4rem', fontWeight: 500, textAlign: 'right' }">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            v-for="f in inFlightFixes"
-            :key="f.serviceId"
-            :style="{ borderTop: '1px solid var(--color-border)' }"
-          >
-            <td :style="{ padding: '0.35rem 0.4rem' }">{{ f.serviceName }}</td>
-            <td
-              :style="{
-                padding: '0.35rem 0.4rem',
-                fontFamily: 'monospace',
-                fontSize: '0.78rem',
-                color: 'var(--color-text-secondary)'
-              }"
-              :title="f.incidentId ?? '(no incident bound)'"
-            >
-              {{ f.incidentId ? f.incidentId.slice(0, 8) + "…" : "—" }}
-            </td>
-            <td :style="{ padding: '0.35rem 0.4rem' }">
-              <span v-if="f.pending" :style="{ color: 'var(--color-warning)' }">starting…</span>
-              <template v-else>{{ f.executor }}</template>
-            </td>
-            <td :style="{ padding: '0.35rem 0.4rem' }">
-              <span v-if="f.pending" :style="{ color: 'var(--color-text-secondary)' }">—</span>
-              <template v-else>{{ f.triggeredBy }}</template>
-            </td>
-            <td :style="{ padding: '0.35rem 0.4rem', fontVariantNumeric: 'tabular-nums' }">
-              {{ formatElapsed(f.elapsedMs) }}
-            </td>
-            <td :style="{ padding: '0.35rem 0.4rem', textAlign: 'right' }">
-              <button
-                type="button"
-                :disabled="cancelBusyServiceId === f.serviceId"
-                :style="{
-                  background: 'transparent',
-                  border: '1px solid var(--color-border)',
-                  color: 'var(--color-text)',
-                  borderRadius: '6px',
-                  padding: '0.2rem 0.55rem',
-                  fontSize: '0.78rem',
-                  cursor: cancelBusyServiceId === f.serviceId ? 'wait' : 'pointer'
-                }"
-                @click="handleCancelFix(f.serviceId, 'none')"
-              >Cancel</button>
-              <button
-                type="button"
-                :disabled="cancelBusyServiceId === f.serviceId"
-                :style="{
-                  marginLeft: '0.3rem',
-                  background: 'transparent',
-                  border: '1px solid var(--color-primary)',
-                  color: 'var(--color-primary)',
-                  borderRadius: '6px',
-                  padding: '0.2rem 0.55rem',
-                  fontSize: '0.78rem',
-                  cursor: cancelBusyServiceId === f.serviceId ? 'wait' : 'pointer'
-                }"
-                title="Cancel the in-flight fix and immediately re-dispatch a fresh run"
-                @click="handleCancelFix(f.serviceId, 'retry')"
-              >Cancel &amp; retry</button>
-              <button
-                v-if="f.incidentId"
-                type="button"
-                :disabled="cancelBusyServiceId === f.serviceId"
-                :style="{
-                  marginLeft: '0.3rem',
-                  background: 'transparent',
-                  border: '1px solid var(--color-danger)',
-                  color: 'var(--color-danger)',
-                  borderRadius: '6px',
-                  padding: '0.2rem 0.55rem',
-                  fontSize: '0.78rem',
-                  cursor: cancelBusyServiceId === f.serviceId ? 'wait' : 'pointer'
-                }"
-                title="Cancel the in-flight fix and delete the incident"
-                @click="handleCancelFix(f.serviceId, 'delete')"
-              >Cancel &amp; delete</button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </section>
 
     <p v-if="incidents.length === 0" :style="{ color: 'var(--color-text-secondary)' }">
       No incidents recorded yet.
@@ -480,22 +218,6 @@ const btnStyle = {
                 Resolve
               </button>
               <button
-                :disabled="isFixRunning(inc)"
-                :style="{
-                  ...btnStyle,
-                  marginLeft: '0.25rem',
-                  background: 'transparent',
-                  color: 'var(--color-primary)',
-                  border: '1px solid var(--color-primary)',
-                  cursor: isFixRunning(inc) ? 'not-allowed' : 'pointer',
-                  opacity: isFixRunning(inc) ? 0.6 : 1
-                }"
-                :title="isFixRunning(inc) ? 'A fix is already in flight for this service' : 'Trigger an autonomous fix for this incident'"
-                @click="handleRunFix(inc.id)"
-              >
-                {{ isFixRunning(inc) ? "Fix running…" : "Run fix" }}
-              </button>
-              <button
                 :style="{
                   ...btnStyle,
                   marginLeft: '0.25rem',
@@ -532,29 +254,6 @@ const btnStyle = {
                 </div>
                 <div>
                   <div :style="{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }">
-                    <strong>Fix progress:</strong>
-                    <span
-                      v-if="inc.lastFixStatus"
-                      :style="{
-                        padding: '0.05rem 0.45rem',
-                        borderRadius: '999px',
-                        fontSize: '0.72rem',
-                        background: fixStatusColor[inc.lastFixStatus] || 'var(--color-text-secondary)',
-                        color: '#fff'
-                      }"
-                    >{{ fixStatusLabel[inc.lastFixStatus] || inc.lastFixStatus }}</span>
-                    <span
-                      v-if="inc.lastFixExecutor"
-                      :style="{ fontSize: '0.78rem', color: 'var(--color-text-secondary)' }"
-                    >via {{ inc.lastFixExecutor }}</span>
-                    <span
-                      v-if="inc.lastFixStartedAt"
-                      :style="{ fontSize: '0.78rem', color: 'var(--color-text-secondary)' }"
-                    >started {{ new Date(inc.lastFixStartedAt).toLocaleTimeString() }}</span>
-                    <span
-                      v-if="inc.lastFixFinishedAt"
-                      :style="{ fontSize: '0.78rem', color: 'var(--color-text-secondary)' }"
-                    >· finished {{ new Date(inc.lastFixFinishedAt).toLocaleTimeString() }}</span>
                     <button
                       :style="{ marginLeft: 'auto', background: 'transparent', border: '1px solid var(--color-border)', color: 'var(--color-text-secondary)', borderRadius: '6px', padding: '0.1rem 0.55rem', fontSize: '0.75rem', cursor: 'pointer' }"
                       @click="refreshIncidents"
@@ -588,116 +287,9 @@ const btnStyle = {
                     <dd :style="{ margin: 0 }">{{ inc.firstSeenAt }}</dd>
                     <dt>lastSeenAt</dt>
                     <dd :style="{ margin: 0 }">{{ inc.lastSeenAt }}</dd>
-                    <template v-if="inc.lastFixStartedAt">
-                      <dt>fix.startedAt</dt>
-                      <dd :style="{ margin: 0 }">{{ inc.lastFixStartedAt }}</dd>
-                    </template>
-                    <template v-if="inc.lastFixFinishedAt">
-                      <dt>fix.finishedAt</dt>
-                      <dd :style="{ margin: 0 }">{{ inc.lastFixFinishedAt }}</dd>
-                    </template>
-                    <template v-if="inc.lastFixExecutor">
-                      <dt>fix.executor</dt>
-                      <dd :style="{ margin: 0 }">{{ inc.lastFixExecutor }}</dd>
-                    </template>
                     <dt>eventCount</dt>
                     <dd :style="{ margin: 0 }">{{ inc.eventCount }}</dd>
                   </dl>
-                  <ol
-                    v-if="inc.lastFixEvents && inc.lastFixEvents.length"
-                    :style="{
-                      marginTop: '0.4rem',
-                      paddingLeft: 0,
-                      listStyle: 'none',
-                      display: 'grid',
-                      gap: '0.15rem',
-                      fontSize: '0.8rem',
-                      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace'
-                    }"
-                  >
-                    <li
-                      v-for="(ev, idx) in inc.lastFixEvents"
-                      :key="idx"
-                      :style="{ display: 'grid', gridTemplateColumns: 'auto auto auto 1fr', columnGap: '0.5rem', rowGap: '0.1rem', alignItems: 'baseline' }"
-                    >
-                      <span :style="{ color: fixGlyphColor(ev), width: '1ch', textAlign: 'center' }">{{ fixGlyph(ev) }}</span>
-                      <span :style="{ color: 'var(--color-text-secondary)', minWidth: '8ch' }">{{ new Date(ev.at).toLocaleTimeString() }}</span>
-                      <span :style="{ minWidth: '14ch' }">
-                        {{ fixStepLabel[ev.step] || ev.step }}
-                        <span
-                          v-if="typeof ev.code === 'number'"
-                          :style="{ marginLeft: '0.35rem', fontSize: '0.7rem', color: ev.ok === false ? 'var(--color-danger)' : 'var(--color-text-secondary)' }"
-                        >exit {{ ev.code }}</span>
-                      </span>
-                      <span v-if="ev.message" :style="{ color: ev.ok === false ? 'var(--color-danger)' : 'var(--color-text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }">— {{ ev.message }}</span>
-                      <!-- The actual command + its output, spanning all 4 cols -->
-                      <div
-                        v-if="ev.cmd || ev.output"
-                        :style="{ gridColumn: '2 / span 3', marginTop: '0.05rem' }"
-                      >
-                        <code
-                          v-if="ev.cmd"
-                          :style="{ display: 'block', fontSize: '0.72rem', color: 'var(--color-text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }"
-                        >$ {{ ev.cmd }}</code>
-                        <span
-                          v-if="ev.output === '(no output)'"
-                          :style="{ fontSize: '0.72rem', color: 'var(--color-text-secondary)', fontStyle: 'italic' }"
-                        >(no output)</span>
-                        <details
-                          v-else-if="ev.output"
-                          :open="showAdvanced"
-                          :style="{ marginTop: '0.1rem' }"
-                        >
-                          <summary :style="{ cursor: 'pointer', fontSize: '0.72rem', color: 'var(--color-text-secondary)' }">output ({{ ev.output.length }} chars)</summary>
-                          <pre
-                            :style="{
-                              marginTop: '0.2rem',
-                              maxHeight: '10rem',
-                              overflow: 'auto',
-                              background: 'var(--color-bg)',
-                              border: '1px solid var(--color-border)',
-                              borderRadius: '6px',
-                              padding: '0.4rem 0.55rem',
-                              fontSize: '0.7rem',
-                              whiteSpace: 'pre-wrap',
-                              wordBreak: 'break-word'
-                            }"
-                          >{{ ev.output }}</pre>
-                        </details>
-                      </div>
-                    </li>
-                  </ol>
-                  <p
-                    v-else
-                    :style="{ color: 'var(--color-text-secondary)', marginTop: '0.3rem', fontSize: '0.8rem' }"
-                  >No autonomous fix attempts yet for this incident.</p>
-                  <p v-if="inc.lastFixCommitSha" :style="{ marginTop: '0.35rem', fontSize: '0.82rem' }">
-                    <strong>Commit:</strong>
-                    <code :style="{ marginLeft: '0.4rem' }">{{
-                      showAdvanced ? inc.lastFixCommitSha : inc.lastFixCommitSha.slice(0, 12)
-                    }}</code>
-                  </p>
-                  <details
-                    v-if="inc.lastFixOutput"
-                    :open="showAdvanced"
-                    :style="{ marginTop: '0.35rem' }"
-                  >
-                    <summary :style="{ cursor: 'pointer', fontSize: '0.8rem', color: 'var(--color-text-secondary)' }">CLI output (latest)</summary>
-                    <pre
-                      :style="{
-                        marginTop: '0.3rem',
-                        maxHeight: '14rem',
-                        overflow: 'auto',
-                        background: 'var(--color-bg)',
-                        border: '1px solid var(--color-border)',
-                        borderRadius: '6px',
-                        padding: '0.5rem 0.65rem',
-                        fontSize: '0.75rem',
-                        whiteSpace: 'pre-wrap',
-                        wordBreak: 'break-word'
-                      }"
-                    >{{ inc.lastFixOutput }}</pre>
-                  </details>
                 </div>
                 <div>
                   <strong>Full log:</strong>

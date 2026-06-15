@@ -65,23 +65,19 @@ describe("TenantConfigurationPage", () => {
   it("submits merged tenant settings on save", async () => {
     getSettings.mockResolvedValue({
       tenantId: "t1",
-      docsUrl: "https://docs.acme.com",
-      preferredExecutor: "claude"
+      docsUrl: "https://docs.acme.com"
     });
     updateSettings.mockImplementation(async (payload) => payload);
 
     render(<TenantConfigurationPage tenantIdFromRoute="t1" onAuthUserUpdated={() => {}} />);
 
     const docsInput = await screen.findByLabelText("Documentation URL");
-    const executorSelect = await screen.findByLabelText("Preferred executor");
 
     await waitFor(() => {
       expect(docsInput).toHaveValue("https://docs.acme.com");
-      expect(executorSelect).toHaveValue("claude");
     });
-    
+
     fireEvent.change(docsInput, { target: { value: "https://new.docs.acme.com" } });
-    fireEvent.change(executorSelect, { target: { value: "cursor" } });
 
     await waitFor(() => {
       expect(docsInput).toHaveValue("https://new.docs.acme.com");
@@ -92,8 +88,7 @@ describe("TenantConfigurationPage", () => {
       expect(updateSettings).toHaveBeenCalledWith(
         expect.objectContaining({
           tenantId: "t1",
-          docsUrl: "https://new.docs.acme.com",
-          preferredExecutor: "cursor"
+          docsUrl: "https://new.docs.acme.com"
         })
       );
     });

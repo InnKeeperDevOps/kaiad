@@ -56,13 +56,7 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
     updateIncidentStatus: (tenantId, id, status) =>
       queries.updateIncidentStatus(queryFn, tenantId, id, status),
     deleteIncident: (tenantId, id) => queries.deleteIncident(queryFn, tenantId, id),
-    resolveIncidentByFingerprint: (tenantId, serviceId, fingerprint) =>
-      queries.resolveIncidentByFingerprint(queryFn, tenantId, serviceId, fingerprint),
     resolveStaleIncidents: (cutoff) => queries.resolveStaleIncidents(queryFn, cutoff),
-    recordFixProgress: (tenantId, serviceId, fingerprint, patch) =>
-      queries.recordFixProgress(queryFn, tenantId, serviceId, fingerprint, patch),
-    getCurrentIncidentId: (tenantId, serviceId, fingerprint) =>
-      queries.getCurrentIncidentId(queryFn, tenantId, serviceId, fingerprint),
 
     listSshKeys: async (tenantId) => {
       const rows = await queries.listSshKeys(queryFn, tenantId);
@@ -142,7 +136,6 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
         composePath: data.composePath,
         pipelineName: data.pipelineName,
         kaiadYamlPath: data.kaiadYamlPath,
-        fixExecutor: data.fixExecutor,
         healthcheck: data.healthcheck ?? null,
         securityContext: data.securityContext ?? null,
         locked: data.locked === true
@@ -168,7 +161,6 @@ export function createPostgresDomainStore(pool: Pool): DomainStore {
       if (patch.composePath !== undefined) push("compose_path", patch.composePath);
       if (patch.pipelineName !== undefined) push("pipeline_name", patch.pipelineName);
       if (patch.kaiadYamlPath !== undefined) push("kaiad_yaml_path", patch.kaiadYamlPath);
-      if (patch.fixExecutor !== undefined) push("fix_executor", patch.fixExecutor);
       // Healthcheck patch: null clears every column (back to "no probe");
       // an object replaces all seven fields atomically. Undefined leaves
       // them alone. We don't allow per-field patches — the form sends a

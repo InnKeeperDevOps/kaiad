@@ -3,7 +3,6 @@ import {
   mapErrorToIncident,
   processLogEventForIncident,
   queueCatalog,
-  runRemediation,
   type LogDedupState
 } from "../src/index.js";
 
@@ -113,30 +112,7 @@ describe("worker", () => {
   });
 
   it("exposes queue catalog from contracts", () => {
-    expect(queueCatalog().remediation).toBe("remediation");
-  });
-
-  it("runs executor for remediation jobs", async () => {
-    vi.stubEnv("SM_EXECUTOR_SIMULATE", "1");
-    vi.stubEnv("SM_EXECUTOR_ALLOW_SIMULATION", "1");
-    const output = await runRemediation({
-      remediationJobId: "r-1",
-      tenantId: "t-1",
-      incidentId: "i-1",
-      fingerprint: "f",
-      executor: "cursor",
-      prompt: "fix this",
-      gitRepoUrl: "https://example.com/repo.git",
-      sshKeyType: "uploaded",
-      sshKeyValue: null
-    });
-    expect(output.success).toBe(true);
-    expect(output.executor).toBe("cursor");
-    expect(output.metadata.simulated).toBe(true);
-    expect(output.metadata.command).toEqual(["cursor"]);
-    expect(output.metadata.startedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    expect(output.metadata.endedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    expect(output.log).toContain("simulated run");
+    expect(queueCatalog().agentCommands).toBe("agent-commands");
   });
 });
 

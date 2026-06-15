@@ -26,8 +26,6 @@ type AgentHello struct {
 	Runtime struct {
 		Backend string `json:"backend"`
 	} `json:"runtime"`
-	// PreferredExecutor is the AI CLI the agent should use for automated fix plans ("cursor" or "claude").
-	PreferredExecutor string `json:"preferredExecutor,omitempty"`
 }
 
 type heartbeatRuntime struct {
@@ -664,7 +662,7 @@ func (c *Client) handleIncoming(ctx context.Context, errCh chan<- error, data []
 		return
 	}
 	switch envelope.Type {
-	case "run_step", "docker_op", "cancel_run", "sync_desired_state", "run_cursor_plan", "run_claude_plan", "run_toolchain", "receive_source_archive", "run_fix_plan", "redeploy_service", "teardown_service", "list_metallb_pool_ips":
+	case "run_step", "docker_op", "cancel_run", "sync_desired_state", "run_toolchain", "receive_source_archive", "redeploy_service", "teardown_service", "list_metallb_pool_ips":
 	default:
 		c.protoDebug("inbound ignored unknown command type=%s", envelope.Type)
 		return

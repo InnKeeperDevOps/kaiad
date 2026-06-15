@@ -1,19 +1,16 @@
 ---
-title: Error grouping & auto-fix
+title: Error grouping
 nav_order: 5
 parent: Install Agent
 ---
 
-# Error grouping & auto-fix dispatch
+# Error grouping
 
 Kaiad watches the log stream from each enrolled agent for error-level
-lines, normalizes them into deduplicated **error groups**, and (when
-the service has the credentials and is eligible) dispatches an
-**auto-fix** run that clones the repo, runs the configured plan
-executor (`cursor` or `claude`) against the failing context, commits
-any changes, and pushes them back. This page covers the full loop:
-what you see, how groups are formed, when and why a fix is dispatched,
-and the lifecycle states a group moves through.
+lines and normalizes them into deduplicated **error groups**. Each
+group can surface as an incident you can track and triage. This page
+covers what you see, how groups are formed, and the lifecycle states a
+group moves through.
 
 ## In the panel
 
@@ -58,9 +55,9 @@ collide into the same group. The fingerprint is
 chars. This is intentionally noisy on the side of grouping: identical
 exception classes from different code paths *may* collide. The
 `contextLines` array attached to the group is what disambiguates in the
-UI (and the auto-fix prompt) when collisions happen.
+UI when collisions happen.
 
-## When auto-fix dispatches
+## How errors are filtered
 
 On every `app_log_error` the API:
 
@@ -70,41 +67,19 @@ On every `app_log_error` the API:
    found`, `validation error/failed`, `invalid input/payload/json/body`,
    `missing required`, `unprocessable entity`, `schema validation`,
    `zod error`). When it matches, the line is **not** turned into an
-   error group at all — there's nothing to auto-fix in user input.
+   error group at all — user-input errors aren't real service faults.
 2. **Upserts the group.** Either creates a new one or bumps the event
    count and last-seen timestamp on an existing fingerprint.
-3. **Calls the dispatcher** (`apps/api/src/autoFixDispatcher.ts`).
-   The dispatcher returns one of these outcomes:
-
-| Outcome | Meaning |
-|---|---|
-| `dispatched` | A `run_fix_plan` realtime command was queued for the agent and the group flipped to `fixing`. |
-| `skipped_paused` | Group status is `paused`; the dispatcher does nothing. |
-| `skipped_already_fixing` | An earlier fix is in flight; we don't pile on. |
-| `skipped_missing_auth` | The service has no SSH key or the key material can't be loaded. Group flips to `missing_auth`. |
-
-When dispatched, the agent receives a `run_fix_plan` command containing:
-
-- `errorGroupId`, `errorMessage`, `normalizedMessage`, `fingerprint`
-- `contextLines` (the buffered context from the agent's log shipper)
-- `gitRepoUrl` and `branch` from the service record
-- `sshKeyType` and `sshKeyValue` (resolved from the service's
-  `sshKeyId`)
-
-The agent clones the repo into a temp workspace, invokes the
-configured plan executor, commits any resulting diff, and pushes to
-the service's branch. The whole flow is logged to the agent's stdout
-and surfaced as an `agent_command_status` event back to the panel.
 
 ## Lifecycle
 
 | Status | Set by | Meaning |
 |---|---|---|
-| `open` | API on first sighting / when a previous fix fails | The group is eligible for auto-fix on the next matching error. |
-| `fixing` | Dispatcher when it queues `run_fix_plan` | A fix is in flight. New occurrences of this fingerprint are recorded but not re-dispatched. |
-| `fixed` | API when the fix command reports `completed` | The dispatcher has confirmed the fix landed. The group remains visible in the UI; if the same fingerprint reappears, it flips back to `open` automatically. |
-| `paused` | (currently UI-only; see [Pausing](#pausing-a-group) below) | Auto-fix is disabled for this group; new errors still update the count. |
-| `missing_auth` | Dispatcher when SSH key lookup fails | The group cannot be auto-fixed until the service is given an SSH key. Re-evaluated on the next matching error. |
+| `open` | API on first sighting | The group is active. New occurrences of this fingerprint bump the count and last-seen timestamp. |
+
+The error-group wire schema still carries other status values
+(`fixing`, `fixed`, `paused`, `missing_auth`) for backward
+compatibility, but in practice only `open` is ever set today.
 
 ## API endpoints
 
@@ -119,21 +94,6 @@ GET /api/v1/services/:id/error-groups
 Response shape: `{ "groups": ErrorGroup[] }` — see
 `packages/contracts/src/realtime.ts` for the full schema.
 
-There is **no REST endpoint to set group status** today. The
-dispatcher mutates `fixing`, `fixed`, and `missing_auth` internally;
-`open` is the default. If you need to manually mark a group `paused`,
-do it via the panel (the UI exposes a status toggle that calls an
-internal handler — flagged as a gap to formalize).
-
-## Pausing a group
-
-The `paused` status exists as a kill-switch for "I know about this
-error and I don't want auto-fix to run on it" cases — for example,
-errors caused by an external dependency that you don't own. Today this
-is set via the panel's group menu; it is not yet exposed as a REST
-endpoint. If you find yourself wanting programmatic control, that's a
-real gap — file an issue.
-
 ## Realtime events
 
 When a group is created or its status changes the API broadcasts a
@@ -143,13 +103,13 @@ every panel session in the tenant. Schema:
 ```json
 {
   "type": "error_group_updated",
-  "group": { "id": "...", "status": "fixing", ... }
+  "group": { "id": "...", "status": "open", ... }
 }
 ```
 
 The Agents page subscribes via `useTelemetryStream` and patches the
-section in place, so a fix that lands within seconds of an error
-appears as a single status flip rather than a re-fetch.
+section in place, so a new error appears as a single update rather than
+a re-fetch.
 
 ## Privacy and data flow
 
@@ -169,8 +129,6 @@ What's stored on the API side:
 
 - Per-tenant: the error group rows (fingerprint, normalized message,
   sample message, context lines).
-- Per-tenant: any auto-fix dispatch metadata (commit SHAs from
-  successful fixes).
 
 There is no cross-tenant aggregation. Error groups never travel
 beyond the tenant that owns the service the error came from.

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { ArrowLeft, Cpu, Settings } from "lucide-vue-next";
+import { ArrowLeft, Settings } from "lucide-vue-next";
 import { api, meResponseToAuthUser } from "../../lib/api.js";
 import { useAuth, type AuthUser } from "../../lib/useAuth.js";
 import TenantConfigurationSection from "../settings/TenantConfigurationSection.vue";
@@ -115,27 +115,5 @@ onMounted(() => {
       :save-patch="tenantSettings.savePatch"
       :on-clear-error="tenantSettings.clearError"
     />
-
-    <div
-      v-if="aligned"
-      :style="{
-        background: 'var(--color-surface)',
-        border: '1px solid var(--color-border)',
-        borderRadius: '10px',
-        padding: '1rem',
-        marginBottom: '1rem'
-      }"
-    >
-      <h3 :style="{ margin: '0 0 0.75rem', fontSize: '1rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }">
-        <Cpu :size="16" /> Executors
-      </h3>
-      <p :style="{ color: 'var(--color-text-secondary)', margin: 0, fontSize: '0.85rem' }">
-        Preferred executor:
-        <strong>{{ tenantSettings.data.value?.preferredExecutor === "claude" ? "Claude" : "Cursor" }}</strong>
-        (fallback:
-        {{ tenantSettings.data.value?.preferredExecutor === "claude" ? "Cursor" : "Claude" }}). Set in the
-        <strong>Tenant configuration</strong> form above.
-      </p>
-    </div>
   </section>
 </template>

@@ -15,33 +15,8 @@ export type DomainStore = {
   updateIncidentStatus(tenantId: string, id: string, status: IncidentStatus): Promise<Incident | undefined>;
   /** Hard-delete an incident by id. Returns true if a row was removed. */
   deleteIncident(tenantId: string, id: string): Promise<boolean>;
-  /** Resolve open incidents for a service+fingerprint after an auto-fix lands. Returns count closed. */
-  resolveIncidentByFingerprint(tenantId: string, serviceId: string, fingerprint: string): Promise<number>;
   /** Auto-resolve incidents not seen since `cutoff` (presumed healthy). Returns count closed. */
   resolveStaleIncidents(cutoff: Date): Promise<number>;
-  /** Record progress of the latest in-kaiad fix attempt on the matching
-   *  incident (tenant + service + fingerprint). Appends an event and
-   *  optionally updates the running fields. */
-  recordFixProgress(
-    tenantId: string,
-    serviceId: string,
-    fingerprint: string,
-    patch: {
-      incidentId?: string;
-      status?: string;
-      executor?: string;
-      startedAt?: string;
-      finishedAt?: string;
-      commitSha?: string | null;
-      output?: string | null;
-      event?: { step: string; ok?: boolean; message?: string; cmd?: string; output?: string; code?: number };
-      resetEvents?: boolean;
-    }
-  ): Promise<void>;
-  /** Lookup the most-recent incident id for (service, fingerprint) — pin
-   *  it at fix-start so all subsequent recordFixProgress calls target
-   *  the same row. */
-  getCurrentIncidentId(tenantId: string, serviceId: string, fingerprint: string): Promise<string | null>;
 
   listAgents(tenantId: string): Promise<Agent[]>;
   getAgent(tenantId: string, id: string): Promise<Agent | undefined>;
@@ -98,7 +73,6 @@ export type DomainStore = {
       composePath?: string;
       pipelineName?: string | null;
       kaiadYamlPath?: string;
-      fixExecutor?: "claude" | "cursor";
       healthcheck?: MonitoredService["healthcheck"] | null;
       securityContext?: MonitoredService["securityContext"] | null;
       locked?: boolean;
@@ -122,7 +96,6 @@ export type DomainStore = {
       composePath?: string;
       pipelineName?: string | null;
       kaiadYamlPath?: string;
-      fixExecutor?: "claude" | "cursor";
       /** null clears the probe; an object replaces it whole. */
       healthcheck?: MonitoredService["healthcheck"] | null;
       /** null clears every securityContext column; an object replaces it whole. */
@@ -217,8 +190,7 @@ export function createMemoryDomainStore(): DomainStore {
         fullLog: data.fullLog,
         firstSeenAt: now,
         lastSeenAt: now,
-        eventCount: 1,
-        lastFixEvents: []
+        eventCount: 1
       };
       incidents.set(inc.id, inc);
       return inc;
@@ -234,75 +206,6 @@ export function createMemoryDomainStore(): DomainStore {
       if (!inc || inc.tenantId !== tenantId) return false;
       incidents.delete(id);
       return true;
-    },
-    async resolveIncidentByFingerprint(tenantId, serviceId, fingerprint) {
-      let n = 0;
-      for (const inc of incidents.values()) {
-        if (
-          inc.tenantId === tenantId &&
-          inc.serviceId === serviceId &&
-          inc.fingerprint === fingerprint &&
-          (inc.status === "open" || inc.status === "acknowledged")
-        ) {
-          inc.status = "resolved";
-          inc.lastSeenAt = new Date().toISOString();
-          n++;
-        }
-      }
-      return n;
-    },
-    async recordFixProgress(tenantId, serviceId, fingerprint, patch) {
-      const candidate =
-        patch.incidentId
-          ? incidents.get(patch.incidentId)
-          : [...incidents.values()]
-              .filter(
-                (i) =>
-                  i.tenantId === tenantId &&
-                  i.serviceId === serviceId &&
-                  i.fingerprint === fingerprint
-              )
-              .sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt))[0];
-      const inc = candidate && candidate.tenantId === tenantId ? candidate : undefined;
-      if (!inc) return;
-      const allowedStatuses = [
-        "running",
-        "cloning",
-        "cli",
-        "committing",
-        "pushing",
-        "succeeded",
-        "no_changes",
-        "auth_failed",
-        "clone_failed",
-        "cli_failed",
-        "push_failed",
-        "failed"
-      ] as const;
-      const ix = inc as unknown as Record<string, unknown>;
-      if (patch.status !== undefined) {
-        ix.lastFixStatus = allowedStatuses.includes(patch.status as (typeof allowedStatuses)[number])
-          ? patch.status
-          : undefined;
-      }
-      if (patch.executor !== undefined) ix.lastFixExecutor = patch.executor;
-      if (patch.startedAt !== undefined) ix.lastFixStartedAt = patch.startedAt;
-      if (patch.finishedAt !== undefined) ix.lastFixFinishedAt = patch.finishedAt;
-      if (patch.commitSha !== undefined) ix.lastFixCommitSha = patch.commitSha ?? undefined;
-      if (patch.output !== undefined) ix.lastFixOutput = patch.output ?? undefined;
-      if (patch.resetEvents) ix.lastFixEvents = [];
-      if (patch.event) {
-        const cur = Array.isArray(ix.lastFixEvents) ? (ix.lastFixEvents as unknown[]) : [];
-        ix.lastFixEvents = [...cur, { at: new Date().toISOString(), ...patch.event }];
-      }
-    },
-    async getCurrentIncidentId(tenantId, serviceId, fingerprint) {
-      const ix = [...incidents.values()]
-        .filter(
-          (i) => i.tenantId === tenantId && i.serviceId === serviceId && i.fingerprint === fingerprint
-        )
-        .sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt))[0];
-      return ix ? ix.id : null;
     },
     async resolveStaleIncidents(cutoff) {
       const cut = cutoff.getTime();
@@ -440,7 +343,6 @@ export function createMemoryDomainStore(): DomainStore {
         composePath: data.composePath ?? null,
         pipelineName: data.pipelineName ?? null,
         kaiadYamlPath: data.kaiadYamlPath ?? "kaiad.yaml",
-        fixExecutor: data.fixExecutor ?? "claude",
         healthcheck: data.healthcheck ?? null,
         securityContext: data.securityContext ?? null,
         locked: data.locked === true,
@@ -463,7 +365,6 @@ export function createMemoryDomainStore(): DomainStore {
       if (patch.composePath !== undefined) svc.composePath = patch.composePath;
       if (patch.pipelineName !== undefined) svc.pipelineName = patch.pipelineName;
       if (patch.kaiadYamlPath !== undefined) svc.kaiadYamlPath = patch.kaiadYamlPath;
-      if (patch.fixExecutor !== undefined) svc.fixExecutor = patch.fixExecutor;
       if (patch.healthcheck !== undefined) svc.healthcheck = patch.healthcheck;
       if (patch.securityContext !== undefined) svc.securityContext = patch.securityContext;
       if (patch.locked !== undefined) svc.locked = patch.locked;

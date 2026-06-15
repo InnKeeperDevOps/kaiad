@@ -1,5 +1,5 @@
 title: Kaiad Docs
-description: Multi-tenant Kaiad control plane and remediation platform
+description: Multi-tenant Kaiad control plane and deployment platform
 exclude:
   - internal/
   - Gemfile

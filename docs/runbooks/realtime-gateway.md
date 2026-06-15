@@ -16,7 +16,7 @@ The **agent realtime** tier carries **bidirectional WSS**: telemetry up, **Agent
 
 ## Impact
 
-- **High**: No live agent channel—log streaming and remote remediation steps that depend on the agent stop working.
+- **High**: No live agent channel—log streaming and remote command steps that depend on the agent stop working.
 - **Partial**: Some agents OK (other regions/instances); investigate affinity and gateway instance health.
 
 ## Immediate actions

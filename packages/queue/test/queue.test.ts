@@ -31,7 +31,7 @@ vi.mock("bullmq", () => ({
 
 describe("queue helpers", () => {
   it("resolves queue names from contracts", () => {
-    expect(queueNameFor("remediation")).toBe("remediation");
+    expect(queueNameFor("logIngestion")).toBe(QUEUE_NAMES.logIngestion);
     expect(queueNameFor("agentCommands")).toBe("agent-commands");
   });
 });
@@ -97,8 +97,8 @@ describe("createNamedQueue", () => {
   });
 
   it("creates a Queue with the contract name for the key", () => {
-    createNamedQueue("remediation", fakeConnection as never);
-    expect(QueueMock).toHaveBeenCalledWith(QUEUE_NAMES.remediation, {
+    createNamedQueue("logIngestion", fakeConnection as never);
+    expect(QueueMock).toHaveBeenCalledWith(QUEUE_NAMES.logIngestion, {
       connection: fakeConnection
     });
   });
@@ -130,8 +130,8 @@ describe("createNamedWorker", () => {
   });
 
   it("forwards extra worker options without overriding connection", () => {
-    createNamedWorker("remediation", fakeConnection as never, processor, { concurrency: 4 });
-    expect(WorkerMock).toHaveBeenCalledWith(QUEUE_NAMES.remediation, processor, {
+    createNamedWorker("logIngestion", fakeConnection as never, processor, { concurrency: 4 });
+    expect(WorkerMock).toHaveBeenCalledWith(QUEUE_NAMES.logIngestion, processor, {
       connection: fakeConnection,
       concurrency: 4
     });

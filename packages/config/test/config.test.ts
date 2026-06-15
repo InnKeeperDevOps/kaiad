@@ -44,8 +44,5 @@ describe("loadEnv", () => {
     expect(env.REDIS_DISABLED).toBe("0");
     expect(env.WORKER_HEALTH_PORT).toBe(9090);
     expect(env.WORKER_HEALTH_HOST).toBe("0.0.0.0");
-    expect(env.SM_EXECUTOR_SIMULATE).toBe("0");
-    expect(env.SM_CURSOR_BIN).toBe("cursor");
-    expect(env.SM_CLAUDE_BIN).toBe("claude");
   });
 });

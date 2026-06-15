@@ -126,7 +126,7 @@ of a lost plaintext is impossible — revoke and re-mint instead.
 ## Error groups
 
 Deduplicated buckets of error-level log frames the agent has shipped.
-See [Error grouping & auto-fix]({% link agent/error-grouping.md %}) for
+See [Error grouping]({% link agent/error-grouping.md %}) for
 the full lifecycle.
 
 | Method | Path | Auth | Description |
@@ -135,12 +135,10 @@ the full lifecycle.
 | GET | `/api/v1/agents/:agentId/error-groups` | Bearer | Groups originating from one agent. |
 | GET | `/api/v1/services/:id/error-groups` | Bearer | Groups originating from one service. |
 
-Status flips (`open` → `fixing` → `fixed` / `paused` / `missing_auth`)
-are driven by the auto-fix dispatcher and broadcast to the tenant's
-panel sessions as `error_group_updated` UI telemetry events on the
-realtime channel. There is no public REST endpoint to set status
-manually today — the panel handles it. Programmatic control is a
-known gap.
+Group creation and updates are broadcast to the tenant's panel
+sessions as `error_group_updated` UI telemetry events on the realtime
+channel. Groups are tracked with `open` status; there is no public
+REST endpoint to set status manually.
 
 ## GitHub
 

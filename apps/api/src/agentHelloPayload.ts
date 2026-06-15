@@ -8,8 +8,7 @@ export function buildRealtimeAgentHello(settings: TenantSettings | undefined) {
     return agentHelloMessageSchema.parse({
       type: "hello",
       service: "realtime",
-      runtime: { backend: runtimeBackend },
-      ...(settings?.preferredExecutor ? { preferredExecutor: settings.preferredExecutor } : {})
+      runtime: { backend: runtimeBackend }
     });
   } catch (e) {
     console.error("Parse Error in buildRealtimeAgentHello:", e);

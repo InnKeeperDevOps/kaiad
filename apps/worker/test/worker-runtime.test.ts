@@ -47,38 +47,12 @@ describe("worker runtime — queue wiring", () => {
     expect(createNamedWorker).not.toHaveBeenCalled();
   });
 
-  it("creates Redis and three named workers when Redis is enabled", () => {
+  it("creates Redis and two named workers when Redis is enabled", () => {
     startQueueConsumersFromEnv({});
     expect(createRedisConnectionFromEnv).toHaveBeenCalledTimes(1);
-    expect(createNamedWorker).toHaveBeenCalledTimes(3);
+    expect(createNamedWorker).toHaveBeenCalledTimes(2);
     const keys = createNamedWorker.mock.calls.map((c) => c[0]);
-    expect(keys).toEqual(["remediation", "agentCommands", "logIngestion"]);
-  });
-
-  it("remediation worker processor delegates to runRemediation", async () => {
-    vi.stubEnv("SM_EXECUTOR_SIMULATE", "1");
-    vi.stubEnv("SM_EXECUTOR_ALLOW_SIMULATION", "1");
-    const mockConn = { quit: vi.fn() };
-    createRedisConnectionFromEnv.mockReturnValue(mockConn as never);
-    wireBullmqWorkers(mockConn as never);
-    const remediationCall = createNamedWorker.mock.calls.find((c) => c[0] === "remediation");
-    expect(remediationCall).toBeDefined();
-    const processor = remediationCall![2] as (job: Job) => Promise<unknown>;
-    const payload = {
-      remediationJobId: "r-1",
-      tenantId: "t-1",
-      incidentId: "i-1",
-      fingerprint: "f",
-      executor: "cursor" as const,
-      prompt: "fix",
-      gitRepoUrl: "https://github.com/placeholder/repo",
-      sshKeyType: "uploaded" as const,
-      sshKeyValue: null
-    };
-    const result = (await processor({ data: payload } as Job)) as Record<string, unknown>;
-    expect(result.success).toBe(true);
-    expect(result.executor).toBe("cursor");
-    expect((result.metadata as Record<string, unknown>).simulated).toBe(true);
+    expect(keys).toEqual(["agentCommands", "logIngestion"]);
   });
 
   it("agentCommands worker returns accepted metadata when API dispatch succeeds", async () => {

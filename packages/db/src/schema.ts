@@ -175,11 +175,6 @@ alter table monitored_services add column if not exists pipeline_name text;
 -- /preview-pipeline endpoint in the wizard.
 alter table monitored_services add column if not exists kaiad_yaml_path text not null default 'kaiad.yaml';
 
--- Which AI CLI the agent runs to author an autonomous fix for this
--- service (see realtime run_fix_plan.executor). Per-service so different
--- repos/teams can pick Claude or Cursor. Defaults to claude.
-alter table monitored_services add column if not exists fix_executor text not null default 'claude';
-
 -- "supporting" services (typically a base/library docker image) are NOT
 -- deployed to agents — they just build and serve as build-time inputs
 -- for other services via the dependsOn relationship. Refreshed from
@@ -342,28 +337,6 @@ create table if not exists incidents (
 -- log" and used to build the AI fix prompt.
 alter table incidents add column if not exists full_log text;
 
--- Latest autonomous-fix attempt for this incident. status moves through
--- running → (succeeded | no_changes | auth_failed | clone_failed |
--- cli_failed | push_failed | failed). last_fix_events is a JSONB array
--- of {at, step, ok, message} so the Incidents UI can render a timeline
--- (clone, CLI, commit, push) with per-step success/error detail.
-alter table incidents add column if not exists last_fix_status text;
-alter table incidents add column if not exists last_fix_executor text;
-alter table incidents add column if not exists last_fix_started_at timestamptz;
-alter table incidents add column if not exists last_fix_finished_at timestamptz;
-alter table incidents add column if not exists last_fix_commit_sha text;
-alter table incidents add column if not exists last_fix_output text;
-alter table incidents add column if not exists last_fix_events jsonb not null default '[]'::jsonb;
-
-create table if not exists remediation_jobs (
-  id text primary key,
-  tenant_id text not null references tenants(id) on delete cascade,
-  incident_id text not null references incidents(id) on delete cascade,
-  executor text not null,
-  status text not null check (status in ('pending','running','succeeded','failed','cancelled')),
-  created_at timestamptz not null default now()
-);
-
 -- ── Log threat sniffer ─────────────────────────────────────────────
 -- Service log lines from the agent's log_event stream are scanned
 -- in-process by apps/api/src/threatSniffer.ts. Detections (port
@@ -460,16 +433,6 @@ create table if not exists error_events (
   first_seen_at timestamptz not null default now(),
   last_seen_at timestamptz not null default now(),
   event_count integer not null default 1
-);
-
-create table if not exists remediation_plans (
-  id text primary key,
-  tenant_id text not null references tenants(id) on delete cascade,
-  incident_id text not null references incidents(id) on delete cascade,
-  plan_body jsonb not null,
-  status text not null check (status in ('queued','running','succeeded','failed')),
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
 );
 
 -- Build pipeline. Each push to the watched branch (detected by the
@@ -703,4 +666,21 @@ create index if not exists component_logs_lookup_idx
   on component_logs (tenant_id, source, source_id, id);
 create index if not exists component_logs_created_at_idx
   on component_logs (created_at);
+
+-- ── Incident auto-fix removal ──────────────────────────────────────
+-- The autonomous incident auto-fix feature (clone → AI CLI → commit →
+-- push) was removed. Drop the per-service executor preference, the
+-- per-incident fix-attempt columns, and the remediation job/plan tables
+-- it used. Idempotent so this bootstrap stays safe to re-run; on an
+-- existing prod DB these drops run once and then no-op.
+alter table monitored_services drop column if exists fix_executor;
+alter table incidents drop column if exists last_fix_status;
+alter table incidents drop column if exists last_fix_executor;
+alter table incidents drop column if exists last_fix_started_at;
+alter table incidents drop column if exists last_fix_finished_at;
+alter table incidents drop column if exists last_fix_commit_sha;
+alter table incidents drop column if exists last_fix_output;
+alter table incidents drop column if exists last_fix_events;
+drop table if exists remediation_jobs;
+drop table if exists remediation_plans;
 `;

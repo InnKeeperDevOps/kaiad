@@ -15,7 +15,7 @@ touching the repo URL, branch, or SSH key.
 
 A binding does two things:
 
-1. **Routes log frames + auto-fix dispatch** — covered below.
+1. **Routes log frames** to the bound agents for error detection.
 2. **Makes the agent a deploy target.** Every successful `kind: deployable`
    build of the service dispatches a redeploy command to every bound
    agent. The agent's runtime backend (docker, kubernetes, shell) handles
@@ -31,11 +31,9 @@ A binding does two things:
 ## When to bind multiple agents to one service
 
 - **High-availability monitoring.** Two agents on separate hosts watch the
-  same service. The auto-fix dispatcher picks whichever is online when an
-  error fingerprint lands; if both are offline the group flips to
-  `missing_auth` (current dispatcher reuses the same status — see the
-  [error grouping doc]({% link agent/error-grouping.md %}#lifecycle) for
-  the lifecycle).
+  same service. Each tails independently and reports error frames under the
+  same `serviceId`; error groups dedupe across both by fingerprint (see the
+  [error grouping doc]({% link agent/error-grouping.md %}#lifecycle)).
 - **Multi-cluster Kubernetes.** A workload runs in two clusters; each
   cluster has its own [Kaiad operator install]({% link agent/kubernetes.md %})
   and its own `KaiadAgent`. Both bind to the same `MonitoredService`. The
@@ -49,7 +47,7 @@ A binding does two things:
 
 - **Single-host services with no HA need.** One agent is fine. Multi-bind
   doesn't add value and creates ambiguity in `kubectl`-style commands
-  ("which agent runs this fix?" — currently: first online).
+  ("which agent runs this command?" — currently: first online).
 - **As a redundancy substitute for the agent process itself.** If you need
   the agent to be HA, run the agent under a supervisor (k8s
   Deployment/systemd) — that's the right tool. Multi-bind is for
@@ -102,20 +100,6 @@ curl -fsS -X PATCH $KAIAD/api/v1/services/$SERVICE_ID \
 - Provided + `[]`: detach all agents from this service.
 - Omitted: bindings are left alone.
 
-## Auto-fix targeting
-
-When a service has multiple bindings and an `app_log_error` lands:
-
-1. The dispatcher reads the bindings list in creation order (oldest first).
-2. It picks the first agent whose realtime session is currently connected.
-3. If none are connected, the group reports `skipped_no_online_agent` —
-   no command is queued, the group stays `open` for the next attempt.
-
-Round-robin and "least-loaded" strategies are tracked as a follow-up; the
-current behavior is deliberately simple. If you have a preference for
-*which* agent should win on a service that has both an HA pair, bind your
-preferred agent first.
-
 ## Tenant scoping
 
 Both the agent and the service must live in the session's tenant. A bind
@@ -133,7 +117,7 @@ on the service side.
 ## See also
 
 - [HTTP API reference]({% link reference/api.md %}#per-binding-endpoints)
-- [Error grouping & auto-fix]({% link agent/error-grouping.md %})
-  — what the auto-fix dispatcher does with the chosen agent.
+- [Error grouping]({% link agent/error-grouping.md %})
+  — how error frames from bound agents become error groups.
 - Plan that introduced this model:
   `docs/superpowers/plans/2026-05-08-multi-agent-service-binding-plan.md`

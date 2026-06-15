@@ -88,16 +88,6 @@ describe("db schema", () => {
       expect(coreSchemaSql).toContain("last_seen_at");
     });
 
-    it("defines remediation_jobs with tenant, incident FK, executor, status check, created_at", () => {
-      expect(coreSchemaSql).toContain("create table if not exists remediation_jobs");
-      expect(coreSchemaSql).toMatch(/references incidents\(id\)/);
-      expect(coreSchemaSql).toContain("executor");
-      expect(coreSchemaSql).toMatch(
-        /create table if not exists remediation_jobs[\s\S]*?check \(status in \([^)]+\)\)/,
-      );
-      expect(coreSchemaSql).toContain("created_at");
-    });
-
     it("defines dedup_keys with unique tenant_id + fingerprint", () => {
       expect(coreSchemaSql).toContain("create table if not exists dedup_keys");
       expect(coreSchemaSql).toMatch(

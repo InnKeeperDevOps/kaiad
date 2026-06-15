@@ -142,7 +142,6 @@ const form = ref({
   dockerImage: "",
   composePath: "",
   pipelineName: "",
-  fixExecutor: "claude" as "claude" | "cursor",
   locked: false,
   agentIds: [] as string[],
   healthcheckPath: "",
@@ -173,7 +172,6 @@ function startEdit() {
     dockerImage: svc.dockerImage ?? "",
     composePath: svc.composePath ?? "",
     pipelineName: svc.pipelineName ?? "",
-    fixExecutor: svc.fixExecutor === "cursor" ? "cursor" : "claude",
     locked: svc.locked === true,
     agentIds: (svc.agents ?? []).map((b) => b.agentId),
     healthcheckPath: hc?.path ?? "",
@@ -261,7 +259,6 @@ async function saveEdit() {
       composePath: form.value.composePath.trim() || undefined,
       // empty string → null clears (revert to single-pipeline default)
       pipelineName: pipelineTrim || null,
-      fixExecutor: form.value.fixExecutor,
       locked: form.value.locked,
       agentIds: form.value.agentIds,
       healthcheck: buildHealthcheckPatch(),
@@ -301,8 +298,7 @@ async function handleClone() {
       branch: svc.branch,
       dockerImage: svc.dockerImage ?? undefined,
       composePath: svc.composePath ?? undefined,
-      pipelineName: svc.pipelineName ?? undefined,
-      fixExecutor: svc.fixExecutor ?? "claude"
+      pipelineName: svc.pipelineName ?? undefined
     });
     // Navigate to the new service's detail page so the user lands on
     // their clone instead of staring at the original they just copied.
@@ -521,20 +517,6 @@ function sshKeyName(id: string | null | undefined): string {
               :style="inputStyle"
             />
           </label>
-          <label>
-            Auto-fix executor
-            <span :style="{ color: muted, fontSize: '0.8rem' }">
-              (which AI CLI kaiad spins up to fix this service's errors)
-            </span>
-            <select
-              v-model="form.fixExecutor"
-              :style="{ ...inputStyle, background: 'var(--color-surface)' }"
-            >
-              <option value="claude">Claude</option>
-              <option value="cursor">Cursor</option>
-            </select>
-          </label>
-
           <!-- Lock = "manual builds only". The build poller skips
                locked services, so a `git push` to the watched branch
                doesn't auto-enqueue a build. The Start build button
@@ -780,10 +762,6 @@ function sshKeyName(id: string | null | undefined): string {
           <div>
             <div :style="cellTitle">SSH key</div>
             <div :style="cellValue">{{ sshKeyName(service.sshKeyId) }}</div>
-          </div>
-          <div>
-            <div :style="cellTitle">Auto-fix executor</div>
-            <div :style="cellValue">{{ service.fixExecutor ?? "claude" }}</div>
           </div>
           <div>
             <div :style="cellTitle">Pipeline name</div>

@@ -5,7 +5,7 @@ nav_order: 1
 
 # Kaiad
 
-**Kaiad** is a **multi-tenant control plane** for operating services you care about: it brings together an **operator-facing web app**, a **HTTP and WebSocket API**, **background workers**, and **customer-managed agents** that run next to real workloads. Together they support **incident detection and deduplication**, **queued remediation and automation**, optional **GitHub App** flows (webhooks, PRs, workflow dispatch), and **remote commands** to agents over a long-lived realtime channel.
+**Kaiad** is a **multi-tenant control plane** for operating services you care about: it brings together an **operator-facing web app**, a **HTTP and WebSocket API**, **background workers**, and **customer-managed agents** that run next to real workloads. Together they support **incident detection and deduplication**, **queued automation** jobs, optional **GitHub App** flows (webhooks, PRs, workflow dispatch), and **remote commands** to agents over a long-lived realtime channel.
 
 This documentation site refers to the platform as **Kaiad** (also the name shown in the admin UI). The same codebase and releases live in the open-source **[kaiad](https://github.com/InnKeeperDevOps/kaiad)** repository on GitHub.
 
@@ -14,15 +14,15 @@ This documentation site refers to the platform as **Kaiad** (also the name shown
 | You want to… | Kaiad provides… |
 |--------------|-----------------|
 | See when things go wrong | Log-derived signals, **incidents** with deduplication (fingerprint + cooldown), and a place to triage them in the UI. |
-| Automate response | **Workers** that run remediation steps on **Redis-backed queues** (BullMQ), including Git operations when policy allows. |
-| Act where the software runs | **Agents** (Go) that connect **outbound** to your Kaiad deployment over **WSS**, then execute shell, Docker, or plan-based steps you send from the platform. |
+| Automate response | **Workers** that run jobs on **Redis-backed queues** (BullMQ), including Git operations when policy allows. |
+| Act where the software runs | **Agents** (Go) that connect **outbound** to your Kaiad deployment over **WSS**, then execute shell or Docker steps you send from the platform. |
 | Tie identity to GitHub | A **GitHub App** installation per scope, **signed webhooks** into the API, and worker-side use of installation tokens for mutations. |
 
 Kaiad is **not** a generic observability backend (it is not a full replacement for metrics APMs or log SaaS at large scale). It **is** an opinionated **control plane plus agent** model: operators configure tenants, services, agents, and automation; agents and workers carry out the work.
 
 ## Architecture (high level)
 
-Operators use the **browser UI** and the **REST API** (`/api/v1`). **Agents** never require a public **inbound** port from the internet for the SaaS path—they **dial out** over **WSS** to the **realtime** endpoint on the API tier. **Workers** share **Redis** with the API for **BullMQ** jobs (remediation, GitHub work, **agent commands**, log ingestion). **Postgres** holds durable tenant and domain data when configured.
+Operators use the **browser UI** and the **REST API** (`/api/v1`). **Agents** never require a public **inbound** port from the internet for the SaaS path—they **dial out** over **WSS** to the **realtime** endpoint on the API tier. **Workers** share **Redis** with the API for **BullMQ** jobs (GitHub work, **agent commands**, log ingestion). **Postgres** holds durable tenant and domain data when configured.
 
 {::nomarkdown}
 {% include mermaid-architecture.html %}
@@ -35,7 +35,7 @@ Operators use the **browser UI** and the **REST API** (`/api/v1`). **Agents** ne
 ## How a typical flow works
 
 1. An **agent** connects with an **enrollment token**, sends **heartbeats**, and may stream **container logs**; the platform can raise or merge **incidents** based on rules and deduplication.
-2. **Workers** dequeue jobs from **Redis**: run remediation jobs, perform **GitHub** actions when allowed, enqueue **agent commands**, and process **log ingestion** jobs.
+2. **Workers** dequeue jobs from **Redis**: perform **GitHub** actions when allowed, enqueue **agent commands**, and process **log ingestion** jobs.
 3. **Operators** use the **SPA** and **API** to configure tenants, review incidents, manage **enrollment tokens**, and inspect **agents**.
 
 For a deeper narrative, see [Getting started]({% link getting-started/index.md %}).

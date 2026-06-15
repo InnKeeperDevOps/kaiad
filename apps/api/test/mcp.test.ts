@@ -88,8 +88,7 @@ describe("MCP endpoint /mcp", () => {
           "list_repositories", // registry
           "list_agents", // agents
           "get_operator_install_yaml", // operators
-          "list_incidents", // incidents
-          "run_incident_fix"
+          "list_incidents" // incidents
         ])
       );
     } finally {

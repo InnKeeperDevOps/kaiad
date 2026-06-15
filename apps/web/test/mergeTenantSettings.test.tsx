@@ -19,32 +19,27 @@ describe("mergeTenantSettings", () => {
   it("clears optional fields when patch sets null", () => {
     const previous: TenantSettings = {
       tenantId: sessionTenantId,
-      docsUrl: "https://docs.example.com",
-      preferredExecutor: "claude"
+      docsUrl: "https://docs.example.com"
     };
 
-    const merged = mergeTenantSettings(previous, { 
-      docsUrl: null,
-      preferredExecutor: null
-    }); 
-    
+    const merged = mergeTenantSettings(previous, {
+      docsUrl: null
+    });
+
     expect(merged.docsUrl).toBeUndefined();
-    expect(merged.preferredExecutor).toBeUndefined();
   });
 
   it("keeps previous values when patch does not provide them", () => {
     const previous: TenantSettings = {
       tenantId: sessionTenantId,
-      docsUrl: "https://docs.example.com",
-      preferredExecutor: "cursor"
+      docsUrl: "https://docs.example.com"
     };
 
     const merged = mergeTenantSettings(previous, {});
 
     expect(merged).toEqual({
       tenantId: sessionTenantId,
-      docsUrl: "https://docs.example.com",
-      preferredExecutor: "cursor"
+      docsUrl: "https://docs.example.com"
     });
   });
 });

@@ -8,9 +8,7 @@ export const agentHelloMessageSchema = z.object({
     .object({
       backend: z.enum(["docker", "kubernetes", "shell"])
     })
-    .optional(),
-  /** Which AI CLI the agent should invoke when running automated fix plans (cursor or claude). */
-  preferredExecutor: z.enum(["cursor", "claude"]).optional()
+    .optional()
 });
 
 export type AgentHelloMessage = z.infer<typeof agentHelloMessageSchema>;
@@ -128,8 +126,8 @@ export type HostStatsMessage = z.infer<typeof hostStatsSchema>;
 /**
  * Single error-level log line plus the last N context lines the agent saw
  * immediately before it. Emitted by the agent's logship wrapper; the API
- * normalizes the message, fingerprints, dedups into an error_group, and
- * triggers the auto-fix workflow when the service has git auth configured.
+ * normalizes the message, fingerprints, and dedups into an error_group that
+ * surfaces as an incident on the panel.
  */
 export const appLogErrorSchema = z.object({
   type: z.literal("app_log_error"),
@@ -206,11 +204,9 @@ export const errorGroupSchema = z.object({
   fingerprint: z.string(),
   normalizedMessage: z.string(),
   sampleMessage: z.string(),
-  /** open: detected, eligible for fix. fixing: fix workflow in flight.
-   *  fixed: most recent fix push succeeded. paused: same fingerprint reappeared
-   *  shortly after a fix push (loop suspected). missing_auth: service has no
-   *  git ssh key, auto-fix is disabled.
-   */
+  /** Lifecycle status. In practice only "open" (detected) is emitted now;
+   *  the remaining values are retained for wire-compatibility with older
+   *  panels and are no longer set by the server. */
   status: z.enum(["open", "fixing", "fixed", "paused", "missing_auth"]),
   count: z.number().int().nonnegative(),
   firstSeenAt: z.string(),
@@ -308,32 +304,6 @@ const syncDesiredStateCommandSchema = z.object({
     .optional()
 });
 
-const runCursorPlanCommandSchema = z.object({
-  type: z.literal("run_cursor_plan"),
-  commandId: z.string(),
-  prompt: z.string(),
-  workspacePath: z.string().optional(),
-  env: z.record(z.string()).optional(),
-  permissionsProfile: z.enum(["restricted", "repo", "full"]).optional(),
-  gitRepoUrl: z.string(),
-  sshKeyType: z.enum(["uploaded", "local_path"]),
-  sshKeyValue: z.string().nullable(),
-  agentRuntimeBackend: z.enum(["docker", "kubernetes", "shell"]).optional()
-});
-
-const runClaudePlanCommandSchema = z.object({
-  type: z.literal("run_claude_plan"),
-  commandId: z.string(),
-  prompt: z.string(),
-  workspacePath: z.string().optional(),
-  env: z.record(z.string()).optional(),
-  permissionsProfile: z.enum(["restricted", "repo", "full"]).optional(),
-  gitRepoUrl: z.string(),
-  sshKeyType: z.enum(["uploaded", "local_path"]),
-  sshKeyValue: z.string().nullable(),
-  agentRuntimeBackend: z.enum(["docker", "kubernetes", "shell"]).optional()
-});
-
 /** Run a source file or artifact with the host toolchain (agent must have the interpreter/compiler on PATH). */
 export const toolchainLanguageSchema = z.enum([
   "python3",
@@ -393,32 +363,6 @@ const receiveSourceArchiveCommandSchema = z
       });
     }
   });
-
-/**
- * Auto-fix dispatch issued by the API when an error_group becomes eligible
- * for self-healing. The agent clones the service repo, runs the configured
- * AI CLI (claude/cursor) against it with the error + context as the prompt,
- * then commits any resulting changes and pushes to `branch`.
- */
-const runFixPlanCommandSchema = z.object({
-  type: z.literal("run_fix_plan"),
-  commandId: z.string(),
-  errorGroupId: z.string(),
-  errorMessage: z.string(),
-  normalizedMessage: z.string(),
-  fingerprint: z.string(),
-  contextLines: z.array(z.string()),
-  gitRepoUrl: z.string(),
-  branch: z.string().default("main"),
-  sshKeyType: z.enum(["uploaded", "local_path"]),
-  sshKeyValue: z.string().nullable(),
-  workspacePath: z.string().optional(),
-  serviceId: z.string(),
-  agentRuntimeBackend: z.enum(["docker", "kubernetes", "shell"]).optional(),
-  /** Which AI CLI the agent runs to author the fix. Per-service config
-   *  (monitored_services.fix_executor); defaults to claude. */
-  executor: z.enum(["claude", "cursor"]).default("claude")
-});
 
 /**
  * Forces the agent to redeploy a service with the freshly-built image
@@ -657,11 +601,8 @@ export const platformToAgentMessageSchema = z.union([
   dockerOpCommandSchema,
   cancelRunCommandSchema,
   syncDesiredStateCommandSchema,
-  runCursorPlanCommandSchema,
-  runClaudePlanCommandSchema,
   runToolchainCommandSchema,
   receiveSourceArchiveCommandSchema,
-  runFixPlanCommandSchema,
   redeployServiceCommandSchema,
   teardownServiceCommandSchema,
   listMetalLBPoolIPsCommandSchema

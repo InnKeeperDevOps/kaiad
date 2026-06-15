@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 )
@@ -158,73 +157,5 @@ func TestAgentRuntimeBackendOverride(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(result.Output), "shell") {
 		t.Fatalf("expected shell runtime message, got: %s", result.Output)
-	}
-}
-
-func TestExecuteRunCursorPlan(t *testing.T) {
-	t.Setenv("SM_CURSOR_BIN", "/bin/echo")
-	e := newReadyExecutor()
-	result := e.Execute(context.Background(), "run_cursor_plan", map[string]interface{}{
-		"prompt":        "propose a fix",
-		"workspacePath": t.TempDir(),
-		"env": map[string]interface{}{
-			"SM_INCIDENT_ID": "inc-1",
-		},
-		"permissionsProfile": "repo",
-	})
-	if !result.Success {
-		t.Fatalf("expected success, got failure: %s", result.Output)
-	}
-	if !strings.Contains(result.Output, "--prompt") {
-		t.Fatalf("expected output to contain CLI args, got: %s", result.Output)
-	}
-	if !strings.Contains(result.Output, "log_uri=file://") {
-		t.Fatalf("expected output to contain log URI, got: %s", result.Output)
-	}
-}
-
-func TestExecuteRunClaudePlanMissingPrompt(t *testing.T) {
-	e := newReadyExecutor()
-	result := e.Execute(context.Background(), "run_claude_plan", map[string]interface{}{})
-	if result.Success {
-		t.Fatal("expected failure for missing prompt")
-	}
-	if !strings.Contains(result.Output, "missing plan prompt") {
-		t.Fatalf("unexpected output: %s", result.Output)
-	}
-}
-
-func TestExecuteRunPlanIsolationMissingImage(t *testing.T) {
-	t.Setenv("SM_EXECUTOR_ISOLATE_CONTAINERS", "1")
-	t.Setenv("SM_EXECUTOR_RUNNER_IMAGE", "")
-	t.Setenv("SM_EXECUTOR_DOCKER_BIN", "/bin/echo")
-	t.Setenv("SM_CURSOR_BIN", "cursor")
-	e := newReadyExecutor()
-	result := e.Execute(context.Background(), "run_cursor_plan", map[string]interface{}{
-		"prompt":        "test",
-		"workspacePath": t.TempDir(),
-	})
-	if result.Success {
-		t.Fatal("expected failure when runner image is missing")
-	}
-	if !strings.Contains(result.Output, "runner image is not configured") {
-		t.Fatalf("unexpected output: %s", result.Output)
-	}
-}
-
-func TestExecuteRunPlanWritesAuditArtifacts(t *testing.T) {
-	t.Setenv("SM_CURSOR_BIN", "/bin/echo")
-	workspace := t.TempDir()
-	e := newReadyExecutor()
-	result := e.Execute(context.Background(), "run_cursor_plan", map[string]interface{}{
-		"prompt":        "audit me",
-		"workspacePath": workspace,
-	})
-	if !result.Success {
-		t.Fatalf("expected success, got failure: %s", result.Output)
-	}
-	logDir := workspace + "/.sm/logs"
-	if _, err := os.Stat(logDir); err != nil {
-		t.Fatalf("expected logs directory to exist: %v", err)
 	}
 }

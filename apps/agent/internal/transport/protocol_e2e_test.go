@@ -192,8 +192,6 @@ func TestE2E_AllPlatformCommandTypesYieldCommandAck(t *testing.T) {
 		{"docker_op", "cmd-docker", `{"type":"docker_op","commandId":"cmd-docker","operation":"build","args":{"path":".","tag":"e2e-test"}}`},
 		{"cancel_run", "cmd-cancel", `{"type":"cancel_run","commandId":"cmd-cancel","targetCommandId":"other"}`},
 		{"sync_desired_state", "cmd-sync", `{"type":"sync_desired_state","commandId":"cmd-sync","desiredContainers":[{"serviceId":"s1","image":"nginx:latest","state":"running"}]}`},
-		{"run_cursor_plan", "cmd-cursor", `{"type":"run_cursor_plan","commandId":"cmd-cursor","prompt":"noop","workspacePath":"/tmp"}`},
-		{"run_claude_plan", "cmd-claude", `{"type":"run_claude_plan","commandId":"cmd-claude","prompt":"noop","workspacePath":"/tmp"}`},
 		{"run_toolchain", "cmd-tc", `{"type":"run_toolchain","commandId":"cmd-tc","language":"python3","path":"/tmp/nope.py"}`},
 		{"receive_source_archive", "cmd-arch", `{"type":"receive_source_archive","commandId":"cmd-arch","url":"https://example.invalid/app.tar.gz"}`},
 	}

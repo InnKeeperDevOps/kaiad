@@ -1,15 +1,8 @@
 /**
- * Integration tests: Kaiad tenant settings propagation to the agent.
- *
- * These tests start the Kaiad API server in-process and connect a WebSocket
- * client (acting as the agent). They verify that:
- *   1. Changing `preferredExecutor` (Preferred executor) is reflected in the
- *      `preferredExecutor` field of the next hello frame the agent receives.
- *
- * The update mechanism: Kaiad embeds tenant settings in the `hello` frame it
- * sends on every new WebSocket connection.  When an operator changes settings
- * the agent reconnects (or is forced to reconnect) and receives the updated
- * hello automatically — no extra push is required.
+ * Integration test: Kaiad emits a `hello` frame on every new agent
+ * WebSocket connection. Starts the Kaiad API server in-process and
+ * connects a WebSocket client (acting as the agent) to verify the hello
+ * frame arrives with the expected shape.
  */
 import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -52,7 +45,6 @@ type HelloFrame = {
   type: string;
   service: string;
   runtime?: { backend: string };
-  preferredExecutor?: string;
 };
 
 /** Connect to /realtime and capture the first (hello) frame. */
@@ -89,83 +81,25 @@ function waitForClose(ws: WebSocket): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// AT-AGT-002: Preferred executor (preferredExecutor)
+// Hello frame emitted on agent connect
 // ---------------------------------------------------------------------------
 
-describe("AT-AGT-002: Preferred executor — preferredExecutor reflected in hello", () => {
-  it("omits preferredExecutor from hello when not configured", async () => {
+describe("agent hello frame", () => {
+  it("emits a realtime hello with the docker runtime backend", async () => {
     const { ws, hello } = await connectAndCaptureHello();
-    expect(hello.preferredExecutor).toBeUndefined();
+    expect(hello.type).toBe("hello");
+    expect(hello.service).toBe("realtime");
+    expect(hello.runtime?.backend).toBe("docker");
     ws.close();
     await waitForClose(ws);
   });
 
-  it("reflects preferredExecutor=cursor in hello after settings change and reconnect", async () => {
-    await upsertTenantSettings({
-      tenantId: "t-1",
-      preferredExecutor: "cursor"
-    });
-
+  it("still emits a hello after tenant settings are upserted", async () => {
+    await upsertTenantSettings({ tenantId: "t-1" });
     const { ws, hello } = await connectAndCaptureHello();
-    expect(hello.preferredExecutor).toBe("cursor");
+    expect(hello.type).toBe("hello");
+    expect(hello.runtime?.backend).toBe("docker");
     ws.close();
     await waitForClose(ws);
-  });
-
-  it("reflects preferredExecutor=claude in hello after settings change and reconnect", async () => {
-    await upsertTenantSettings({
-      tenantId: "t-1",
-      preferredExecutor: "claude"
-    });
-
-    const { ws, hello } = await connectAndCaptureHello();
-    expect(hello.preferredExecutor).toBe("claude");
-    ws.close();
-    await waitForClose(ws);
-  });
-
-  it("reflects updated executor when operator switches from cursor to claude and agent reconnects", async () => {
-    await upsertTenantSettings({
-      tenantId: "t-1",
-      preferredExecutor: "cursor"
-    });
-
-    const { ws: ws1, hello: hello1 } = await connectAndCaptureHello();
-    expect(hello1.preferredExecutor).toBe("cursor");
-    ws1.close();
-    await waitForClose(ws1);
-
-    // Operator switches to claude.
-    await upsertTenantSettings({
-      tenantId: "t-1",
-      preferredExecutor: "claude"
-    });
-
-    const { ws: ws2, hello: hello2 } = await connectAndCaptureHello();
-    expect(hello2.preferredExecutor).toBe("claude");
-    ws2.close();
-    await waitForClose(ws2);
-  });
-
-  it("omits preferredExecutor from hello after settings are cleared and agent reconnects", async () => {
-    await upsertTenantSettings({
-      tenantId: "t-1",
-      preferredExecutor: "claude"
-    });
-
-    const { ws: ws1, hello: hello1 } = await connectAndCaptureHello();
-    expect(hello1.preferredExecutor).toBe("claude");
-    ws1.close();
-    await waitForClose(ws1);
-
-    // Operator clears the preferredExecutor (saves settings without the field).
-    await upsertTenantSettings({
-      tenantId: "t-1"
-    });
-
-    const { ws: ws2, hello: hello2 } = await connectAndCaptureHello();
-    expect(hello2.preferredExecutor).toBeUndefined();
-    ws2.close();
-    await waitForClose(ws2);
   });
 });

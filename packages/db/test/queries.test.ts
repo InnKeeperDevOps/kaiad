@@ -178,7 +178,6 @@ describe("listIncidents", () => {
         eventCount: 3,
         firstSeenAt: "2025-01-01T00:00:00.000Z",
         lastSeenAt: "2025-01-02T00:00:00.000Z",
-        lastFixEvents: [],
       },
     ]);
     expect(query).toHaveBeenCalledWith(
@@ -403,8 +402,11 @@ describe("listServices", () => {
         dockerImage: "acme/web:latest",
         composePath: "compose.yml",
         pipelineName: null,
+        kaiadYamlPath: "kaiad.yaml",
         pipelineOverride: null,
-        fixExecutor: "claude"
+        healthcheck: null,
+        securityContext: null,
+        locked: false
       },
     ]);
   });

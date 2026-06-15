@@ -24,8 +24,6 @@ Optional flags: `-token <secret>` (requires `?token=` on the WebSocket URL; set 
 - In production (`NODE_ENV=production`), the agent fails closed unless `SM_ENROLLMENT_TOKEN` is set (persisted credentials are ignored unless `SM_AGENT_PERSIST_CREDENTIALS=1`).
 - mTLS lifecycle remains a documented hardening path.
 - **`run_toolchain`** — run `python3`, `java` (jar), `node`, `go`, `php`, `typescript`, `rust`, `swift`, or `kotlin` against a file path (see [ARCHITECTURE.md](ARCHITECTURE.md)); optional env overrides **`SM_TYPESCRIPT_RUNNER`**, **`SM_KOTLIN_RUNNER`**.
-- Agent command executor supports `run_cursor_plan` and `run_claude_plan` commands (in addition to shell/docker operations), with log/audit artifacts written under `<workspace>/.sm/logs/`.
-- Optional container isolation for plan executors: set `SM_EXECUTOR_ISOLATE_CONTAINERS=1` with `SM_EXECUTOR_RUNNER_IMAGE` (or `SM_EXECUTOR_RUNNER_IMAGE_CURSOR` / `SM_EXECUTOR_RUNNER_IMAGE_CLAUDE`) and optional `SM_EXECUTOR_DOCKER_BIN`.
 
 ## Tests and coverage
 

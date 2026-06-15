@@ -1,11 +1,7 @@
 import crypto from "node:crypto";
-import { Queue, type Worker } from "bullmq";
-import { QUEUE_NAMES, agentCommandDispatchResponseSchema, agentCommandJobSchema } from "@sm/contracts";
+import { type Worker } from "bullmq";
+import { agentCommandDispatchResponseSchema, agentCommandJobSchema } from "@sm/contracts";
 import { createNamedWorker, createRedisConnectionFromEnv } from "@sm/queue";
-import {
-  runRemediation,
-  type RemediationRunResult
-} from "./index.js";
 import { BUILT_IN_DETECTORS } from "@sm/domain";
 import { createLogIngestionProcessor, type IncidentStore, type LogIngestionResult } from "./log-ingestion.js";
 import { startBuildLoops, type BuildLoopHandles } from "./builds.js";
@@ -91,34 +87,16 @@ export function wireBullmqWorkers(
     incidentStore: createInMemoryIncidentStore()
   });
 
-  const remediation = createNamedWorker<unknown, RemediationRunResult>("remediation", connection, async (job) =>
-    runRemediation(job.data)
-  );
   const agentCommands = createNamedWorker<unknown, { accepted: true; commandId: string; queued: boolean; delivered: boolean }>(
     "agentCommands",
     connection,
     async (job) => processAgentCommandJobDispatch(job.data, env)
   );
-  const remediationQueue = new Queue(QUEUE_NAMES.remediation, { connection });
 
   const logIngestion = createNamedWorker<unknown, LogIngestionResult>("logIngestion", connection, async (job) => {
-    const result = await processLogIngestion(job.data);
-    if (result.kind === "incident_created") {
-      await remediationQueue.add("remediation", {
-        remediationJobId: `rem-${crypto.randomUUID()}`,
-        tenantId: result.incident.tenantId,
-        incidentId: "inc-auto",
-        fingerprint: result.incident.fingerprint,
-        executor: "cursor",
-        prompt: `Auto-remediation for: ${result.incident.message}`,
-        gitRepoUrl: "https://github.com/placeholder/repo.git", // Placeholder for auto-remediation tests
-        sshKeyType: "uploaded",
-        sshKeyValue: null
-      });
-    }
-    return result;
+    return processLogIngestion(job.data);
   });
-  return [remediation, agentCommands, logIngestion];
+  return [agentCommands, logIngestion];
 }
 
 export function startQueueConsumersFromEnv(env: NodeJS.ProcessEnv = process.env): {

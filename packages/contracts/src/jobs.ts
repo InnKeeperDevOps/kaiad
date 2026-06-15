@@ -1,19 +1,5 @@
 import { z } from "zod";
 
-export const remediationJobSchema = z.object({
-  remediationJobId: z.string(),
-  tenantId: z.string(),
-  incidentId: z.string(),
-  serviceId: z.string().optional(),
-  fingerprint: z.string(),
-  executor: z.enum(["cursor", "claude"]),
-  prompt: z.string(),
-  correlationId: z.string().optional(),
-  gitRepoUrl: z.string(),
-  sshKeyType: z.enum(["uploaded", "local_path"]),
-  sshKeyValue: z.string().nullable()
-});
-
 export const agentCommandJobSchema = z.object({
   agentId: z.string(),
   commandId: z.string(),
@@ -27,7 +13,6 @@ export const agentCommandDispatchResponseSchema = z.object({
   delivered: z.boolean()
 });
 
-export type RemediationJob = z.infer<typeof remediationJobSchema>;
 export type AgentCommandJob = z.infer<typeof agentCommandJobSchema>;
 export type AgentCommandDispatchResponse = z.infer<typeof agentCommandDispatchResponseSchema>;
 

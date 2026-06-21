@@ -1,11 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch, type CSSProperties } from "vue";
 import {
+  Activity,
+  AlertTriangle,
   ArrowLeft,
+  Box,
   Check,
   Cpu,
   Pencil,
   RefreshCw,
+  ScrollText,
   Trash2,
   X
 } from "lucide-vue-next";
@@ -182,6 +186,38 @@ const merged = computed<Agent | null>(() => {
 
 const apps = computed<AgentAppTelemetry[]>(() => merged.value?.apps ?? []);
 
+// ── In-page tabs ──────────────────────────────────────────────────
+// The detail page used to be one long scroll (metrics → services →
+// errors → logs → identity). Split into tabs so each concern is one
+// screen. Sections stay mounted (v-show) so telemetry sparklines,
+// log streams and fetched state survive tab switches.
+const AGENT_TABS = [
+  { key: "overview", label: "Overview", icon: Activity },
+  { key: "services", label: "Services", icon: Box },
+  { key: "errors", label: "Errors", icon: AlertTriangle },
+  { key: "logs", label: "Logs", icon: ScrollText }
+] as const;
+type AgentTab = (typeof AGENT_TABS)[number]["key"];
+
+const AGENT_TAB_KEY = "kaiad.agentDetail.tab";
+function loadTab(): AgentTab {
+  try {
+    const v = localStorage.getItem(AGENT_TAB_KEY);
+    if (v && AGENT_TABS.some((t) => t.key === v)) return v as AgentTab;
+  } catch {
+    /* private mode — best effort */
+  }
+  return "overview";
+}
+const activeTab = ref<AgentTab>(loadTab());
+watch(activeTab, (v) => {
+  try {
+    localStorage.setItem(AGENT_TAB_KEY, v);
+  } catch {
+    /* best effort */
+  }
+});
+
 function startEdit() {
   if (!merged.value) return;
   editing.value = true;
@@ -241,15 +277,17 @@ function diskPct(t: AgentTelemetry | undefined): string {
 }
 
 const cellTitle: CSSProperties = {
-  fontSize: "0.75rem",
-  color: "var(--color-text-secondary)",
+  fontSize: "0.7rem",
+  color: "var(--color-text-muted)",
   textTransform: "uppercase",
-  letterSpacing: "0.04em",
-  marginBottom: "0.2rem"
+  letterSpacing: "0.05em",
+  fontWeight: 600,
+  marginBottom: "0.3rem"
 };
 const cellValue: CSSProperties = {
-  fontSize: "1.05rem",
-  fontWeight: 600
+  fontSize: "0.95rem",
+  fontWeight: 600,
+  color: "var(--color-text)"
 };
 </script>
 
@@ -292,7 +330,7 @@ const cellValue: CSSProperties = {
           flexWrap: 'wrap'
         }"
       >
-        <Cpu :size="22" :style="{ marginTop: '0.4rem' }" />
+        <span class="agent-tile-lg"><Cpu :size="22" /></span>
         <div :style="{ flex: 1, minWidth: '300px' }">
           <div :style="{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }">
             <input
@@ -355,7 +393,23 @@ const cellValue: CSSProperties = {
         role="alert"
       >{{ actionError }}</p>
 
-      <!-- Metrics on top: host telemetry is the first thing on the page. -->
+      <!-- Tabs split the long detail page into one-screen sections. -->
+      <nav class="agent-tabs" aria-label="Agent sections">
+        <button
+          v-for="t in AGENT_TABS"
+          :key="t.key"
+          type="button"
+          class="agent-tab"
+          :class="{ 'agent-tab--active': activeTab === t.key }"
+          @click="activeTab = t.key"
+        >
+          <component :is="t.icon" :size="15" />
+          {{ t.label }}
+        </button>
+      </nav>
+
+      <!-- Overview tab: host metrics + identity -->
+      <div v-show="activeTab === 'overview'">
       <Card title="Host metrics" :style="{ marginBottom: '1rem' }">
         <div
           :style="{
@@ -453,8 +507,10 @@ const cellValue: CSSProperties = {
           <span v-if="samples.length > 0">{{ samples.length }} sample{{ samples.length === 1 ? "" : "s" }} buffered</span>
         </div>
       </Card>
+      </div>
 
-      <!-- Services: each bound service with its running version + containers. -->
+      <!-- Services tab -->
+      <div v-show="activeTab === 'services'">
       <Card title="Services" :style="{ marginBottom: '1rem' }">
         <AgentServicesSection
           :agent-id="merged.id"
@@ -465,15 +521,24 @@ const cellValue: CSSProperties = {
         />
       </Card>
 
+      </div>
+
+      <!-- Errors tab -->
+      <div v-show="activeTab === 'errors'">
       <Card title="Error groups">
         <ErrorGroupsSection :agent-id="merged.id" :live-groups="live.errorGroups" />
       </Card>
+      </div>
 
-      <Card title="Agent logs" :style="{ marginTop: '1rem' }">
+      <!-- Logs tab -->
+      <div v-show="activeTab === 'logs'">
+      <Card title="Agent logs">
         <ComponentLogViewer kind="agent" :agent-id="merged.id" />
       </Card>
+      </div>
 
-      <!-- Identity / config — agent metadata, kept below the service view. -->
+      <!-- Identity is part of the Overview tab (shown alongside metrics) -->
+      <div v-show="activeTab === 'overview'">
       <Card title="Identity" :style="{ marginTop: '1rem' }">
         <div
           :style="{
@@ -542,6 +607,53 @@ const cellValue: CSSProperties = {
           </div>
         </div>
       </Card>
+      </div>
     </template>
   </section>
 </template>
+
+<style scoped>
+.agent-tile-lg {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.6rem;
+  height: 2.6rem;
+  flex-shrink: 0;
+  border-radius: 11px;
+  background: var(--color-primary-subtle);
+  color: var(--color-primary);
+}
+.agent-tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 1rem;
+  overflow-x: auto;
+}
+.agent-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.85rem;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  color: var(--color-text-secondary);
+  font-size: 0.88rem;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
+}
+.agent-tab:hover {
+  color: var(--color-text);
+}
+.agent-tab--active {
+  color: var(--color-primary);
+  border-bottom-color: var(--color-primary);
+  font-weight: 600;
+}
+</style>

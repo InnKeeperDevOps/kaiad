@@ -94,10 +94,26 @@ const btnStyle = {
   color: "var(--color-primary-foreground)",
   border: "none",
   borderRadius: "6px",
-  padding: "0.25rem 0.5rem",
+  padding: "0.25rem 0.6rem",
   fontSize: "0.8rem",
+  fontWeight: 600,
   cursor: "pointer"
 };
+
+// Tinted pill background per status (pairs with statusColor for text).
+const statusBg: Record<string, string> = {
+  open: "var(--color-danger-bg)",
+  acknowledged: "var(--color-warning-bg)",
+  resolved: "var(--color-success-bg)",
+  closed: "var(--color-surface-muted)"
+};
+
+const STATUS_ORDER = ["open", "acknowledged", "resolved", "closed"] as const;
+const statusSummary = computed<Record<string, number>>(() => {
+  const m: Record<string, number> = { open: 0, acknowledged: 0, resolved: 0, closed: 0 };
+  for (const i of incidents.value) m[i.status] = (m[i.status] ?? 0) + 1;
+  return m;
+});
 </script>
 
 <template>
@@ -134,6 +150,18 @@ const btnStyle = {
     </div>
     <div v-if="error" :style="{ color: 'var(--color-danger)', marginBottom: '0.5rem' }">{{ error }}</div>
 
+    <div v-if="incidents.length" class="inc-stats">
+      <span
+        v-for="st in STATUS_ORDER"
+        :key="st"
+        class="inc-stat"
+        :style="{ color: statusColor[st], background: statusBg[st] }"
+      >
+        <component :is="statusIcon[st]" :size="14" />
+        <strong>{{ statusSummary[st] }}</strong> {{ st }}
+      </span>
+    </div>
+
     <p v-if="incidents.length === 0" :style="{ color: 'var(--color-text-secondary)' }">
       No incidents recorded yet.
     </p>
@@ -158,17 +186,13 @@ const btnStyle = {
       </thead>
       <tbody>
         <template v-for="inc in incidents" :key="inc.id">
-          <tr :style="{ cursor: 'pointer' }" @click="expandedId = expandedId === inc.id ? null : inc.id">
-            <td :style="{ padding: '0.5rem' }">
+          <tr class="inc-row" :style="{ cursor: 'pointer' }" @click="expandedId = expandedId === inc.id ? null : inc.id">
+            <td :style="{ padding: '0.6rem 0.5rem' }">
               <span
-                :style="{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '0.3rem',
-                  color: statusColor[inc.status]
-                }"
+                class="inc-status"
+                :style="{ color: statusColor[inc.status] ?? 'var(--color-text)', background: statusBg[inc.status] ?? 'var(--color-surface-muted)' }"
               >
-                <component :is="statusIcon[inc.status] ?? AlertTriangle" :size="14" />
+                <component :is="statusIcon[inc.status] ?? AlertTriangle" :size="13" />
                 {{ inc.status }}
               </span>
             </td>
@@ -185,9 +209,9 @@ const btnStyle = {
             </td>
             <td
               :style="{
-                padding: '0.5rem',
+                padding: '0.6rem 0.5rem',
                 fontSize: '0.8rem',
-                fontFamily: 'monospace',
+                fontFamily: 'var(--font-mono)',
                 color: 'var(--color-text-secondary)'
               }"
               :title="showAdvanced ? undefined : inc.fingerprint"
@@ -332,3 +356,40 @@ const btnStyle = {
     </table>
   </section>
 </template>
+
+<style scoped>
+.inc-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+}
+.inc-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  text-transform: capitalize;
+}
+.inc-stat strong {
+  font-size: 0.9rem;
+}
+.inc-row {
+  transition: background 0.1s;
+}
+.inc-row:hover {
+  background: var(--color-surface-muted);
+}
+.inc-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+</style>

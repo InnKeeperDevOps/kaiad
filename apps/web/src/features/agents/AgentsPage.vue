@@ -16,9 +16,18 @@ import EnrollmentTokensPanel from "./EnrollmentTokensPanel.vue";
 import {
   AGENT_STATUS_BADGE,
   badgeVariantForStatus,
+  formatPercent,
   formatRelativeTime,
   formatRuntimeBackend
 } from "./format.js";
+
+// Color a CPU/mem percentage by load so busy hosts stand out.
+function usageColor(pct: number | undefined): string {
+  if (pct === undefined) return "var(--color-text)";
+  if (pct >= 85) return "var(--color-danger)";
+  if (pct >= 65) return "var(--color-warning)";
+  return "var(--color-text)";
+}
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -194,6 +203,10 @@ const summary = computed(() => {
   }
   return { liveWs, byStatus };
 });
+
+// Table column count (drives the deploy panel's colspan) — admins get
+// an extra Deploy column.
+const columnCount = computed(() => (canDeploy.value ? 8 : 7));
 </script>
 
 <template>
@@ -262,53 +275,59 @@ const summary = computed(() => {
             <th scope="col" :style="thStyle">Status</th>
             <th scope="col" :style="thStyle">Runtime</th>
             <th scope="col" :style="thStyle">Environment</th>
+            <th scope="col" :style="thStyle">Resources</th>
             <th scope="col" :style="thStyle">Last seen</th>
             <th v-if="canDeploy" scope="col" :style="thStyle">Deploy</th>
           </tr>
         </thead>
         <tbody>
           <template v-for="a in displayedAgents" :key="a.id">
-          <tr :style="{ borderTop: '1px solid var(--color-border)' }">
+          <tr class="agent-row" :style="{ borderTop: '1px solid var(--color-border)' }">
             <td :style="tdStyle">
-              <a
-                :href="`#agent/${encodeURIComponent(a.id)}`"
-                :style="{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '0.4rem',
-                  color: 'var(--color-text-primary)',
-                  textDecoration: 'none',
-                  fontWeight: 600
-                }"
-              >
-                <Cpu :size="14" aria-hidden />
-                <span>{{ a.name?.trim() || a.id }}</span>
-              </a>
-              <div
-                v-if="a.name?.trim()"
-                :style="{
-                  fontSize: '0.75rem',
-                  color: 'var(--color-text-secondary)',
-                  fontFamily: 'ui-monospace, monospace',
-                  marginTop: '0.15rem'
-                }"
-              >{{ a.id }}</div>
+              <div :style="{ display: 'flex', alignItems: 'center', gap: '0.55rem' }">
+                <span class="agent-tile"><Cpu :size="15" aria-hidden /></span>
+                <div :style="{ minWidth: 0 }">
+                  <a :href="`#agent/${encodeURIComponent(a.id)}`" class="agent-name">
+                    {{ a.name?.trim() || a.id }}
+                  </a>
+                  <div v-if="a.name?.trim()" class="a-mono" :title="a.id">{{ a.id }}</div>
+                </div>
+              </div>
             </td>
             <td :style="tdStyle">
-              <Badge :variant="a.websocketConnected ? 'success' : 'muted'">
-                {{ a.websocketConnected ? "Yes" : "No" }}
-              </Badge>
+              <span class="conn">
+                <span
+                  class="status-dot"
+                  :class="a.websocketConnected ? 'status-dot--ok' : 'status-dot--off'"
+                />
+                {{ a.websocketConnected ? "Live" : "Offline" }}
+              </span>
             </td>
             <td :style="tdStyle">
               <Badge :variant="badgeVariantForStatus(a.status)">{{ a.status }}</Badge>
             </td>
             <td :style="tdStyle">
-              <Badge :variant="a.runtimeBackend ? 'muted' : 'muted'">
-                {{ formatRuntimeBackend(a.runtimeBackend) }}
-              </Badge>
+              <Badge variant="muted">{{ formatRuntimeBackend(a.runtimeBackend) }}</Badge>
             </td>
             <td :style="{ ...tdStyle, fontSize: '0.85rem' }">
               <Badge variant="muted">{{ a.environment }}</Badge>
+            </td>
+            <td :style="tdStyle">
+              <template v-if="a.telemetry">
+                <div :style="{ fontSize: '0.8rem' }">
+                  <span :style="{ color: usageColor(a.telemetry.cpuPercent), fontWeight: 600 }">
+                    {{ formatPercent(a.telemetry.cpuPercent) }}
+                  </span>
+                  <span :style="{ color: 'var(--color-text-muted)' }"> cpu</span>
+                </div>
+                <div :style="{ fontSize: '0.8rem' }">
+                  <span :style="{ color: usageColor(a.telemetry.memPercent), fontWeight: 600 }">
+                    {{ formatPercent(a.telemetry.memPercent) }}
+                  </span>
+                  <span :style="{ color: 'var(--color-text-muted)' }"> mem</span>
+                </div>
+              </template>
+              <span v-else :style="{ color: 'var(--color-text-muted)', fontSize: '0.8rem' }">—</span>
             </td>
             <td :style="{ ...tdStyle, fontSize: '0.85rem' }">
               <span :title="a.lastSeenAt ? new Date(a.lastSeenAt).toLocaleString() : undefined">
@@ -340,7 +359,7 @@ const summary = computed(() => {
             </td>
           </tr>
           <tr v-if="canDeploy && deployFor === a.id">
-            <td :colspan="7" :style="{ ...tdStyle, background: 'var(--color-bg)' }">
+            <td :colspan="columnCount" :style="{ ...tdStyle, background: 'var(--color-surface-muted)' }">
               <div
                 :style="{
                   display: 'flex',
@@ -433,3 +452,62 @@ const summary = computed(() => {
     <EnrollmentTokensPanel />
   </section>
 </template>
+
+<style scoped>
+.agent-row {
+  transition: background 0.1s;
+}
+.agent-row:hover {
+  background: var(--color-surface-muted);
+}
+.agent-tile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--color-primary-subtle);
+  color: var(--color-primary);
+}
+.agent-name {
+  color: var(--color-text);
+  text-decoration: none;
+  font-weight: 600;
+}
+.agent-name:hover {
+  color: var(--color-primary);
+  text-decoration: underline;
+}
+.a-mono {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  margin-top: 0.1rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 18rem;
+}
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+}
+.status-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-dot--ok {
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px var(--color-success-bg);
+}
+.status-dot--off {
+  background: var(--color-text-muted);
+}
+</style>

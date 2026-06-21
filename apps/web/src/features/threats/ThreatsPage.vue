@@ -8,6 +8,7 @@
 // 300ms debounce). Refresh polls every 15s while the page is open so
 // new detections appear without a manual reload.
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { ChevronDown, ChevronRight, ShieldAlert } from "lucide-vue-next";
 import { api, type ThreatEvent, type ThreatIp, type ThreatSeverity } from "../../lib/api.js";
 import Card from "../../components/Card.vue";
 import Badge from "../../components/Badge.vue";
@@ -209,8 +210,12 @@ function clearFilters() {
       <tbody>
         <template v-for="ip in ips" :key="ip.ipAddress">
           <tr class="th-row" :class="{ 'th-row--open': expandedIp === ip.ipAddress }" @click="toggleExpand(ip.ipAddress)">
-            <td class="th-row__chev">{{ expandedIp === ip.ipAddress ? '▾' : '▸' }}</td>
-            <td class="th-row__ip">{{ ip.ipAddress }}</td>
+            <td class="th-row__chev">
+              <component :is="expandedIp === ip.ipAddress ? ChevronDown : ChevronRight" :size="14" />
+            </td>
+            <td class="th-row__ip">
+              <span class="th-ip"><ShieldAlert :size="13" /> {{ ip.ipAddress }}</span>
+            </td>
             <td>
               <Badge :variant="severityVariant[ip.severity]">{{ ip.severity }}</Badge>
             </td>
@@ -300,8 +305,11 @@ function clearFilters() {
 }
 .th-table thead th {
   text-align: left;
-  font-weight: 500;
-  color: var(--color-text-secondary);
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
   padding: 0.45rem 0.5rem;
   border-bottom: 1px solid var(--color-border);
 }
@@ -316,16 +324,27 @@ function clearFilters() {
   background: var(--color-surface-muted);
 }
 .th-row td {
-  padding: 0.45rem 0.5rem;
+  padding: 0.6rem 0.5rem;
   vertical-align: middle;
 }
 .th-row__chev {
-  width: 1.2rem;
+  width: 1.4rem;
   color: var(--color-text-muted);
-  font-size: 0.75rem;
+  line-height: 0;
 }
 .th-row__ip {
   font-family: var(--font-mono);
+}
+.th-ip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: var(--font-mono);
+  color: var(--color-text);
+}
+.th-ip > svg {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
 }
 .th-row__num {
   font-variant-numeric: tabular-nums;

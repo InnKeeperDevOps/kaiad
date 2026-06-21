@@ -410,28 +410,20 @@ onUnmounted(() => {
       </thead>
       <tbody>
         <template v-for="row in rows" :key="row.build.id">
-          <tr
-            :style="{ borderTop: '1px solid var(--color-border)', cursor: 'pointer' }"
-            @click="toggle(row)"
-          >
-            <td :style="{ padding: '0.35rem 0.5rem' }">
-              <component :is="row.expanded ? ChevronDown : ChevronRight" :size="12" />
+          <tr class="build-row" @click="toggle(row)">
+            <td :style="{ padding: '0.45rem 0.5rem', color: 'var(--color-text-muted)' }">
+              <component :is="row.expanded ? ChevronDown : ChevronRight" :size="13" />
             </td>
-            <td :style="{ padding: '0.35rem 0.5rem', color: statusColor(row.build.status) }">
-              ● {{ statusLabel(row.build.status) }}
-              <span
-                v-if="row.build.triggeredBy === 'manual'"
-                :title="'Triggered manually from the panel'"
-                :style="{
-                  marginLeft: '0.3rem',
-                  fontSize: '0.65rem',
-                  padding: '0.05rem 0.3rem',
-                  background: 'var(--color-bg)',
-                  border: '1px solid var(--color-border)',
-                  borderRadius: '3px',
-                  color: 'var(--color-text-secondary)'
-                }"
-              >manual</span>
+            <td :style="{ padding: '0.45rem 0.5rem' }">
+              <span class="build-status">
+                <span class="build-status__dot" :style="{ background: statusColor(row.build.status) }" />
+                <span :style="{ color: statusColor(row.build.status), fontWeight: 600 }">{{ statusLabel(row.build.status) }}</span>
+                <span
+                  v-if="row.build.triggeredBy === 'manual'"
+                  class="build-status__manual"
+                  :title="'Triggered manually from the panel'"
+                >manual</span>
+              </span>
             </td>
             <td
               :style="{ padding: '0.35rem 0.5rem', fontFamily: 'var(--font-mono)' }"
@@ -558,6 +550,33 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.build-row {
+  border-top: 1px solid var(--color-border);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.build-row:hover {
+  background: var(--color-surface-muted);
+}
+.build-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.build-status__dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.build-status__manual {
+  font-size: 0.65rem;
+  padding: 0.05rem 0.35rem;
+  background: var(--color-surface-muted);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  color: var(--color-text-secondary);
+}
 .spin {
   animation: spin 0.8s linear infinite;
 }

@@ -6,6 +6,7 @@ import {
   Check,
   Copy,
   Cpu,
+  GitBranch,
   Pencil,
   RefreshCw,
   Trash2,
@@ -340,13 +341,36 @@ async function handleDelete() {
 // ─── Style helpers ────────────────────────────────────────────────
 const muted = "var(--color-text-secondary)";
 const cellTitle: CSSProperties = {
-  fontSize: "0.75rem",
-  color: muted,
+  fontSize: "0.7rem",
+  color: "var(--color-text-muted)",
   textTransform: "uppercase",
-  letterSpacing: "0.04em",
-  marginBottom: "0.2rem"
+  letterSpacing: "0.05em",
+  fontWeight: 600,
+  marginBottom: "0.3rem"
 };
-const cellValue: CSSProperties = { fontSize: "1.05rem", fontWeight: 600 };
+const cellValue: CSSProperties = {
+  fontSize: "0.95rem",
+  fontWeight: 600,
+  color: "var(--color-text)",
+  wordBreak: "break-word"
+};
+
+// Compact "host/owner/repo" for the header (full URL stays in title).
+function shortRepo(url: string): string {
+  return url
+    .replace(/^git@/, "")
+    .replace(/^https?:\/\//, "")
+    .replace(/:/, "/")
+    .replace(/\.git$/, "");
+}
+
+// Color a CPU/mem percentage by load so hot containers stand out.
+function usageColor(pct: number | undefined): string {
+  if (pct === undefined) return "var(--color-text)";
+  if (pct >= 85) return "var(--color-danger)";
+  if (pct >= 65) return "var(--color-warning)";
+  return "var(--color-text)";
+}
 const inputStyle: CSSProperties = {
   display: "block",
   width: "100%",
@@ -410,29 +434,25 @@ function sshKeyName(id: string | null | undefined): string {
         :style="{
           display: 'flex',
           alignItems: 'flex-start',
-          gap: '0.75rem',
-          marginBottom: '1rem',
+          gap: '0.85rem',
+          marginBottom: '1.25rem',
           flexWrap: 'wrap'
         }"
       >
-        <Box :size="22" :style="{ marginTop: '0.4rem' }" />
-        <div :style="{ flex: 1, minWidth: '300px' }">
-          <h2 :style="{ margin: 0 }">{{ service.name }}</h2>
+        <span class="svc-tile"><Box :size="22" /></span>
+        <div :style="{ flex: 1, minWidth: '260px' }">
+          <h2 :style="{ margin: 0, fontSize: '1.35rem' }">{{ service.name }}</h2>
           <div
             :style="{
-              fontSize: '0.85rem',
-              color: muted,
-              marginTop: '0.2rem',
+              marginTop: '0.45rem',
               display: 'flex',
               flexWrap: 'wrap',
-              gap: '0.6rem',
+              gap: '0.45rem',
               alignItems: 'center'
             }"
           >
-            <span>{{ service.gitRepoUrl }}</span>
-            <span aria-hidden="true">·</span>
-            <span>branch {{ service.branch }}</span>
-            <span aria-hidden="true">·</span>
+            <span class="svc-mono" :title="service.gitRepoUrl">{{ shortRepo(service.gitRepoUrl) }}</span>
+            <span class="svc-chip"><GitBranch :size="11" /> {{ service.branch }}</span>
             <Badge variant="muted">{{ boundAgents.length }} agent{{ boundAgents.length === 1 ? "" : "s" }}</Badge>
             <Badge :variant="totalContainers > 0 ? 'success' : 'muted'">
               {{ totalContainers }} container{{ totalContainers === 1 ? "" : "s" }} running
@@ -895,56 +915,30 @@ function sshKeyName(id: string | null | undefined): string {
           <template v-else>An administrator needs to bind an agent.</template>
         </p>
 
-        <div
-          v-for="row in boundAgents"
-          :key="row.agentId"
-          :style="{
-            border: '1px solid var(--color-border)',
-            borderRadius: '8px',
-            background: 'var(--color-surface)',
-            marginBottom: '0.75rem'
-          }"
-        >
-          <div
-            :style="{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.6rem',
-              flexWrap: 'wrap',
-              padding: '0.55rem 0.7rem',
-              borderBottom: '1px solid var(--color-border)'
-            }"
-          >
-            <Cpu :size="14" :style="{ flexShrink: 0 }" />
-            <a
-              :href="`#agent/${encodeURIComponent(row.agentId)}`"
-              :style="{
-                color: 'var(--color-text-primary)',
-                textDecoration: 'none',
-                fontWeight: 600
-              }"
-            >{{ row.agent?.name?.trim() || row.agentId }}</a>
-            <span v-if="row.agent?.name?.trim()" :style="{ ...monoStyle, color: muted, fontSize: '0.72rem' }">
-              {{ row.agentId }}
-            </span>
-            <Badge :variant="row.websocketConnected ? 'success' : 'muted'">
-              {{ row.websocketConnected ? "live" : "offline" }}
-            </Badge>
-            <Badge
-              v-if="row.agent"
-              :variant="badgeVariantForStatus(row.agent.status)"
-            >{{ row.agent.status }}</Badge>
-            <Badge v-if="row.agent" variant="muted">
-              runtime: {{ formatRuntimeBackend(row.agent.runtimeBackend) }}
-            </Badge>
+        <div v-for="row in boundAgents" :key="row.agentId" class="agent-card">
+          <div class="agent-card__head">
+            <span class="agent-card__tile"><Cpu :size="14" /></span>
+            <span
+              class="status-dot"
+              :class="row.websocketConnected ? 'status-dot--ok' : 'status-dot--off'"
+              :title="row.websocketConnected ? 'WebSocket connected (live)' : 'Offline'"
+            />
+            <a :href="`#agent/${encodeURIComponent(row.agentId)}`" class="agent-card__name">
+              {{ row.agent?.name?.trim() || row.agentId }}
+            </a>
+            <span
+              v-if="row.agent?.name?.trim()"
+              :style="{ ...monoStyle, color: muted, fontSize: '0.72rem' }"
+              :title="row.agentId"
+            >{{ row.agentId.slice(0, 12) }}</span>
+            <Badge v-if="row.agent" :variant="badgeVariantForStatus(row.agent.status)">{{ row.agent.status }}</Badge>
+            <Badge v-if="row.agent" variant="muted">{{ formatRuntimeBackend(row.agent.runtimeBackend) }}</Badge>
             <Badge v-if="row.agent" variant="muted">{{ row.agent.environment }}</Badge>
             <span
               v-if="row.agent?.lastSeenAt"
               :style="{ marginLeft: 'auto', fontSize: '0.78rem', color: muted }"
               :title="row.agent.lastSeenAt"
-            >
-              last seen {{ formatRelativeTime(row.agent.lastSeenAt) }}
-            </span>
+            >last seen {{ formatRelativeTime(row.agent.lastSeenAt) }}</span>
           </div>
 
           <div :style="{ padding: '0.6rem 0.7rem' }">
@@ -970,7 +964,7 @@ function sshKeyName(id: string | null | undefined): string {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="app in row.containers" :key="app.containerId">
+                  <tr v-for="app in row.containers" :key="app.containerId" class="ctr-row">
                     <td :style="tdStyle">
                       <div :style="{ fontWeight: 600 }">
                         {{ app.name ?? app.containerId.slice(0, 12) }}
@@ -987,10 +981,14 @@ function sshKeyName(id: string | null | undefined): string {
                         {{ app.state ?? "—" }}
                       </Badge>
                     </td>
-                    <td :style="tdStyle">{{ formatPercent(app.cpuPercent) }}</td>
+                    <td :style="{ ...tdStyle, color: usageColor(app.cpuPercent), fontWeight: 600 }">
+                      {{ formatPercent(app.cpuPercent) }}
+                    </td>
                     <td :style="tdStyle">
                       <template v-if="app.memPercent !== undefined">
-                        <div>{{ formatPercent(app.memPercent) }}</div>
+                        <div :style="{ color: usageColor(app.memPercent), fontWeight: 600 }">
+                          {{ formatPercent(app.memPercent) }}
+                        </div>
                         <div
                           v-if="app.memUsedBytes !== undefined && app.memLimitBytes !== undefined"
                           :style="{ fontSize: '0.7rem', color: muted }"
@@ -1030,3 +1028,101 @@ function sshKeyName(id: string | null | undefined): string {
     </template>
   </section>
 </template>
+
+<style scoped>
+/* Icon tiles + chips shared with the services list, in the indigo theme */
+.svc-tile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.6rem;
+  height: 2.6rem;
+  flex-shrink: 0;
+  border-radius: 11px;
+  background: var(--color-primary-subtle);
+  color: var(--color-primary);
+}
+.svc-mono {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 28rem;
+}
+.svc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: var(--color-surface-muted);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  font-size: 0.74rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* Bound-agent cards */
+.agent-card {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface);
+  margin-bottom: 0.75rem;
+  overflow: hidden;
+}
+.agent-card__head {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  padding: 0.55rem 0.7rem;
+  background: var(--color-surface-muted);
+  border-bottom: 1px solid var(--color-border);
+}
+.agent-card__tile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  flex-shrink: 0;
+  border-radius: 7px;
+  background: var(--color-primary-subtle);
+  color: var(--color-primary);
+}
+.agent-card__name {
+  color: var(--color-text);
+  text-decoration: none;
+  font-weight: 600;
+}
+.agent-card__name:hover {
+  color: var(--color-primary);
+  text-decoration: underline;
+}
+
+/* Connection status dot */
+.status-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-dot--ok {
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px var(--color-success-bg);
+}
+.status-dot--off {
+  background: var(--color-text-muted);
+}
+
+/* Container metrics rows */
+.ctr-row {
+  transition: background 0.1s;
+}
+.ctr-row:hover {
+  background: var(--color-surface-muted);
+}
+</style>

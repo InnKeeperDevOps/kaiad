@@ -15,6 +15,9 @@
   --color-text-primary: var(--color-text);
   --color-bg: var(--color-canvas);
 
+  /* Monospace stack for shas, ids, image refs, logs */
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
   /* Accent — indigo / violet */
   --color-primary: #4f46e5;
   --color-primary-hover: #4338ca;

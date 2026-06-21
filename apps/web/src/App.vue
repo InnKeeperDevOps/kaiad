@@ -356,6 +356,41 @@ function closeTab(t: OpenTab) {
   }
 }
 
+// ── Drag-to-reorder open tabs ─────────────────────────────────────
+// HTML5 drag-and-drop on the tab strip. The new order persists via the
+// same localStorage watcher as adds/closes.
+const dragIndex = ref<number | null>(null);
+const dragOverIndex = ref<number | null>(null);
+
+function onTabDragStart(index: number, e: DragEvent) {
+  dragIndex.value = index;
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = "move";
+    // Firefox requires data to be set for the drag to start at all.
+    e.dataTransfer.setData("text/plain", String(index));
+  }
+}
+function onTabDragOver(index: number, e: DragEvent) {
+  if (dragIndex.value === null) return;
+  e.preventDefault(); // allow drop
+  if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+  dragOverIndex.value = index;
+}
+function onTabDrop(targetIndex: number) {
+  const from = dragIndex.value;
+  if (from !== null && from !== targetIndex) {
+    const next = [...openTabs.value];
+    const [moved] = next.splice(from, 1);
+    next.splice(targetIndex, 0, moved);
+    openTabs.value = next;
+  }
+  resetTabDrag();
+}
+function resetTabDrag() {
+  dragIndex.value = null;
+  dragOverIndex.value = null;
+}
+
 async function loadSetupStatus() {
   try {
     const res = await api.getSetupStatus();
@@ -694,13 +729,27 @@ const navItemStyle = (active: boolean): CSSProperties => ({
            Persists across reloads; click to switch, × to close. -->
       <nav v-if="openTabs.length" :style="tabStripStyle" aria-label="Open items">
         <div
-          v-for="t in openTabs"
+          v-for="(t, index) in openTabs"
           :key="`${t.kind}:${t.id}`"
-          :style="tabItemStyle(activeTabKey === `${t.kind}:${t.id}`)"
+          draggable="true"
+          :style="{
+            ...tabItemStyle(activeTabKey === `${t.kind}:${t.id}`),
+            cursor: 'grab',
+            opacity: dragIndex === index ? 0.4 : 1,
+            boxShadow:
+              dragOverIndex === index && dragIndex !== null && dragIndex !== index
+                ? 'inset 2px 0 0 0 var(--color-primary)'
+                : 'none'
+          }"
+          @dragstart="onTabDragStart(index, $event)"
+          @dragover="onTabDragOver(index, $event)"
+          @drop="onTabDrop(index)"
+          @dragend="resetTabDrag"
         >
           <a
             :href="`#${tabHash(t)}`"
             :title="t.label"
+            draggable="false"
             :style="{
               display: 'inline-flex',
               alignItems: 'center',

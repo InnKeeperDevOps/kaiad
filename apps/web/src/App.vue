@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, type Component, type CSSProperties } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch, type Component, type CSSProperties } from "vue";
 import {
   AlertTriangle,
   Box,
@@ -13,7 +13,8 @@ import {
   Settings,
   Shield,
   Users,
-  Workflow
+  Workflow,
+  X
 } from "lucide-vue-next";
 import "./tokens.css";
 import { api, meResponseToAuthUser } from "./lib/api.js";
@@ -216,6 +217,117 @@ const userInitial = computed(() => {
   return e ? e.slice(0, 1).toUpperCase() : "?";
 });
 
+// ─── Open-item tabs ─────────────────────────────────────────────────
+// Browser-style tab strip above the content that tracks the service /
+// agent detail pages the user has drilled into. Opening a detail route
+// adds a tab; the strip persists across reloads via localStorage so the
+// user's working set of services/agents survives a refresh.
+type OpenTabKind = "service" | "agent";
+type OpenTab = { kind: OpenTabKind; id: string; label: string };
+
+const OPEN_TABS_KEY = "sm_open_tabs";
+
+function loadOpenTabs(): OpenTab[] {
+  try {
+    const raw = localStorage.getItem(OPEN_TABS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (t: unknown): t is OpenTab =>
+          !!t &&
+          typeof t === "object" &&
+          ((t as OpenTab).kind === "service" || (t as OpenTab).kind === "agent") &&
+          typeof (t as OpenTab).id === "string"
+      )
+      .map((t) => ({ kind: t.kind, id: t.id, label: typeof t.label === "string" && t.label ? t.label : t.id }));
+  } catch {
+    return [];
+  }
+}
+
+const openTabs = ref<OpenTab[]>(hasToken() ? loadOpenTabs() : []);
+watch(
+  openTabs,
+  (tabs) => {
+    try {
+      localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(tabs));
+    } catch {
+      /* localStorage may be unavailable (private mode/quota) — non-fatal */
+    }
+  },
+  { deep: true }
+);
+
+function tabKey(t: OpenTab): string {
+  return `${t.kind}:${t.id}`;
+}
+
+// Which detail item (if any) the current route is showing — drives the
+// active-tab highlight and which tab a close() should navigate away from.
+const activeTabKey = computed<string | null>(() => {
+  if (route.value === "serviceDetail" && serviceDetailServiceId.value) {
+    return `service:${serviceDetailServiceId.value}`;
+  }
+  if (route.value === "agentDetail" && agentDetailAgentId.value) {
+    return `agent:${agentDetailAgentId.value}`;
+  }
+  return null;
+});
+
+function tabHash(t: OpenTab): string {
+  return t.kind === "service"
+    ? `service/${encodeURIComponent(t.id)}`
+    : `agent/${encodeURIComponent(t.id)}`;
+}
+
+function tabIcon(kind: OpenTabKind): Component {
+  return kind === "service" ? Box : Cpu;
+}
+
+// Add a tab for the current detail route if one doesn't exist yet.
+function ensureTabForCurrentRoute() {
+  let kind: OpenTabKind | null = null;
+  let id: string | null = null;
+  if (route.value === "serviceDetail") {
+    kind = "service";
+    id = serviceDetailServiceId.value;
+  } else if (route.value === "agentDetail") {
+    kind = "agent";
+    id = agentDetailAgentId.value;
+  }
+  if (!kind || !id) return;
+  const key = `${kind}:${id}`;
+  if (!openTabs.value.some((t) => tabKey(t) === key)) {
+    // Friendly placeholder until the detail page reports its real name.
+    const short = id.length > 14 ? `${id.slice(0, 10)}…` : id;
+    openTabs.value = [...openTabs.value, { kind, id, label: short }];
+  }
+}
+
+// Detail pages emit their resolved name once loaded so the tab shows a
+// human label instead of the raw id.
+function setTabLabel(kind: OpenTabKind, id: string | null, name: string) {
+  if (!id) return;
+  const key = `${kind}:${id}`;
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  openTabs.value = openTabs.value.map((t) => (tabKey(t) === key ? { ...t, label: trimmed } : t));
+}
+
+function closeTab(t: OpenTab) {
+  const key = tabKey(t);
+  const idx = openTabs.value.findIndex((x) => tabKey(x) === key);
+  const remaining = openTabs.value.filter((x) => tabKey(x) !== key);
+  openTabs.value = remaining;
+  // If the closed tab was the active page, move to a neighbouring tab,
+  // else fall back to the relevant list page.
+  if (activeTabKey.value === key) {
+    const next = remaining[idx] ?? remaining[idx - 1] ?? null;
+    window.location.hash = next ? tabHash(next) : t.kind === "service" ? "services" : "agents";
+  }
+}
+
 async function loadSetupStatus() {
   try {
     const res = await api.getSetupStatus();
@@ -258,6 +370,7 @@ function onHashChange() {
   serviceDetailServiceId.value = nav.serviceDetailServiceId;
   registryImageRepo.value = nav.registryImageRepo;
   registryImageTag.value = nav.registryImageTag;
+  ensureTabForCurrentRoute();
 }
 
 function handleTenantSwitch(u: AuthUser) {
@@ -284,6 +397,7 @@ function isActive(itemRoute: Route): boolean {
 onMounted(() => {
   void loadSetupStatus();
   void loadMe();
+  ensureTabForCurrentRoute();
   window.addEventListener("hashchange", onHashChange);
 });
 onUnmounted(() => {
@@ -329,6 +443,52 @@ const groupLabelStyle: CSSProperties = {
   textTransform: "uppercase",
   letterSpacing: "0.08em",
   color: "var(--color-nav-muted)"
+};
+// Open-item tab strip: sits directly under the top bar, sticky, with a
+// horizontal-scrolling row of tabs.
+const tabStripStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "stretch",
+  gap: "0.25rem",
+  height: "38px",
+  padding: "0 0.5rem",
+  borderBottom: "1px solid var(--color-border)",
+  background: "var(--color-surface-muted)",
+  position: "sticky",
+  top: TOPBAR_HEIGHT,
+  zIndex: 4,
+  overflowX: "auto"
+};
+const tabItemStyle = (active: boolean): CSSProperties => ({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "0.4rem",
+  padding: "0 0.4rem 0 0.7rem",
+  marginTop: "5px",
+  color: active ? "var(--color-text)" : "var(--color-text-secondary)",
+  textDecoration: "none",
+  fontSize: "0.82rem",
+  fontWeight: active ? 600 : 500,
+  whiteSpace: "nowrap",
+  background: active ? "var(--color-surface)" : "transparent",
+  border: "1px solid",
+  borderColor: active ? "var(--color-border)" : "transparent",
+  borderBottom: active ? "1px solid var(--color-surface)" : "1px solid transparent",
+  borderTopLeftRadius: "8px",
+  borderTopRightRadius: "8px"
+});
+const tabCloseStyle: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: "1.1rem",
+  height: "1.1rem",
+  border: "none",
+  borderRadius: "4px",
+  background: "transparent",
+  color: "var(--color-text-muted)",
+  cursor: "pointer",
+  padding: 0
 };
 const navItemStyle = (active: boolean): CSSProperties => ({
   display: "flex",
@@ -499,6 +659,36 @@ const navItemStyle = (active: boolean): CSSProperties => ({
         </div>
       </header>
 
+      <!-- Open-item tabs: services/agents the user has drilled into.
+           Persists across reloads; click to switch, × to close. -->
+      <nav v-if="openTabs.length" :style="tabStripStyle" aria-label="Open items">
+        <div
+          v-for="t in openTabs"
+          :key="`${t.kind}:${t.id}`"
+          :style="tabItemStyle(activeTabKey === `${t.kind}:${t.id}`)"
+        >
+          <a
+            :href="`#${tabHash(t)}`"
+            :title="t.label"
+            :style="{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.4rem',
+              color: 'inherit',
+              textDecoration: 'none',
+              maxWidth: '12rem',
+              overflow: 'hidden'
+            }"
+          >
+            <component :is="tabIcon(t.kind)" :size="13" />
+            <span :style="{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }">{{ t.label }}</span>
+          </a>
+          <button type="button" :style="tabCloseStyle" :title="`Close ${t.label}`" @click="closeTab(t)">
+            <X :size="13" />
+          </button>
+        </div>
+      </nav>
+
       <main :style="{ padding: '1.5rem', overflow: 'auto' }">
       <DashboardPage v-if="route === 'dashboard'" />
       <IncidentsPage v-else-if="route === 'incidents'" />
@@ -507,12 +697,14 @@ const navItemStyle = (active: boolean): CSSProperties => ({
       <AgentDetailPage
         v-else-if="route === 'agentDetail' && agentDetailAgentId"
         :agent-id="agentDetailAgentId"
+        @resolved-name="(n: string) => setTabLabel('agent', agentDetailAgentId, n)"
       />
       <OperatorPage v-else-if="route === 'operator'" />
       <ServicesPage v-else-if="route === 'services'" />
       <ServiceDetailPage
         v-else-if="route === 'serviceDetail' && serviceDetailServiceId"
         :service-id="serviceDetailServiceId"
+        @resolved-name="(n: string) => setTabLabel('service', serviceDetailServiceId, n)"
       />
       <SshKeysPage v-else-if="route === 'sshKeys'" />
       <RegistryPage v-else-if="route === 'registry'" />

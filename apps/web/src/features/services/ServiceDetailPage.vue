@@ -38,6 +38,9 @@ import PipelineOverrideEditor from "./PipelineOverrideEditor.vue";
 // container telemetry) + builds + pipeline override + admin actions.
 // Replaces the inline expansions that used to live on ServicesPage.
 const props = defineProps<{ serviceId: string }>();
+// Reported up to the app shell so the open-item tab shows the service
+// name instead of the raw id.
+const emit = defineEmits<{ (e: "resolved-name", name: string): void }>();
 
 const auth = useAuth();
 const canManage = computed(() => auth.value.isAdmin);
@@ -73,6 +76,13 @@ async function fetchAll() {
 }
 
 onMounted(() => void fetchAll());
+watch(
+  () => service.value?.name,
+  (name) => {
+    if (name) emit("resolved-name", name);
+  },
+  { immediate: true }
+);
 watch(
   () => props.serviceId,
   () => {

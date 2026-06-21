@@ -44,6 +44,9 @@ import {
 import TelemetrySpark from "./TelemetrySpark.vue";
 
 const props = defineProps<{ agentId: string }>();
+// Reported up to the app shell so the open-item tab shows the agent
+// name instead of the raw id.
+const emit = defineEmits<{ (e: "resolved-name", name: string): void }>();
 
 const auth = useAuth();
 const isViewer = computed(() => auth.value.isViewer);
@@ -109,6 +112,13 @@ onMounted(() => {
 onUnmounted(() => {
   if (pollId) clearInterval(pollId);
 });
+watch(
+  () => agent.value?.name,
+  (name) => {
+    if (name && name.trim()) emit("resolved-name", name.trim());
+  },
+  { immediate: true }
+);
 watch(
   () => props.agentId,
   (newId) => {

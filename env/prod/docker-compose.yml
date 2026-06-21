@@ -1,5 +1,15 @@
 services:
   kaiad:
+    # Auto-recover on crash/daemon-restart and cap json-file logs so an
+    # unbounded log can't fill the host disk (root cause of the
+    # 2026-06-13 outage). Committed here so it survives `git pull`
+    # redeploys instead of living in an uncommitted override.
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.unified
@@ -66,6 +76,12 @@ services:
 
   postgres:
     image: postgres:16
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     user: "1000:1000"
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -85,6 +101,12 @@ services:
 
   redis:
     image: redis:7
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     user: "1000:1000"
     ports:
       - "6002:6379"

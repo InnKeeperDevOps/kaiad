@@ -10,6 +10,7 @@
 import { ref, computed, watch, onMounted } from "vue";
 import { api } from "../../lib/api.js";
 import { parsePipelineYaml, yamlParse, yamlStringify } from "@sm/contracts";
+import { ChevronDown, ChevronRight } from "lucide-vue-next";
 import Card from "../../components/Card.vue";
 import Button from "../../components/Button.vue";
 import {
@@ -208,6 +209,25 @@ const pipelines = computed<{ name: string; p: AnyObj }[]>(() => {
   }
   return [{ name: "", p: d }];
 });
+
+// Per-pipeline collapse state for the multi-pipeline form, keyed by the
+// pipeline name (or "<single>"). Lets the user fold away pipelines they
+// aren't editing so a multi-pipeline kaiad.yaml isn't one giant form.
+// Default expanded.
+const collapsedPipelines = ref<Set<string>>(new Set());
+function pipelineKey(entry: { name: string }): string {
+  return entry.name || "<single>";
+}
+function isPipelineCollapsed(entry: { name: string }): boolean {
+  return collapsedPipelines.value.has(pipelineKey(entry));
+}
+function togglePipeline(entry: { name: string }) {
+  const k = pipelineKey(entry);
+  const next = new Set(collapsedPipelines.value);
+  if (next.has(k)) next.delete(k);
+  else next.add(k);
+  collapsedPipelines.value = next;
+}
 
 function ensure(p: AnyObj, key: string, init: any) {
   if (p[key] == null) p[key] = init;
@@ -697,11 +717,25 @@ async function clearOverride() {
         </div>
 
         <div v-for="entry in pipelines" :key="entry.name || '<single>'" class="pl-pipeline">
-          <div class="pl-pipeline__head">
+          <div
+            class="pl-pipeline__head"
+            role="button"
+            tabindex="0"
+            :aria-expanded="!isPipelineCollapsed(entry)"
+            :title="isPipelineCollapsed(entry) ? 'Expand pipeline' : 'Collapse pipeline'"
+            @click="togglePipeline(entry)"
+            @keyup.enter="togglePipeline(entry)"
+          >
+            <component
+              :is="isPipelineCollapsed(entry) ? ChevronRight : ChevronDown"
+              :size="15"
+              class="pl-pipeline__chev"
+            />
             <span class="pl-pipeline__name">{{ entry.name || 'single pipeline' }}</span>
-            <Button v-if="entry.name" variant="ghost" size="sm" @click="removeService(entry.name)">Remove</Button>
+            <Button v-if="entry.name" variant="ghost" size="sm" @click.stop="removeService(entry.name)">Remove</Button>
           </div>
 
+          <div v-show="!isPipelineCollapsed(entry)" class="pl-pipeline__body">
           <section class="pl-section">
             <h4 class="pl-section__title">
               Image source <span class="pl-hint">build step, or a Dockerfile — runtime config applies either way</span>
@@ -1071,6 +1105,7 @@ async function clearOverride() {
               <input class="sm-input pl-in pl-in--sm" placeholder="production — press Enter" @keyup.enter="addEnvName(entry.p, ($event.target as HTMLInputElement).value); ($event.target as HTMLInputElement).value = ''" />
             </div>
           </section>
+          </div>
         </div>
 
         <p class="pl-muted pl-foot">
@@ -1336,12 +1371,22 @@ async function clearOverride() {
 .pl-pipeline__head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 0.4rem;
   margin-bottom: 0.35rem;
+  cursor: pointer;
+  user-select: none;
+}
+.pl-pipeline__chev {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
 }
 .pl-pipeline__name {
   font-weight: 600;
   font-size: 0.9rem;
+  flex: 1;
+}
+.pl-pipeline__head:hover .pl-pipeline__name {
+  color: var(--color-primary);
 }
 .pl-section {
   border-top: 1px solid var(--color-border);

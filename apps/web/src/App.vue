@@ -31,6 +31,7 @@ import RegistryPage from "./features/registry/RegistryPage.vue";
 import ImageFileBrowserPage from "./features/registry/ImageFileBrowserPage.vue";
 import LoadBalancersPage from "./features/load-balancers/LoadBalancersPage.vue";
 import AgentDetailPage from "./features/agents/AgentDetailPage.vue";
+import ContainerDetailPage from "./features/agents/ContainerDetailPage.vue";
 import OperatorPage from "./features/operator/OperatorPage.vue";
 import ServiceDetailPage from "./features/services/ServiceDetailPage.vue";
 import SettingsPage from "./features/settings/SettingsPage.vue";
@@ -45,6 +46,7 @@ type Route =
   | "threats"
   | "agents"
   | "agentDetail"
+  | "containerDetail"
   | "operator"
   | "services"
   | "serviceDetail"
@@ -100,6 +102,7 @@ const PAGE_TITLE: Record<Route, string> = {
   threats: "Threats",
   agents: "Agents",
   agentDetail: "Agent",
+  containerDetail: "Container",
   operator: "Operator",
   services: "Services",
   serviceDetail: "Service",
@@ -121,6 +124,8 @@ function readNavFromHash(): {
   serviceDetailServiceId: string | null;
   registryImageRepo: string | null;
   registryImageTag: string | null;
+  containerDetailAgentId: string | null;
+  containerDetailContainerId: string | null;
 } {
   const raw = window.location.hash.replace(/^#/, "").split("?")[0];
   const empty = {
@@ -128,11 +133,32 @@ function readNavFromHash(): {
     agentDetailAgentId: null,
     serviceDetailServiceId: null,
     registryImageRepo: null,
-    registryImageTag: null
+    registryImageTag: null,
+    containerDetailAgentId: null,
+    containerDetailContainerId: null
   };
   if (raw.startsWith("tenant-config/")) {
     const id = decodeURIComponent(raw.slice("tenant-config/".length).trim());
     return { route: "tenantConfig", ...empty, tenantConfigTenantId: id || null };
+  }
+  if (raw.startsWith("container/")) {
+    // Shape: container/<encoded agentId>/<encoded containerId>. Both ids
+    // are slash-free (UUID / docker sha / pod name) so a simple split is
+    // safe.
+    const rest = raw.slice("container/".length);
+    const slash = rest.indexOf("/");
+    if (slash > 0) {
+      const agentId = decodeURIComponent(rest.slice(0, slash)).trim();
+      const containerId = decodeURIComponent(rest.slice(slash + 1)).trim();
+      if (agentId && containerId) {
+        return {
+          route: "containerDetail",
+          ...empty,
+          containerDetailAgentId: agentId,
+          containerDetailContainerId: containerId
+        };
+      }
+    }
   }
   if (raw.startsWith("agent/")) {
     const id = decodeURIComponent(raw.slice("agent/".length).trim());
@@ -194,6 +220,8 @@ const agentDetailAgentId = ref<string | null>(hasToken() ? readNavFromHash().age
 const serviceDetailServiceId = ref<string | null>(hasToken() ? readNavFromHash().serviceDetailServiceId : null);
 const registryImageRepo = ref<string | null>(hasToken() ? readNavFromHash().registryImageRepo : null);
 const registryImageTag = ref<string | null>(hasToken() ? readNavFromHash().registryImageTag : null);
+const containerDetailAgentId = ref<string | null>(hasToken() ? readNavFromHash().containerDetailAgentId : null);
+const containerDetailContainerId = ref<string | null>(hasToken() ? readNavFromHash().containerDetailContainerId : null);
 const user = ref<AuthUser | null>(null);
 const meResolved = ref(false);
 
@@ -370,6 +398,8 @@ function onHashChange() {
   serviceDetailServiceId.value = nav.serviceDetailServiceId;
   registryImageRepo.value = nav.registryImageRepo;
   registryImageTag.value = nav.registryImageTag;
+  containerDetailAgentId.value = nav.containerDetailAgentId;
+  containerDetailContainerId.value = nav.containerDetailContainerId;
   ensureTabForCurrentRoute();
 }
 
@@ -389,6 +419,7 @@ function isActive(itemRoute: Route): boolean {
     route.value === itemRoute ||
     (itemRoute === "tenants" && route.value === "tenantConfig") ||
     (itemRoute === "agents" && route.value === "agentDetail") ||
+    (itemRoute === "agents" && route.value === "containerDetail") ||
     (itemRoute === "services" && route.value === "serviceDetail") ||
     (itemRoute === "registry" && route.value === "registryImage")
   );
@@ -698,6 +729,11 @@ const navItemStyle = (active: boolean): CSSProperties => ({
         v-else-if="route === 'agentDetail' && agentDetailAgentId"
         :agent-id="agentDetailAgentId"
         @resolved-name="(n: string) => setTabLabel('agent', agentDetailAgentId, n)"
+      />
+      <ContainerDetailPage
+        v-else-if="route === 'containerDetail' && containerDetailAgentId && containerDetailContainerId"
+        :agent-id="containerDetailAgentId"
+        :container-id="containerDetailContainerId"
       />
       <OperatorPage v-else-if="route === 'operator'" />
       <ServicesPage v-else-if="route === 'services'" />

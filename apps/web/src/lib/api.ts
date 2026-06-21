@@ -578,6 +578,12 @@ export const api = {
       `/api/v1/agents/${encodeURIComponent(agentId)}/services/${encodeURIComponent(serviceId)}/logs?tail=${tail}`,
       { method: "POST" }
     ),
+  /** Fetch recent logs for a single container by id (admin/owner). */
+  fetchContainerLogs: (agentId: string, containerId: string, tail = 200) =>
+    apiFetch<{ status: string; output: string }>(
+      `/api/v1/agents/${encodeURIComponent(agentId)}/containers/${encodeURIComponent(containerId)}/logs?tail=${tail}`,
+      { method: "POST" }
+    ),
   /** The kaiad agent's own process logs. `afterId` fetches only newer lines. */
   fetchAgentLogs: (agentId: string, afterId?: string, limit = 300) =>
     apiFetch<{ logs: ComponentLogLine[] }>(

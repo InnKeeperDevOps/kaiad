@@ -391,7 +391,10 @@ function btn(variant: "primary" | "muted" | "danger" = "muted"): CSSProperties {
           <tbody>
             <tr v-for="app in appsFor(svc.id)" :key="app.containerId">
               <td :style="tdStyle">
-                <div :style="{ fontWeight: 600 }">{{ app.name ?? app.containerId.slice(0, 12) }}</div>
+                <a
+                  :href="`#container/${encodeURIComponent(agentId)}/${encodeURIComponent(app.containerId)}`"
+                  class="ctr-link"
+                >{{ app.name ?? app.containerId.slice(0, 12) }}</a>
                 <div :style="{ ...monoStyle, fontSize: '0.68rem', color: muted }">
                   {{ app.containerId.slice(0, 12) }}
                 </div>
@@ -611,3 +614,15 @@ function btn(variant: "primary" | "muted" | "danger" = "muted"): CSSProperties {
     </Teleport>
   </section>
 </template>
+
+<style scoped>
+.ctr-link {
+  font-weight: 600;
+  color: var(--color-text);
+  text-decoration: none;
+}
+.ctr-link:hover {
+  color: var(--color-primary);
+  text-decoration: underline;
+}
+</style>

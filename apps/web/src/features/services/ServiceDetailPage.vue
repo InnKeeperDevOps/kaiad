@@ -966,9 +966,10 @@ function sshKeyName(id: string | null | undefined): string {
                 <tbody>
                   <tr v-for="app in row.containers" :key="app.containerId" class="ctr-row">
                     <td :style="tdStyle">
-                      <div :style="{ fontWeight: 600 }">
-                        {{ app.name ?? app.containerId.slice(0, 12) }}
-                      </div>
+                      <a
+                        :href="`#container/${encodeURIComponent(row.agentId)}/${encodeURIComponent(app.containerId)}`"
+                        class="ctr-link"
+                      >{{ app.name ?? app.containerId.slice(0, 12) }}</a>
                       <div :style="{ ...monoStyle, fontSize: '0.7rem', color: muted }">
                         {{ app.containerId.slice(0, 12) }}
                       </div>
@@ -1124,5 +1125,14 @@ function sshKeyName(id: string | null | undefined): string {
 }
 .ctr-row:hover {
   background: var(--color-surface-muted);
+}
+.ctr-link {
+  font-weight: 600;
+  color: var(--color-text);
+  text-decoration: none;
+}
+.ctr-link:hover {
+  color: var(--color-primary);
+  text-decoration: underline;
 }
 </style>

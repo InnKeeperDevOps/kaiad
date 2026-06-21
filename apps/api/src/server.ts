@@ -4085,6 +4085,74 @@ export function buildServer(opts: BuildServerOptions = {}) {
     }
   );
 
+  // Read recent logs for a single container by id. Same dispatch path
+  // as the service-logs route (run_step → command_ack), but targets one
+  // container: `docker logs <id>` when the runtime is docker, otherwise
+  // locates the pod by name across namespaces and `kubectl logs` it.
+  // Admin/owner only — log output can be sensitive.
+  app.post<{ Params: { agentId: string; containerId: string }; Querystring: { tail?: string } }>(
+    "/api/v1/agents/:agentId/containers/:containerId/logs",
+    async (req, reply) => {
+      const session = await resolveSession(authStore, req.headers.authorization);
+      if (!session) {
+        return reply.status(401).send(
+          apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId })
+        );
+      }
+      if (session.kind === "apiCredential" || !hasPermission(await sessionPermissions(session), "agents:logs")) {
+        return reply.status(403).send(
+          apiErrorSchema.parse({ code: "FORBIDDEN", message: "Owner or admin session required to read logs", correlationId: (req as any).correlationId })
+        );
+      }
+      if (!realtimeManager.getConnectedAgentIds().includes(req.params.agentId)) {
+        return reply.status(409).send(
+          apiErrorSchema.parse({ code: "AGENT_OFFLINE", message: "Agent is not connected", correlationId: (req as any).correlationId })
+        );
+      }
+      // Container ids are docker SHAs or k8s pod names — both match this
+      // charset. Strip anything else so it can't break out of the shell.
+      const cid = req.params.containerId.replace(/[^a-zA-Z0-9_.-]/g, "");
+      if (!cid) {
+        return reply.status(400).send(
+          apiErrorSchema.parse({ code: "BAD_REQUEST", message: "Invalid container id", correlationId: (req as any).correlationId })
+        );
+      }
+      const tailNum = Math.min(Math.max(parseInt(req.query.tail ?? "200", 10) || 200, 1), 2000);
+      const shell =
+        `cid='${cid}'; ` +
+        `if command -v docker >/dev/null 2>&1 && docker inspect "$cid" >/dev/null 2>&1; then ` +
+        `docker logs --tail ${tailNum} "$cid" 2>&1; ` +
+        `elif command -v kubectl >/dev/null 2>&1; then ` +
+        `ns=$(kubectl get pods --all-namespaces --field-selector metadata.name="$cid" -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null); ` +
+        `if [ -n "$ns" ]; then kubectl -n "$ns" logs "$cid" --tail=${tailNum} --all-containers --prefix --since=2h 2>&1; ` +
+        `else echo "container/pod $cid not found via docker or kubectl"; fi; ` +
+        `else echo "no docker or kubectl available on this agent"; fi`;
+      const commandId = crypto.randomUUID();
+      const command = platformToAgentMessageSchema.parse({
+        type: "run_step",
+        commandId,
+        shell,
+        env: {}
+      });
+      const ackPromise = realtimeManager.awaitCommandResult(commandId, 25_000);
+      try {
+        await realtimeManager.sendCommand(req.params.agentId, JSON.stringify(command));
+      } catch (err) {
+        return reply.status(502).send(
+          apiErrorSchema.parse({ code: "DISPATCH_FAILED", message: (err as Error).message, correlationId: (req as any).correlationId })
+        );
+      }
+      try {
+        const ack = await ackPromise;
+        return { status: ack.status, output: ack.output ?? "" };
+      } catch (err) {
+        return reply.status(504).send(
+          apiErrorSchema.parse({ code: "LOGS_TIMEOUT", message: (err as Error).message, correlationId: (req as any).correlationId })
+        );
+      }
+    }
+  );
+
   /**
    * Reconcile pass — for every service this agent is bound to, if no
    * lb_status_report row exists yet, dispatch a redeploy_service for

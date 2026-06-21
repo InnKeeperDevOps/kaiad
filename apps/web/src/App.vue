@@ -317,6 +317,7 @@ const topBarStyle: CSSProperties = {
   padding: "0 1rem",
   borderBottom: "1px solid var(--color-border)",
   background: "var(--color-surface)",
+  boxShadow: "var(--shadow-sm)",
   position: "sticky",
   top: 0,
   zIndex: 5
@@ -333,13 +334,15 @@ const navItemStyle = (active: boolean): CSSProperties => ({
   display: "flex",
   alignItems: "center",
   gap: "0.55rem",
-  padding: "0.5rem 1rem",
+  margin: "0.05rem 0.5rem",
+  padding: "0.5rem 0.7rem",
   color: active ? "var(--color-nav-active)" : "var(--color-nav-text)",
   textDecoration: "none",
   fontSize: "0.88rem",
+  fontWeight: active ? 600 : 500,
+  borderRadius: "8px",
   background: active ? "var(--color-nav-surface)" : "transparent",
-  borderLeft: active ? "3px solid var(--color-nav-active)" : "3px solid transparent",
-  transition: "background 0.15s"
+  transition: "background 0.15s, color 0.15s"
 });
 </script>
 
@@ -361,7 +364,7 @@ const navItemStyle = (active: boolean): CSSProperties => ({
       display: 'grid',
       gridTemplateColumns: `${SIDEBAR_WIDTH} 1fr`,
       minHeight: '100vh',
-      background: 'var(--color-bg)'
+      background: 'var(--color-canvas)'
     }"
   >
     <!-- Sidebar: brand at top, grouped nav, doc link at bottom. The
@@ -428,7 +431,7 @@ const navItemStyle = (active: boolean): CSSProperties => ({
             margin: 0,
             fontSize: '1rem',
             fontWeight: 600,
-            color: 'var(--color-text-primary)'
+            color: 'var(--color-text)'
           }"
         >
           {{ currentPageTitle }}
@@ -445,7 +448,7 @@ const navItemStyle = (active: boolean): CSSProperties => ({
               border: '1px solid var(--color-border)',
               borderRadius: '999px',
               fontSize: '0.82rem',
-              color: 'var(--color-text-primary)',
+              color: 'var(--color-text)',
               background: 'var(--color-surface)'
             }"
           >

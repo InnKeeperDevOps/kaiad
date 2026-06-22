@@ -423,8 +423,22 @@ export function createRuntimeQueueWiringFromEnv(env: NodeJS.ProcessEnv = process
   }
 
   const redis = createRedisConnectionFromEnv(env);
-  const logQueue = createNamedQueue<LogIngestionJob>("logIngestion", redis);
-  const agentCommandQueue = createNamedQueue<AgentCommandJob>("agentCommands", redis);
+  // Auto-evict finished jobs so the queues can't grow unbounded in Redis.
+  // log-ingestion is high-volume (one job per log batch) — without this,
+  // completed jobs accumulate forever and eventually exhaust Redis
+  // memory/disk (observed: 36M completed jobs / 47GB on 2026-06-22).
+  const logQueue = createNamedQueue<LogIngestionJob>("logIngestion", redis, {
+    defaultJobOptions: {
+      removeOnComplete: { age: 3600, count: 1000 },
+      removeOnFail: { age: 24 * 3600, count: 5000 }
+    }
+  });
+  const agentCommandQueue = createNamedQueue<AgentCommandJob>("agentCommands", redis, {
+    defaultJobOptions: {
+      removeOnComplete: { age: 24 * 3600, count: 2000 },
+      removeOnFail: { age: 7 * 24 * 3600, count: 5000 }
+    }
+  });
 
   return {
     buildOptions: {

@@ -83,6 +83,12 @@ type CreateContainerOpts struct {
 	// (separate from Cmd, which overrides CMD). Useful when the base
 	// image bakes in an entrypoint that wraps the binary.
 	Entrypoint []string
+	// Env: container environment as `KEY=VALUE` entries (docker run -e).
+	// Redeploy fills this from kaiad.yaml runtime.env + secretEnv.
+	Env []string
+	// Tmpfs: container path → mount options ("" = docker defaults).
+	// Redeploy maps kaiad.yaml emptyDir volumes onto this.
+	Tmpfs map[string]string
 }
 
 type RuntimeStatus struct {
@@ -371,12 +377,18 @@ func (c *Client) CreateContainer(ctx context.Context, opts CreateContainerOpts) 
 	if len(opts.Binds) > 0 {
 		hostConfig["Binds"] = opts.Binds
 	}
+	if len(opts.Tmpfs) > 0 {
+		hostConfig["Tmpfs"] = opts.Tmpfs
+	}
 
 	body := map[string]any{
 		"Image":        opts.Image,
 		"Labels":       opts.Labels,
 		"ExposedPorts": exposedPorts,
 		"HostConfig":   hostConfig,
+	}
+	if len(opts.Env) > 0 {
+		body["Env"] = opts.Env
 	}
 	if len(opts.Cmd) > 0 {
 		body["Cmd"] = opts.Cmd

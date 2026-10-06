@@ -62,6 +62,43 @@ the original runtime and the most fully-featured.
 |---|---|---|
 | `SM_DOCKER_SOCKET` | `/var/run/docker.sock` | Override if your daemon listens elsewhere (e.g. rootless `~/.docker/desktop/docker.sock`). |
 | `SM_ENABLE_LOG_STREAMING` | (on) | Set to `0` to suppress automatic log tailing on connect. |
+| `KAIAD_DOCKER_SECRETS_DIR` | `/etc/kaiad/secrets` | Host directory `secretEnv` values are read from on deploy (see below). |
+
+**Runtime config on deployed containers**
+
+`redeploy_service` maps kaiad.yaml's `runtime.env`, `runtime.secretEnv`
+and `runtime.volumes` onto every replica it creates:
+
+| kaiad.yaml | Docker container |
+|---|---|
+| `env` | Container env (`KEY=VALUE`). |
+| `secretEnv` | Container env, value read from the host file `<KAIAD_DOCKER_SECRETS_DIR>/<secret>/<key>` (one trailing newline trimmed). |
+| `volumes[].hostPath` | One bind mount per mount: `hostPath[/subPath]:path[:ro]`. `hostPath.type` is ignored — Docker creates a missing host directory. |
+| `volumes[].emptyDir` | tmpfs at each mount path (`ro` when `readOnly`). |
+| `volumes[].nfs` / `persistentVolumeClaim` | Not supported — skipped with a warning in the redeploy log; the deploy still proceeds. |
+
+The secrets directory mirrors a mounted Kubernetes Secret — one
+directory per secret, one file per key:
+
+```text
+/etc/kaiad/secrets/
+  app-db/
+    url              # -> secretEnv { secret: app-db, key: url }
+  payments/
+    stripe_secret
+```
+
+```bash
+sudo install -d -m 0750 -o root -g kaiad /etc/kaiad/secrets/app-db
+printf '%s' 'postgres://user:pass@host:5432/db' | \
+  sudo install -m 0640 -o root -g kaiad /dev/stdin /etc/kaiad/secrets/app-db/url
+```
+
+The agent process (not the container) reads these files, so the agent's
+user must be able to read them. A missing or unreadable file fails the
+deploy *before* the previous replicas are removed, unless the entry is
+`optional: true` (then it is skipped with a warning). `secret` and `key`
+must not contain `/` or `..`; `subPath` must not contain `..`.
 
 The enrollment-token start command for Docker omits any
 `SM_AGENT_RUNTIME_OVERRIDE` — Docker is the default branch in the

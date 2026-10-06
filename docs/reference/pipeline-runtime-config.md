@@ -15,7 +15,7 @@ whether the image came from `build` or from `dockerfile`.
 | Field | Type | Default | What it does |
 |-------|------|---------|--------------|
 | `runtime.env` | map<string,string> | `{}` | Plain environment variables. |
-| `runtime.secretEnv` | object[] | `[]` | Env vars sourced from existing Kubernetes Secrets. |
+| `runtime.secretEnv` | object[] | `[]` | Env vars sourced from existing Kubernetes Secrets (host files on the docker runtime). |
 | `runtime.volumes` | object[] | `[]` | Volumes mounted into the container (NFS, hostPath, emptyDir, PVC). |
 
 All three can be **overridden per environment** — see
@@ -83,6 +83,17 @@ kubectl -n <namespace> create secret generic app-db \
 
 Per-environment `environments.<env>.secretEnv` **replaces** the whole
 top-level list when present (it does not merge entry-by-entry).
+
+> **Docker runtime:** there are no Kubernetes Secrets, so a docker agent
+> reads each value from a **host file** at
+> `<KAIAD_DOCKER_SECRETS_DIR>/<secret>/<key>` (default
+> `/etc/kaiad/secrets`) and injects it as a plain container env var.
+> `optional` behaves the same: missing + required fails the deploy,
+> missing + optional is skipped with a warning. `nfs` and
+> `persistentVolumeClaim` volumes are skipped on docker; `hostPath`
+> becomes a bind mount and `emptyDir` a tmpfs. See
+> [Agent runtimes → Docker]({% link agent/runtimes.md %}) for the
+> directory layout.
 
 ---
 

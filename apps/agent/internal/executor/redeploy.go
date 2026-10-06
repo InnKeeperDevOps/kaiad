@@ -649,6 +649,19 @@ func (e *Executor) redeployDocker(
 		log.Printf("[agent:redeploy] "+format, args...)
 	}
 
+	// 0) Resolve env/secretEnv/volumes BEFORE touching the old
+	// replicas, so a missing required secret fails the deploy while
+	// the previous version keeps serving.
+	secretsDir := dockerSecretsDir()
+	env, binds, tmpfs, warnings, err := dockerRuntimeConfig(in, secretsDir, os.ReadFile)
+	if err != nil {
+		log.Printf("[agent:redeploy] runtime config failed service=%s secretsDir=%s: %v", in.serviceID, secretsDir, err)
+		return CommandResult{Success: false, Output: out.String() + fmt.Sprintf("runtime config: %v\n", err)}
+	}
+	for _, w := range warnings {
+		logf("warning: %s", w)
+	}
+
 	// 1) Pull the new image. The kaiad registry needs basic auth — we
 	// use admin:dev-token in dev compose and a configurable credential
 	// in production via KAIAD_REGISTRY_USER / KAIAD_REGISTRY_PASSWORD.
@@ -745,6 +758,9 @@ func (e *Executor) redeployDocker(
 			Restart:        "unless-stopped",
 			Network:        lbm.NetworkName(),
 			NetworkAliases: aliases,
+			Env:            env,
+			Binds:          binds,
+			Tmpfs:          tmpfs,
 		})
 		if err != nil {
 			return CommandResult{Success: false, Output: out.String() + fmt.Sprintf("create %s: %v\n", name, err)}

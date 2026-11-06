@@ -230,16 +230,23 @@ func WithAppStatsCollector(fn func(agentID string) ([][]byte, error)) ClientOpti
 	}
 }
 
-// DefaultAgentVersion is the version the agent reports to the control
-// plane unless overridden via WithVersion(...) or $SM_AGENT_VERSION.
-// Bump on every agent release.
-const DefaultAgentVersion = "0.1.30"
+// Version is the version the agent reports to the control plane unless
+// overridden via WithVersion(...) or $SM_AGENT_VERSION. Release builds
+// stamp it from the git tag (bare, no leading "v", e.g. "0.0.6") with
+//
+//	-ldflags "-X github.com/service-monitor/agent/internal/transport.Version=0.0.6"
+//
+// (see apps/agent/Dockerfile and .github/workflows/go-release.yml). It
+// must stay a plain string var with a constant initializer for -X to
+// apply. The default covers builds that don't stamp it (e.g. the agent
+// bundled by deploy/docker/Dockerfile.unified).
+var Version = "0.1.30"
 
 func NewClient(url string, agentID string, opts ...ClientOption) *Client {
 	c := &Client{
 		url:               url,
 		agentID:           agentID,
-		version:           DefaultAgentVersion,
+		version:           Version,
 		heartbeatInterval: 10 * time.Second,
 		minBackoff:        time.Second,
 		maxBackoff:        60 * time.Second,
@@ -253,7 +260,7 @@ func NewClient(url string, agentID string, opts ...ClientOption) *Client {
 	if c.rng == nil {
 		c.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
-	if v := os.Getenv("SM_AGENT_VERSION"); v != "" && c.version == DefaultAgentVersion {
+	if v := os.Getenv("SM_AGENT_VERSION"); v != "" && c.version == Version {
 		c.version = v
 	}
 	if c.protocolDebug == nil && agentdebug.Enabled() {

@@ -35,6 +35,11 @@ jobs:
           mkdir -p dist
           built_count=0
 
+          # Bare version stamped into the agent (transport.Version): the
+          # tag without its leading "v", matching the control plane's
+          # KAIAD_AGENT_VERSION / latestAgentVersion format ("0.0.6").
+          version="${GITHUB_REF_NAME#v}"
+
           for app_dir in apps/*; do
             if [[ ! -d "$app_dir" || ! -f "$app_dir/go.mod" ]]; then
               continue
@@ -57,13 +62,18 @@ jobs:
                   ext=".exe"
                 fi
 
+                ldflags="-s -w"
+                if [[ "$app_name" == "agent" ]]; then
+                  ldflags="${ldflags} -X github.com/service-monitor/agent/internal/transport.Version=${version}"
+                fi
+
                 out_file="dist/${target}_${goos}_${goarch}${ext}"
-                echo "Building ${target} for ${goos}/${goarch}"
+                echo "Building ${target} ${version} for ${goos}/${goarch}"
                 (
                   cd "$app_dir"
                   CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
                     -trimpath \
-                    -ldflags="-s -w" \
+                    -ldflags="${ldflags}" \
                     -o "../../${out_file}" \
                     "./cmd/${cmd_name}"
                 )

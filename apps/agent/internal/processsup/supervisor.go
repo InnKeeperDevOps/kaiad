@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/service-monitor/agent/internal/docker"
 	"github.com/service-monitor/agent/internal/managed"
@@ -131,8 +130,11 @@ func (s *Supervisor) stopUnlocked(serviceID string) {
 		s.tailer.Remove(serviceID)
 	}
 	if rp.pid > 0 {
-		// Kill the whole process group so children (e.g. java sub-procs) die too.
-		_ = syscall.Kill(-rp.pid, syscall.SIGTERM)
+		// Kill the whole process group/tree so children (e.g. java sub-procs)
+		// die too. Platform-specific: supervisor_unix.go / supervisor_windows.go.
+		if err := terminateProcessTree(rp.pid); err != nil {
+			log.Printf("processsup: stop service=%s pid=%d: %v", serviceID, rp.pid, err)
+		}
 	}
 }
 
@@ -144,9 +146,10 @@ func (s *Supervisor) Close() {
 	}
 }
 
-// startDetached spawns `bash -c <command>` as the leader of a new session,
-// redirects stdout/stderr to logPath (append), closes stdin, and disowns. The
-// caller gets the PID of the bash wrapper.
+// startDetached spawns the command through the platform shell (`bash -c` on
+// unix) detached from the agent (new session on unix, new process group on
+// windows), redirects stdout/stderr to logPath (append), closes stdin, and
+// disowns. The caller gets the PID of the shell wrapper.
 func startDetached(command, cwd, logPath string) (int, error) {
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -160,14 +163,15 @@ func startDetached(command, cwd, logPath string) (int, error) {
 	}
 	defer devnull.Close()
 
-	cmd := exec.Command("bash", "-c", command)
+	argv := shellArgv(command)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
 	cmd.Stdin = devnull
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.SysProcAttr = detachedSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("start: %w", err)
 	}

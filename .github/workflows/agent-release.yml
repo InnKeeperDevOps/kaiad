@@ -51,7 +51,14 @@ jobs:
             tag="${DISPATCH_TAG}"
           else
             tag="${GITHUB_REF_NAME}"
-          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          # Bare version the agent reports (transport.Version via ldflags):
+          # strip a leading "agent-v" / "v" so it matches the control
+          # plane's KAIAD_AGENT_VERSION / latestAgentVersion format
+          # ("0.0.6", not "v0.0.6").
+          version="${tag#agent-}"
+          version="${version#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v3
@@ -94,7 +101,9 @@ jobs:
           context: apps/agent
           file: apps/agent/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            AGENT_VERSION=${{ steps.ver.outputs.version }}
           tags: ${{ steps.tags.outputs.tags }}
           provenance: false
           # GHA-backed buildx cache so repeat builds reuse layers.

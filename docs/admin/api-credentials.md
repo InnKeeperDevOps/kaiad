@@ -17,7 +17,7 @@ holding a human session.
 | Kind | Lifetime | Purpose | Created via |
 |---|---|---|---|
 | **Session token** | 24h | A signed-in human's bearer for the panel and direct API calls. | `POST /api/v1/auth/login` |
-| **Enrollment token** | minutes – days (caller picks TTL) | Single-use bootstrap for a Kaiad agent on first connect. | `POST /api/v1/agents/enrollment-tokens` |
+| **Enrollment token** | TTL bounds first use only; once used, until revoked | Bootstrap + ongoing credential for a Kaiad agent. The TTL is the window in which an agent must first connect. After that the token keeps authenticating that agent's `/realtime` reconnects and registry pulls until it is revoked (deactivated or deleted), so a panel restart after the TTL doesn't knock agents offline. | `POST /api/v1/agents/enrollment-tokens` |
 | **API credential** | until revoked | Machine integration; carries explicit scopes. | `POST /api/v1/admin/api-credentials` (this page) |
 
 A user session implicitly holds every scope (an owner can do anything an

@@ -16,6 +16,23 @@ export type EnrollmentTokenRow = {
 export type DeactivateEnrollmentTokenResult = "deactivated" | "not_found" | "not_revocable";
 
 const tokensByTenant = new Map<string, EnrollmentTokenRow[]>();
+/**
+ * Expiry bounds the ENROLLMENT window only: an unused token must be first
+ * used before expires_at, but once an agent has connected with it (used_at
+ * set) it stays that agent's credential for /realtime reconnects and
+ * registry pulls until it is revoked. Previously every agent dropped off
+ * the control plane on its first reconnect after the (max 30-day) TTL,
+ * e.g. on any panel restart. Revocation (revoked_at) always wins.
+ */
+function isTokenLive(
+  row: Pick<EnrollmentTokenRow, "expiresAt" | "usedAt" | "revokedAt">,
+  now: Date
+): boolean {
+  return row.revokedAt === null && (row.usedAt !== null || row.expiresAt > now);
+}
+
+/** SQL twin of isTokenLive (columns of agent_enrollment_tokens). */
+const LIVE_TOKEN_SQL = "revoked_at is null and (used_at is not null or expires_at > now())";
 type EnrollmentStore = {
   create(input: { tenantId: string; createdBy: string; ttlSeconds: number }): Promise<EnrollmentTokenRow & { token: string }>;
   list(tenantId: string): Promise<EnrollmentTokenRow[]>;
@@ -107,7 +124,7 @@ function createInMemoryEnrollmentStore(): EnrollmentStore {
         return "not_found";
       }
       const now = new Date();
-      if (row.revokedAt !== null || row.expiresAt.getTime() <= now.getTime()) {
+      if (!isTokenLive(row, now)) {
         return "not_revocable";
       }
       row.revokedAt = now;
@@ -118,11 +135,7 @@ function createInMemoryEnrollmentStore(): EnrollmentStore {
       const now = new Date();
       for (const rows of tokensByTenant.values()) {
         for (const row of rows) {
-          if (
-            row.tokenHash === hash &&
-            row.revokedAt === null &&
-            row.expiresAt > now
-          ) {
+          if (row.tokenHash === hash && isTokenLive(row, now)) {
             if (row.usedAt === null) {
               row.usedAt = now;
             }
@@ -137,11 +150,7 @@ function createInMemoryEnrollmentStore(): EnrollmentStore {
       const now = new Date();
       for (const rows of tokensByTenant.values()) {
         for (const row of rows) {
-          if (
-            row.tokenHash === hash &&
-            row.revokedAt === null &&
-            row.expiresAt > now
-          ) {
+          if (row.tokenHash === hash && isTokenLive(row, now)) {
             return { tenantId: row.tenantId, tokenId: row.id };
           }
         }
@@ -226,8 +235,7 @@ async function createPostgresEnrollmentStore(): Promise<EnrollmentStore | null> 
               set revoked_at = now()
             where tenant_id = $1
               and id = $2
-              and revoked_at is null
-              and expires_at > now()
+              and ${LIVE_TOKEN_SQL}
           returning id`,
           [tenantId, tokenId]
         );
@@ -245,8 +253,7 @@ async function createPostgresEnrollmentStore(): Promise<EnrollmentStore | null> 
           `update agent_enrollment_tokens
               set used_at = coalesce(used_at, now())
             where token_hash = $1
-              and revoked_at is null
-              and expires_at > now()
+              and ${LIVE_TOKEN_SQL}
           returning tenant_id, id`,
           [hashToken(plaintext)]
         );
@@ -261,8 +268,7 @@ async function createPostgresEnrollmentStore(): Promise<EnrollmentStore | null> 
           `select tenant_id, id
              from agent_enrollment_tokens
             where token_hash = $1
-              and revoked_at is null
-              and expires_at > now()
+              and ${LIVE_TOKEN_SQL}
             limit 1`,
           [hashToken(plaintext)]
         );

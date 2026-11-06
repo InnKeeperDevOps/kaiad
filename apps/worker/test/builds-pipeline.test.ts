@@ -24,11 +24,14 @@ ports:
 const state = vi.hoisted(() => ({
   yaml: "" as string,
   yamlThrows: false,
-  failCmd: "" as string // a command substring that should exit non-zero
+  dockerCfg: "" as string, // contents of ~/.docker/config.json
+  failCmd: "" as string, // a command substring that should exit non-zero
+  spawns: [] as Array<{ cmd: string; args: string[]; env?: Record<string, string | undefined> }>
 }));
 
 vi.mock("node:child_process", () => ({
-  spawn: (cmd: string, args: string[] = []) => {
+  spawn: (cmd: string, args: string[] = [], opts: { env?: Record<string, string | undefined> } = {}) => {
+    state.spawns.push({ cmd, args, env: opts.env });
     const child: any = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
@@ -55,6 +58,7 @@ vi.mock("node:fs", () => {
     readdir: vi.fn().mockResolvedValue([]),
     stat: vi.fn().mockResolvedValue({ isDirectory: () => true, size: 1 }),
     readFile: vi.fn(async (p: string) => {
+      if (String(p).endsWith("/.docker/config.json")) return state.dockerCfg;
       if (String(p).includes("kaiad")) {
         if (state.yamlThrows) {
           const e: any = new Error("ENOENT");
@@ -102,6 +106,8 @@ describe("builds pipeline (mocked spawn/fs/db)", () => {
     state.yaml = RUNTIME_YAML;
     state.yamlThrows = false;
     state.failCmd = "";
+    state.spawns = [];
+    state.dockerCfg = "";
   });
 
   it("runPollOnce lists services, resolves SHA, enqueues", async () => {
@@ -240,5 +246,72 @@ ports:
       return { rows: [] };
     }) as unknown as QueryFn;
     await expect(runDrainOnce(query, logger)).resolves.toBeUndefined();
+  });
+
+  it("Dockerfile mode passes a per-build DOCKER_CONFIG with dependsOn pull scope to docker build", async () => {
+    state.yaml = `
+version: 1
+dependsOn:
+  - base-app
+dockerfile:
+  path: Dockerfile
+  args:
+    APP_IMAGE: "{base_app_image_ref}"
+ports:
+  - port: 9000
+`;
+    const dsha = "c".repeat(40);
+    const query = vi.fn(async (sql: string) => {
+      const s = String(sql);
+      if (/FROM monitored_services/i.test(s) && /SELECT/i.test(s)) {
+        return { rows: [{ id: "svc-1", tenant_id: "t-1", name: "svc-1", git_repo_url: "https://e/r.git", branch: "main", ssh_key_id: null, pipeline_name: null, kind: "deployable", depends_on: ["base-app"] }] };
+      }
+      if (/FROM ssh_keys/i.test(s)) return { rows: [] };
+      if (/UPDATE service_builds SET status = 'running'|FOR UPDATE SKIP LOCKED/i.test(s)) {
+        return { rows: [{ id: "bld-1", tenant_id: "t-1", service_id: "svc-1", git_sha: SHA, branch: "main", status: "running", log: "", created_at: new Date().toISOString() }] };
+      }
+      if (/JOIN monitored_services s ON s\.id = b\.service_id/i.test(s)) {
+        return { rows: [{ id: "dep-bld", service_id: "base-app-id", git_sha: dsha, image_ref: `panel.dev.kaiad.dev/base-app:${dsha}` }] };
+      }
+      return { rows: [] };
+    }) as unknown as QueryFn;
+    await runDrainOnce(query, logger);
+
+    const build = state.spawns.find((c) => c.cmd === "docker" && c.args[0] === "build");
+    expect(build, "docker build was spawned").toBeDefined();
+    expect(build!.args).toContain(`APP_IMAGE=panel.dev.kaiad.dev/base-app:${dsha}`);
+    expect(build!.env?.DOCKER_CONFIG).toMatch(/docker-build-config$/);
+    const push = state.spawns.find((c) => c.cmd === "crane" && c.args.includes("push"));
+    expect(push!.env?.DOCKER_CONFIG).toMatch(/docker-config$/);
+
+    const logged = (query as any).mock.calls.map((c: unknown[]) => JSON.stringify(c)).join("\n");
+    expect(logged).toContain("registry pull scope: svc-1, base-app");
+  });
+
+  it("per-build docker config inherits upstream auths and overrides the kaiad entry", async () => {
+    state.yaml = DOCKERFILE_YAML;
+    state.dockerCfg = JSON.stringify({
+      auths: { "ghcr.io": { auth: "Z2g=" }, "panel.dev.kaiad.dev": { auth: "bWFudWFs" } }
+    });
+    const fsMod = await import("node:fs");
+    await runDrainOnce(makeQuery(), logger);
+    const writes = (fsMod.promises.writeFile as any).mock.calls.filter((c: unknown[]) =>
+      String(c[0]).endsWith("docker-build-config/config.json")
+    );
+    expect(writes).toHaveLength(1);
+    const cfg = JSON.parse(writes[0][1]);
+    expect(cfg.auths["ghcr.io"]).toEqual({ auth: "Z2g=" });
+    expect(cfg.auths["panel.dev.kaiad.dev"]).not.toEqual({ auth: "bWFudWFs" });
+  });
+
+  it("fails the build when ~/.docker/config.json is not valid JSON", async () => {
+    state.yaml = DOCKERFILE_YAML;
+    state.dockerCfg = "{not json";
+    await runDrainOnce(makeQuery(), logger);
+    expect(logger.error).toHaveBeenCalledWith(
+      "build crashed",
+      expect.objectContaining({ err: expect.stringContaining("config.json") })
+    );
+    expect(state.spawns.find((c) => c.cmd === "docker" && c.args[0] === "build")).toBeUndefined();
   });
 });

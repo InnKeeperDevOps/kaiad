@@ -271,6 +271,67 @@ function kaiadRepoFromImageRef(imageRef: string): string | null {
   return trim(REGISTRY_HOST, imageRef) ?? trim(REGISTRY_INTERNAL, imageRef);
 }
 
+/**
+ * Write a per-build docker config.json into `dir` and return a process
+ * env with DOCKER_CONFIG pointing at it. Starts from the container-wide
+ * ~/.docker/config.json (operator-managed creds for upstream registries,
+ * e.g. `docker login ghcr.io` for private base images) and OVERRIDES the
+ * kaiad-registry entries with a JWT minted for exactly `access` — an
+ * inherited kaiad entry (e.g. a manual `docker login`) would carry the
+ * wrong scope.
+ *
+ * Works for crane AND the docker CLI: `docker run` forwards it as
+ * X-Registry-Auth, `docker build` as X-Registry-Config (legacy builder)
+ * or via the BuildKit session auth provider, all of which honour
+ * `registrytoken` as a bearer token.
+ */
+async function writeKaiadDockerConfig(
+  dir: string,
+  access: RegistryAccess[]
+): Promise<NodeJS.ProcessEnv> {
+  await fs.mkdir(dir, { recursive: true });
+  const containerCfgPath = path.join(process.env.HOME ?? "/", ".docker", "config.json");
+  let inheritedAuths: Record<string, unknown> = {};
+  let raw = "";
+  try {
+    raw = await fs.readFile(containerCfgPath, "utf8");
+  } catch (err) {
+    // No container-wide docker config — fine, just use our own.
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.error("[builds][ERR] read docker config failed", { path: containerCfgPath, err });
+      throw new Error(`read ${containerCfgPath}: ${(err as Error).message}`, { cause: err });
+    }
+  }
+  if (raw.trim().length > 0) {
+    let parsed: { auths?: Record<string, unknown> };
+    try {
+      parsed = JSON.parse(raw) as { auths?: Record<string, unknown> };
+    } catch (err) {
+      console.error("[builds][ERR] docker config is not valid JSON", { path: containerCfgPath, err });
+      throw new Error(`parse ${containerCfgPath}: ${(err as Error).message}`, { cause: err });
+    }
+    if (parsed.auths && typeof parsed.auths === "object") {
+      inheritedAuths = { ...parsed.auths };
+    }
+  }
+  const kaiadAuthEntry = buildKaiadRegistryAuthEntryWithAccess(access);
+  await fs.writeFile(
+    path.join(dir, "config.json"),
+    JSON.stringify(
+      {
+        auths: {
+          ...inheritedAuths,
+          [REGISTRY_INTERNAL]: kaiadAuthEntry,
+          [REGISTRY_HOST]: kaiadAuthEntry
+        }
+      },
+      null,
+      2
+    )
+  );
+  return { ...process.env, DOCKER_CONFIG: dir };
+}
+
 export type BuildLoopHandles = {
   pollTimer: NodeJS.Timeout;
   drainTimer: NodeJS.Timeout;
@@ -584,6 +645,9 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
     //
     // Substitution always runs — kaiad.yaml may reference
     // {kaiad_registry_host} even without dependsOn.
+    // Image refs of the resolved deps — Dockerfile mode grants the
+    // `docker build` pull access to exactly these kaiad repos.
+    let depImageRefs: string[] = [];
     {
       try {
         const { vars, resolved } = await resolveDeps(query, svc.tenantId, pipeline, {
@@ -599,6 +663,7 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
               "\n"
           );
         }
+        depImageRefs = resolved.flatMap((r) => (r.imageRef ? [r.imageRef] : []));
         const sub = substitutePipeline(pipeline, vars);
         if (sub.missing.length > 0) {
           const reason =
@@ -639,7 +704,8 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
         ws,
         pipeline,
         serviceName: svc.name,
-        sha: build.gitSha
+        sha: build.gitSha,
+        pullImageRefs: depImageRefs
       });
       if (!built.ok) {
         await failBuild(query, build, built.reason, logger);
@@ -995,7 +1061,6 @@ async function buildRuntimeImage(params: {
   //    only when the worker can't read the registry-auth keypair (i.e.
   //    standalone worker, not embedded in a kaiad container).
   const dockerCfgDir = path.join(rootDir, "docker-config");
-  await fs.mkdir(dockerCfgDir, { recursive: true });
   // Push-scoped repos (the service image we're producing).
   const pushRepos = [serviceName];
   // Pull-scoped repos (everything crane needs to fetch). Default
@@ -1014,42 +1079,7 @@ async function buildRuntimeImage(params: {
     name,
     actions: ["pull"]
   }));
-  const kaiadAuthEntry = buildKaiadRegistryAuthEntryWithAccess([
-    ...pushAccess,
-    ...pullAccess
-  ]);
-
-  let inheritedAuths: Record<string, unknown> = {};
-  try {
-    const home = process.env.HOME ?? "/";
-    const containerCfgPath = path.join(home, ".docker", "config.json");
-    const raw = await fs.readFile(containerCfgPath, "utf8");
-    const parsed = JSON.parse(raw) as { auths?: Record<string, unknown> };
-    if (parsed.auths && typeof parsed.auths === "object") {
-      inheritedAuths = { ...parsed.auths };
-    }
-  } catch {
-    // No container-wide docker config — fine, just use our own.
-  }
-
-  await fs.writeFile(
-    path.join(dockerCfgDir, "config.json"),
-    JSON.stringify(
-      {
-        auths: {
-          ...inheritedAuths,
-          // Our entry always wins for the kaiad registry (the inherited
-          // registrytoken from a previous build would have the wrong
-          // repo scope).
-          [REGISTRY_INTERNAL]: kaiadAuthEntry,
-          [REGISTRY_HOST]: kaiadAuthEntry
-        }
-      },
-      null,
-      2
-    )
-  );
-  const craneEnv = { ...process.env, DOCKER_CONFIG: dockerCfgDir };
+  const craneEnv = await writeKaiadDockerConfig(dockerCfgDir, [...pushAccess, ...pullAccess]);
 
   const internalRef = `${REGISTRY_INTERNAL}/${serviceName}:${sha}`;
   const internalLatestRef = `${REGISTRY_INTERNAL}/${serviceName}:latest`;
@@ -1428,8 +1458,14 @@ async function buildViaDockerfile(params: {
   pipeline: PipelineDefinition;
   serviceName: string;
   sha: string;
+  /**
+   * Image refs of resolved dependsOn deps. Their kaiad-hosted repos get
+   * pull scope on the `docker build` token so `FROM ${DEP_IMAGE}` (via
+   * a `{dep_image_ref}` build-arg) can pull a private tenant image.
+   */
+  pullImageRefs?: string[];
 }): Promise<{ ok: true; imageRef: string } | { ok: false; reason: string }> {
-  const { query, buildId, rootDir, ws, pipeline, serviceName, sha } = params;
+  const { query, buildId, rootDir, ws, pipeline, serviceName, sha, pullImageRefs = [] } = params;
   const df = pipeline.dockerfile;
   if (!df) {
     return { ok: false, reason: "buildViaDockerfile called without pipeline.dockerfile" };
@@ -1463,7 +1499,24 @@ async function buildViaDockerfile(params: {
   }
   buildArgs.push(ctxPath);
 
+  // Per-build DOCKER_CONFIG for `docker build`: pull scope on this
+  // service's own repo plus every kaiad-hosted dependsOn image, so a
+  // Dockerfile whose base is a private tenant image can pull it. Only
+  // dependsOn repos are granted — deps are resolved within the tenant,
+  // so a Dockerfile can't name its way into another tenant's repo.
+  const buildPullRepos = [serviceName];
+  for (const ref of pullImageRefs) {
+    const repo = kaiadRepoFromImageRef(ref);
+    if (repo && !buildPullRepos.includes(repo)) buildPullRepos.push(repo);
+  }
+  const buildEnv = await writeKaiadDockerConfig(
+    path.join(rootDir, "docker-build-config"),
+    buildPullRepos.map((name) => ({ type: "repository", name, actions: ["pull"] }))
+  );
+  await appendBuildLog(query, buildId, `registry pull scope: ${buildPullRepos.join(", ")}\n`);
+
   const buildRes = await runProcStreaming("docker", buildArgs, {
+    env: buildEnv,
     onChunk: (chunk) => appendBuildLog(query, buildId, chunk),
     timeoutMs: BUILD_TIMEOUT_MS
   });
@@ -1479,41 +1532,12 @@ async function buildViaDockerfile(params: {
   // So we route the dockerfile-mode image through crane via
   // `docker save | crane push -`.
   //
-  // The DOCKER_CONFIG dir is a private overlay: it inherits the
-  // worker's existing config (so private upstream registries the
-  // user `docker login`ed to still resolve) but overrides the kaiad
-  // registry entries with an in-process-minted JWT scoped to this
-  // service's repo. See buildKaiadRegistryAuthEntry.
-  const dockerCfgDir = path.join(rootDir, "docker-config");
-  await fs.mkdir(dockerCfgDir, { recursive: true });
-  const kaiadAuthEntry = buildKaiadRegistryAuthEntry([serviceName]);
-  let inheritedAuths: Record<string, unknown> = {};
-  try {
-    const home = process.env.HOME ?? "/";
-    const containerCfgPath = path.join(home, ".docker", "config.json");
-    const raw = await fs.readFile(containerCfgPath, "utf8");
-    const parsed = JSON.parse(raw) as { auths?: Record<string, unknown> };
-    if (parsed.auths && typeof parsed.auths === "object") {
-      inheritedAuths = { ...parsed.auths };
-    }
-  } catch {
-    // No container-wide docker config — fine, just use our own.
-  }
-  await fs.writeFile(
-    path.join(dockerCfgDir, "config.json"),
-    JSON.stringify(
-      {
-        auths: {
-          ...inheritedAuths,
-          [REGISTRY_INTERNAL]: kaiadAuthEntry,
-          [REGISTRY_HOST]: kaiadAuthEntry
-        }
-      },
-      null,
-      2
-    )
-  );
-  const craneEnv = { ...process.env, DOCKER_CONFIG: dockerCfgDir };
+  // Separate config minted AFTER the build: push scope on this
+  // service's repo, and a fresh token — a long build can outlive the
+  // build token's TTL.
+  const craneEnv = await writeKaiadDockerConfig(path.join(rootDir, "docker-config"), [
+    { type: "repository", name: serviceName, actions: ["push", "pull"] }
+  ]);
 
   // 1) Export the built image as an OCI tarball.
   const imageTar = path.join(rootDir, "image.tar");

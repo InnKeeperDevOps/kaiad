@@ -403,7 +403,7 @@ paths:
   /api/v1/admin/api-credentials:
     post:
       operationId: createApiCredential
-      description: Mint a long-lived bearer credential for a machine integration; owner/admin only. Returns the plaintext token exactly once.
+      description: Mint a long-lived bearer credential for a machine integration with explicit scopes and optional fine-grained permissions; owner/admin only. Returns the plaintext token exactly once.
       responses:
         '200':
           description: Credential created
@@ -413,6 +413,8 @@ paths:
           description: Unauthorized
         '403':
           description: Owner or admin session required (api-credential bearers cannot mint other credentials)
+        '422':
+          description: Unknown permission(s) in the permissions array
     get:
       operationId: listApiCredentials
       description: List API credentials for the tenant; never returns the plaintext token.

@@ -40,6 +40,28 @@ If you need an action a machine integration can't perform today, open an
 issue rather than minting a session and storing it as a service account
 — sessions are not designed for long-lived storage and they expire.
 
+## Fine-grained permissions
+
+Scopes control which *endpoints* a credential may reach; **permissions**
+control what it may do once inside. Each credential can optionally carry
+a set of fine-grained permissions from the shared platform model — the
+same `<resource>:<action>` strings groups use (`services:write`,
+`sshkeys:read`, `registry:admin`, …). Every
+[MCP tool]({% link admin/mcp.md %}) checks its matching permission
+before running.
+
+Pick permissions in **Settings → API Credentials** (the *Permissions*
+checklist) or pass a `permissions` array when minting via the API.
+`GET /api/v1/permissions` lists every valid value; unknown values are
+rejected with `422 INVALID_PERMISSION`.
+
+**Legacy fallback:** a credential with *no* permissions keeps the
+behaviour it always had — operator-role read access, widened by the
+historical `mcp.write` tool set (`services:write`, `agents:manage`,
+`registry:admin`, `incidents:write`, `enrollment:manage`) when it holds
+that scope. Existing credentials are unaffected by the permission
+model.
+
 ## Mint a credential
 
 Owner or admin session required.
@@ -56,12 +78,21 @@ with its status, creation time, and last-used time, each with a
 ### With the API
 
 ```bash
+```bash
 curl -fsS -X POST $KAIAD_BASE_URL/api/v1/admin/api-credentials \
   -H "Authorization: Bearer $YOUR_OWNER_SESSION_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"k8s-operator","scopes":["enrollment-tokens.create"]}'
 ```
 
+Optionally attach fine-grained permissions at mint time:
+
+```bash
+curl -fsS -X POST $KAIAD_BASE_URL/api/v1/admin/api-credentials \
+  -H "Authorization: Bearer $YOUR_OWNER_SESSION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"assistant","scopes":["mcp.read","mcp.write"],"permissions":["services:read","services:write","builds:trigger"]}'
+```
 Sample response:
 
 ```json
@@ -70,6 +101,7 @@ Sample response:
   "tenantId": "t-...",
   "name": "k8s-operator",
   "scopes": ["enrollment-tokens.create"],
+  "permissions": [],
   "createdAt": "2026-05-08T06:09:55Z",
   "createdBy": "u-...",
   "lastUsedAt": null,
@@ -189,8 +221,9 @@ each one separately.
 
 The `role` of an authenticated api-credential session is pinned to
 `operator`. This is *not* an administrative role and won't satisfy the
-`role === "owner" | "admin"` checks on admin endpoints. Scopes are the
-only authorization signal that flows from the credential.
+`role === "owner" | "admin"` checks on admin endpoints. Authorization
+flows from the credential's scopes plus its fine-grained permissions
+(or the legacy scope-derived fallback when none are set).
 
 ## See also
 

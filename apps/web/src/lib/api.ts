@@ -110,6 +110,8 @@ export type ApiCredential = {
   tenantId: string;
   name: string;
   scopes: string[];
+  /** Fine-grained permissions; empty = legacy scope-derived access. */
+  permissions: string[];
   createdAt: string;
   createdBy: string | null;
   lastUsedAt: string | null;
@@ -935,7 +937,7 @@ export const api = {
   /** API credentials — long-lived bearer tokens (admin only). */
   listApiCredentials: () =>
     apiFetch<{ credentials: ApiCredential[] }>("/api/v1/admin/api-credentials"),
-  createApiCredential: (data: { name: string; scopes: ApiCredentialScope[] }) =>
+  createApiCredential: (data: { name: string; scopes: ApiCredentialScope[]; permissions?: string[] }) =>
     apiFetch<ApiCredential & { token: string }>("/api/v1/admin/api-credentials", {
       method: "POST",
       body: JSON.stringify(data)

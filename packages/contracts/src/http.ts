@@ -438,6 +438,10 @@ export const apiCredentialMetadataSchema = z.object({
   tenantId: z.string(),
   name: z.string(),
   scopes: z.array(z.string()),
+  // Fine-grained permissions (see PERMISSIONS in ./permissions.js).
+  // Empty = legacy scope-derived access (operator-role reads, plus the
+  // historical mcp.write tool set when that scope is held).
+  permissions: z.array(z.string()).default([]),
   createdAt: z.string().datetime(),
   createdBy: z.string().nullable(),
   lastUsedAt: z.string().datetime().nullable(),
@@ -446,7 +450,9 @@ export const apiCredentialMetadataSchema = z.object({
 
 export const createApiCredentialRequestSchema = z.object({
   name: z.string().min(1),
-  scopes: z.array(apiCredentialScopeSchema).min(1)
+  scopes: z.array(apiCredentialScopeSchema).min(1),
+  // Validated against PERMISSIONS ∪ "*" at the route (mirrors group routes).
+  permissions: z.array(z.string()).optional()
 });
 
 export const createApiCredentialResponseSchema = apiCredentialMetadataSchema.extend({

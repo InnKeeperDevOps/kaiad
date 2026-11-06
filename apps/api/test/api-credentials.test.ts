@@ -80,6 +80,37 @@ describe("admin api-credentials CRUD", () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it("creates a credential with fine-grained permissions", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/api-credentials",
+      headers: { authorization: ownerAuth() },
+      payload: { name: "granular", scopes: ["mcp.read"], permissions: ["services:read", "agents:read"] }
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { permissions: string[] };
+    expect(body.permissions).toEqual(["services:read", "agents:read"]);
+
+    const list = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/api-credentials",
+      headers: { authorization: ownerAuth() }
+    });
+    const listBody = list.json() as { credentials: Array<{ permissions: string[] }> };
+    expect(listBody.credentials[0].permissions).toEqual(["services:read", "agents:read"]);
+  });
+
+  it("rejects unknown permissions with 422", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/api-credentials",
+      headers: { authorization: ownerAuth() },
+      payload: { name: "bad", scopes: ["mcp.read"], permissions: ["nope:invalid"] }
+    });
+    expect(res.statusCode).toBe(422);
+    expect((res.json() as { code: string }).code).toBe("INVALID_PERMISSION");
+  });
+
   it("revokes a credential and removes it from acceptance", async () => {
     const created = await app.inject({
       method: "POST",

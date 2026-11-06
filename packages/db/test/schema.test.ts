@@ -28,6 +28,9 @@ describe("db schema", () => {
       expect(coreSchemaSql).toMatch(/api_credentials[\s\S]*?scopes text\[\] not null default '\{\}'/);
       expect(coreSchemaSql).toMatch(/api_credentials[\s\S]*?last_used_at timestamptz/);
       expect(coreSchemaSql).toMatch(/api_credentials[\s\S]*?revoked_at timestamptz/);
+      expect(coreSchemaSql).toContain(
+        "alter table api_credentials add column if not exists permissions text[] not null default '{}'"
+      );
       expect(coreSchemaSql).toContain("api_credentials_tenant_id_idx");
     });
 

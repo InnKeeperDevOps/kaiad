@@ -227,6 +227,9 @@ const CLUSTER_ROLE_RULES = `  - apiGroups: ["kaiad.dev"]
   - apiGroups: ["batch"]
     resources: ["cronjobs"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["metallb.io"]
+    resources: ["ipaddresspools"]
+    verbs: ["get", "list"]
 `;
 
 const DEFAULT_OPERATOR_NAMESPACE = "kaiad-system";

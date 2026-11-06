@@ -192,6 +192,17 @@ import {
 
 const startedAt = Date.now();
 
+// Permissions the pre-fine-grained MCP write tools required. Legacy API
+// credentials (no explicit permissions) holding `mcp.write` are granted
+// these on top of operator-role perms so their MCP access is unchanged.
+const LEGACY_MCP_WRITE_PERMISSIONS: readonly string[] = [
+  "services:write",
+  "agents:manage",
+  "registry:admin",
+  "incidents:write",
+  "enrollment:manage"
+];
+
 async function buildMeResponse(
   store: AuthStore,
   session: SessionInfo,
@@ -2257,10 +2268,15 @@ export function buildServer(opts: BuildServerOptions = {}) {
     if (!parsed.success) {
       return reply.status(400).send(apiErrorSchema.parse({ code: "BAD_REQUEST", message: parsed.error.issues[0]?.message ?? "Invalid request", correlationId: (req as any).correlationId }));
     }
+    const badPerms = (parsed.data.permissions ?? []).filter((p) => !VALID_PERMS.has(p));
+    if (badPerms.length) {
+      return reply.status(422).send(apiErrorSchema.parse({ code: "INVALID_PERMISSION", message: `Unknown permission(s): ${badPerms.join(", ")}`, correlationId: (req as any).correlationId }));
+    }
     const { metadata, token } = await createApiCredentialForTenant({
       tenantId: session.tenantId,
       name: parsed.data.name,
       scopes: parsed.data.scopes,
+      permissions: parsed.data.permissions ?? [],
       createdBy: session.id
     });
     return createApiCredentialResponseSchema.parse({ ...metadata, token });
@@ -3532,11 +3548,14 @@ export function buildServer(opts: BuildServerOptions = {}) {
     }
   }
 
-  // Effective permissions for a resolved session. API credentials get
-  // their legacy operator-role permissions (plus owner-equivalence when
-  // they hold all scopes); user sessions get the union of their groups.
-  // Falls back to the role's built-in permission set when the DB is
-  // unavailable so a transient DB blip can't lock everyone out.
+  // Effective permissions for a resolved session. API credentials use
+  // their explicit fine-grained permissions when set (populated by
+  // resolveSession); legacy credentials (no permissions) fall back to
+  // operator-role permissions, widened by the historical mcp.write tool
+  // set so existing credentials keep exactly the MCP access they had.
+  // User sessions get the union of their groups. Falls back to the
+  // role's built-in permission set when the DB is unavailable so a
+  // transient DB blip can't lock everyone out.
   async function sessionPermissions(session: SessionInfo): Promise<string[]> {
     if (session.permissions) return session.permissions;
     if (session.role === "owner" || session.role === "admin") {
@@ -3544,7 +3563,11 @@ export function buildServer(opts: BuildServerOptions = {}) {
       return session.permissions;
     }
     if (session.kind === "apiCredential") {
-      session.permissions = permissionsForRole(session.role);
+      const legacy = new Set(permissionsForRole(session.role));
+      if (session.scopes?.includes("mcp.write")) {
+        for (const p of LEGACY_MCP_WRITE_PERMISSIONS) legacy.add(p);
+      }
+      session.permissions = [...legacy];
       return session.permissions;
     }
     try {
@@ -5107,7 +5130,8 @@ export function buildServer(opts: BuildServerOptions = {}) {
   });
 
   // Hosted Model Context Protocol endpoint (POST /mcp). Wraps the same domain
-  // logic the REST routes use; gated by the mcp.read / mcp.write scopes.
+  // logic the REST routes use; entry gated by the mcp.read / mcp.write scopes,
+  // individual tools by fine-grained permissions.
   registerMcpRoute(app, {
     authStore,
     domainStore,
@@ -5117,6 +5141,10 @@ export function buildServer(opts: BuildServerOptions = {}) {
     createEnrollmentToken: createEnrollmentTokenForTenant,
     getConnectedAgentIds: () => realtimeManager.getConnectedAgentIds(),
     forcedPublicRepos: FORCED_PUBLIC_REPOS,
+    getSessionPermissions: sessionPermissions,
+    deployBuildToAgents,
+    reconcileAgentDeploys,
+    listErrorGroups: (tid: string) => errorGroups.listForTenant(tid),
     logger: app.log
   });
 

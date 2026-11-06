@@ -209,7 +209,11 @@ export async function resolveSession(
       role: "operator",
       tenantId: cred.tenantId,
       kind: "apiCredential",
-      scopes: cred.scopes
+      scopes: cred.scopes,
+      // Explicit fine-grained permissions, when the credential has any.
+      // Left undefined for legacy credentials so the API layer applies
+      // its scope-derived fallback.
+      permissions: cred.permissions?.length ? cred.permissions : undefined
     };
   }
 

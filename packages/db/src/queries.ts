@@ -927,6 +927,7 @@ export interface ApiCredentialRow {
   name: string;
   tokenHash: string;
   scopes: string[];
+  permissions: string[];
   createdAt: string;
   createdBy: string | null;
   lastUsedAt: string | null;
@@ -940,6 +941,7 @@ function mapApiCredential(r: Record<string, unknown>): ApiCredentialRow {
     name: r.name as string,
     tokenHash: r.token_hash as string,
     scopes: Array.isArray(r.scopes) ? (r.scopes as string[]) : [],
+    permissions: Array.isArray(r.permissions) ? (r.permissions as string[]) : [],
     createdAt: (r.created_at as Date | string).toString(),
     createdBy: (r.created_by as string | null) ?? null,
     lastUsedAt: r.last_used_at == null ? null : (r.last_used_at as Date | string).toString(),
@@ -949,14 +951,14 @@ function mapApiCredential(r: Record<string, unknown>): ApiCredentialRow {
 
 export async function createApiCredential(
   query: QueryFn,
-  data: { tenantId: string; name: string; tokenHash: string; scopes: string[]; createdBy?: string | null }
+  data: { tenantId: string; name: string; tokenHash: string; scopes: string[]; permissions?: string[]; createdBy?: string | null }
 ): Promise<ApiCredentialRow> {
   const id = `apicred-${crypto.randomUUID()}`;
   const { rows } = await query(
-    `INSERT INTO api_credentials (id, tenant_id, name, token_hash, scopes, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO api_credentials (id, tenant_id, name, token_hash, scopes, permissions, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING *`,
-    [id, data.tenantId, data.name, data.tokenHash, data.scopes, data.createdBy ?? null]
+    [id, data.tenantId, data.name, data.tokenHash, data.scopes, data.permissions ?? [], data.createdBy ?? null]
   );
   return mapApiCredential(rows[0]);
 }

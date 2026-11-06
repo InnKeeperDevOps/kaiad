@@ -25,6 +25,13 @@ const SCOPES: { value: ApiCredentialScope; label: string }[] = [
   }
 ];
 
+// Fine-grained permissions selectable per credential, loaded from the API
+// so the picker stays in sync with the platform permission model. Leaving
+// the selection empty keeps legacy scope-derived access (operator-level
+// reads plus the historical mcp.write tool set).
+const allPermissions = ref<string[]>([]);
+const selectedPermissions = ref<string[]>([]);
+
 const credentials = ref<ApiCredential[]>([]);
 const loading = ref(true);
 const error = ref<string | null>(null);
@@ -49,6 +56,19 @@ async function load(): Promise<void> {
 }
 onMounted(load);
 
+onMounted(async () => {
+  try {
+    allPermissions.value = (await api.listPermissions()).permissions;
+  } catch {
+    allPermissions.value = [];
+  }
+});
+
+function togglePermission(p: string): void {
+  selectedPermissions.value = selectedPermissions.value.includes(p)
+    ? selectedPermissions.value.filter((x) => x !== p)
+    : [...selectedPermissions.value, p];
+}
 function toggleScope(s: ApiCredentialScope): void {
   selectedScopes.value = selectedScopes.value.includes(s)
     ? selectedScopes.value.filter((x) => x !== s)
@@ -71,12 +91,14 @@ async function handleCreate(): Promise<void> {
   try {
     const created = await api.createApiCredential({
       name: name.value.trim(),
-      scopes: selectedScopes.value
+      scopes: selectedScopes.value,
+      permissions: selectedPermissions.value
     });
     const { token, ...metadata } = created;
     credentials.value = [metadata, ...credentials.value];
     newToken.value = token;
     name.value = "";
+    selectedPermissions.value = [];
   } catch (e) {
     error.value = (e as Error).message;
   } finally {
@@ -213,6 +235,43 @@ const tdStyle: CSSProperties = { padding: "0.4rem", fontSize: "0.82rem", vertica
           {{ s.label }}
         </label>
       </fieldset>
+      <fieldset
+        v-if="allPermissions.length"
+        :style="{
+          border: '1px solid var(--color-border)',
+          borderRadius: '6px',
+          padding: '0.3rem 0.6rem 0.5rem',
+          margin: 0,
+          maxHeight: '180px',
+          overflowY: 'auto'
+        }"
+      >
+        <legend :style="{ fontSize: '0.75rem', color: 'var(--color-text-secondary)', padding: '0 0.3rem' }">
+          Permissions (optional)
+        </legend>
+        <div :style="{ fontSize: '0.72rem', color: 'var(--color-text-secondary)', margin: '0 0 0.25rem' }">
+          Fine-grained permissions checked per MCP tool / API action. Leave empty for legacy operator-level access.
+        </div>
+        <label
+          v-for="p in allPermissions"
+          :key="p"
+          :style="{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.4rem',
+            fontSize: '0.78rem',
+            margin: '0.15rem 0',
+            fontFamily: 'ui-monospace, monospace'
+          }"
+        >
+          <input
+            type="checkbox"
+            :checked="selectedPermissions.includes(p)"
+            @change="togglePermission(p)"
+          />
+          {{ p }}
+        </label>
+      </fieldset>
       <button :disabled="creating" :style="primaryBtn(creating)" @click="handleCreate">
         {{ creating ? "Creating…" : "Create credential" }}
       </button>
@@ -268,7 +327,7 @@ const tdStyle: CSSProperties = { padding: "0.4rem", fontSize: "0.82rem", vertica
     <table v-else :style="{ width: '100%', borderCollapse: 'collapse', marginTop: '0.85rem' }">
       <thead>
         <tr>
-          <th v-for="h in ['Name', 'Scopes', 'Status', 'Created', 'Last used', '']" :key="h" :style="thStyle">
+          <th v-for="h in ['Name', 'Scopes', 'Permissions', 'Status', 'Created', 'Last used', '']" :key="h" :style="thStyle">
             {{ h }}
           </th>
         </tr>
@@ -278,6 +337,9 @@ const tdStyle: CSSProperties = { padding: "0.4rem", fontSize: "0.82rem", vertica
           <td :style="tdStyle">{{ c.name }}</td>
           <td :style="{ ...tdStyle, fontFamily: 'ui-monospace, monospace', fontSize: '0.76rem' }">
             {{ c.scopes.join(", ") }}
+          </td>
+          <td :style="{ ...tdStyle, fontFamily: 'ui-monospace, monospace', fontSize: '0.76rem' }">
+            {{ c.permissions?.length ? c.permissions.join(", ") : "legacy (scope-derived)" }}
           </td>
           <td :style="tdStyle">
             <span :style="{ color: c.revokedAt ? 'var(--color-danger)' : 'var(--color-success)' }">

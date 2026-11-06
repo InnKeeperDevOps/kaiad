@@ -7,6 +7,8 @@ export type ApiCredentialRow = {
   name: string;
   tokenHash: string;
   scopes: string[];
+  /** Fine-grained permissions (see @sm/contracts PERMISSIONS). Empty = legacy scope-derived access. */
+  permissions: string[];
   createdAt: Date;
   createdBy: string | null;
   lastUsedAt: Date | null;
@@ -18,6 +20,7 @@ export type ApiCredentialMetadata = {
   tenantId: string;
   name: string;
   scopes: string[];
+  permissions: string[];
   createdAt: string;
   createdBy: string | null;
   lastUsedAt: string | null;
@@ -28,6 +31,7 @@ export type CreateApiCredentialInput = {
   tenantId: string;
   name: string;
   scopes: string[];
+  permissions?: string[];
   createdBy?: string | null;
 };
 
@@ -59,6 +63,7 @@ export function toApiCredentialMetadata(row: ApiCredentialRow): ApiCredentialMet
     tenantId: row.tenantId,
     name: row.name,
     scopes: row.scopes,
+    permissions: row.permissions,
     createdAt: row.createdAt.toISOString(),
     createdBy: row.createdBy,
     lastUsedAt: row.lastUsedAt ? row.lastUsedAt.toISOString() : null,
@@ -78,6 +83,7 @@ function createInMemoryStore(): ApiCredentialStore {
         tokenHash,
         scopes: [...input.scopes],
         createdAt: new Date(),
+        permissions: [...(input.permissions ?? [])],
         createdBy: input.createdBy ?? null,
         lastUsedAt: null,
         revokedAt: null
@@ -139,6 +145,7 @@ async function createPostgresStore(): Promise<ApiCredentialStore | null> {
       name: String(r.name),
       tokenHash: String(r.token_hash),
       scopes: Array.isArray(r.scopes) ? (r.scopes as string[]) : [],
+      permissions: Array.isArray(r.permissions) ? (r.permissions as string[]) : [],
       createdAt: new Date(String(r.created_at)),
       createdBy: r.created_by == null ? null : String(r.created_by),
       lastUsedAt: r.last_used_at == null ? null : new Date(String(r.last_used_at)),
@@ -152,10 +159,10 @@ async function createPostgresStore(): Promise<ApiCredentialStore | null> {
       const tokenHash = hashToken(plaintext);
       const id = `apicred-${crypto.randomUUID()}`;
       const result = await pool.query(
-        `insert into api_credentials (id, tenant_id, name, token_hash, scopes, created_by)
-         values ($1, $2, $3, $4, $5, $6)
+        `insert into api_credentials (id, tenant_id, name, token_hash, scopes, permissions, created_by)
+         values ($1, $2, $3, $4, $5, $6, $7)
          returning *`,
-        [id, input.tenantId, input.name, tokenHash, input.scopes, input.createdBy ?? null]
+        [id, input.tenantId, input.name, tokenHash, input.scopes, input.permissions ?? [], input.createdBy ?? null]
       );
       const row = rowFrom(result.rows[0] as Record<string, unknown>);
       return { ...row, token: plaintext };

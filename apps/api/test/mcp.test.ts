@@ -48,12 +48,13 @@ async function connect(token?: string): Promise<Client> {
 }
 
 /** Mint an API credential with the given scopes via the admin REST endpoint. */
-async function createCredential(scopes: string[]): Promise<string> {
+/** Mint an API credential (scopes + optional fine-grained permissions) via the admin REST endpoint. */
+async function createCredential(scopes: string[], permissions: string[] = []): Promise<string> {
   const res = await app.inject({
     method: "POST",
     url: "/api/v1/admin/api-credentials",
     headers: { authorization: "Bearer dev-token" },
-    payload: { name: `mcp-${scopes.join("-") || "none"}`, scopes }
+    payload: { name: `mcp-${scopes.join("-") || "none"}-${permissions.join("-") || "legacy"}`, scopes, permissions }
   });
   expect(res.statusCode).toBeLessThan(300);
   return (res.json() as { token: string }).token;
@@ -73,6 +74,11 @@ function parsed(result: object): unknown {
   return JSON.parse(block?.text ?? "null");
 }
 
+/** First text block of a tool result (for error-message assertions). */
+function textOf(result: unknown): string {
+  const r = result as { content?: Array<{ type: string; text?: string }> };
+  return r.content?.find((c) => c.type === "text")?.text ?? "";
+}
 describe("MCP endpoint /mcp", () => {
   it("rejects unauthenticated connections", async () => {
     await expect(connect()).rejects.toThrow();
@@ -93,10 +99,25 @@ describe("MCP endpoint /mcp", () => {
         expect.arrayContaining([
           "list_services", // deployments/services
           "trigger_build", // builds
+          "deploy_build", // deploys
+          "set_pipeline_override", // pipeline (kaiad.yaml) editor
           "list_repositories", // registry
+          "get_registry_retention", // registry retention
           "list_agents", // agents
+          "get_agent_logs", // agent self-logs
+          "deactivate_enrollment_token", // enrollment tokens
+          "list_ssh_keys", // ssh keys
           "get_operator_install_yaml", // operators
-          "list_incidents" // incidents
+          "list_incidents", // incidents
+          "list_error_groups", // error groups
+          "list_load_balancers", // load balancers
+          "get_tenant_settings", // tenant settings
+          "list_users", // users
+          "list_groups", // groups
+          "list_permissions", // permission catalogue
+          "list_api_credentials", // api credentials
+          "set_oauth_provider", // oauth settings
+          "get_github_app_settings" // github app settings
         ])
       );
     } finally {
@@ -165,6 +186,149 @@ describe("MCP endpoint /mcp", () => {
         })
       ) as { name: string };
       expect(created.name).toBe("worker");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("enforces fine-grained permissions on credentials that carry them", async () => {
+    const token = await createCredential(["mcp.read", "mcp.write"], ["services:read"]);
+    const client = await connect(token);
+    try {
+      // Granted permission → read works.
+      const services = parsed(await client.callTool({ name: "list_services", arguments: {} })) as unknown[];
+      expect(Array.isArray(services)).toBe(true);
+
+      // mcp.write scope alone is not enough: services:write is missing.
+      const denied = await client.callTool({
+        name: "create_service",
+        arguments: { name: "blocked", gitRepoUrl: "https://github.com/example/blocked", branch: "main" }
+      });
+      expect(denied.isError).toBe(true);
+      expect(textOf(denied)).toContain("services:write");
+
+      // Ungranted read permission is refused too.
+      const agentsDenied = await client.callTool({ name: "list_agents", arguments: {} });
+      expect(agentsDenied.isError).toBe(true);
+      expect(textOf(agentsDenied)).toContain("agents:read");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("allows writes when the credential holds the matching permission", async () => {
+    const token = await createCredential(["mcp.write"], ["services:read", "services:write"]);
+    const client = await connect(token);
+    try {
+      const created = parsed(
+        await client.callTool({
+          name: "create_service",
+          arguments: { name: "granular", gitRepoUrl: "https://github.com/example/granular", branch: "main" }
+        })
+      ) as { name: string };
+      expect(created.name).toBe("granular");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("refuses sensitive tools for machine API credentials", async () => {
+    // Even a write-scoped legacy credential must never touch users/groups
+    // or other API credentials — mirrors the REST userOnly gates.
+    const token = await createCredential(["mcp.read", "mcp.write"]);
+    const client = await connect(token);
+    try {
+      for (const name of ["list_users", "create_group", "list_api_credentials", "create_api_credential", "set_github_app_settings"]) {
+        const res = await client.callTool({
+          name,
+          arguments:
+            name === "create_group"
+              ? { name: "g", description: "", permissions: [] }
+              : name === "create_api_credential"
+                ? { name: "c", scopes: ["mcp.read"], permissions: [] }
+                : name === "set_github_app_settings"
+                  ? { appId: "1" }
+                  : {}
+        });
+        expect(res.isError, `${name} should be refused for machine credentials`).toBe(true);
+        expect(textOf(res)).toContain("user session");
+      }
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("runs the ssh-key lifecycle for an owner session", async () => {
+    const client = await connect("dev-token");
+    try {
+      const created = parsed(
+        await client.callTool({
+          name: "create_ssh_key",
+          arguments: { name: "deploy-key", type: "local_path", localPath: "/home/kaiad/.ssh/id_ed25519" }
+        })
+      ) as { id: string; name: string };
+      expect(created.name).toBe("deploy-key");
+
+      const listed = parsed(await client.callTool({ name: "list_ssh_keys", arguments: {} })) as {
+        keys: Array<{ id: string }>;
+      };
+      expect(listed.keys.some((k) => k.id === created.id)).toBe(true);
+
+      const deleted = parsed(
+        await client.callTool({ name: "delete_ssh_key", arguments: { id: created.id } })
+      ) as { deleted: boolean };
+      expect(deleted.deleted).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("exposes users/groups and the permission catalogue to owner sessions", async () => {
+    const client = await connect("dev-token");
+    try {
+      const perms = parsed(await client.callTool({ name: "list_permissions", arguments: {} })) as {
+        permissions: string[];
+      };
+      expect(perms.permissions).toContain("services:write");
+
+      // No DATABASE_URL in tests → empty lists, but the tools respond.
+      const users = parsed(await client.callTool({ name: "list_users", arguments: {} })) as { users: unknown[] };
+      expect(Array.isArray(users.users)).toBe(true);
+      const groups = parsed(await client.callTool({ name: "list_groups", arguments: {} })) as { groups: unknown[] };
+      expect(Array.isArray(groups.groups)).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("manages API credentials from an owner session, rejecting bad permissions", async () => {
+    const client = await connect("dev-token");
+    try {
+      const bad = await client.callTool({
+        name: "create_api_credential",
+        arguments: { name: "bad", scopes: ["mcp.read"], permissions: ["not:a-permission"] }
+      });
+      expect(bad.isError).toBe(true);
+      expect(textOf(bad)).toContain("Unknown permission");
+
+      const created = parsed(
+        await client.callTool({
+          name: "create_api_credential",
+          arguments: { name: "via-mcp", scopes: ["mcp.read"], permissions: ["services:read"] }
+        })
+      ) as { id: string; token: string; permissions: string[] };
+      expect(created.token).toBeTruthy();
+      expect(created.permissions).toEqual(["services:read"]);
+
+      const listed = parsed(await client.callTool({ name: "list_api_credentials", arguments: {} })) as {
+        credentials: Array<{ id: string }>;
+      };
+      expect(listed.credentials.some((c) => c.id === created.id)).toBe(true);
+
+      const revoked = parsed(
+        await client.callTool({ name: "revoke_api_credential", arguments: { id: created.id } })
+      ) as { revoked: boolean };
+      expect(revoked.revoked).toBe(true);
     } finally {
       await client.close();
     }

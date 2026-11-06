@@ -421,6 +421,10 @@ create table if not exists api_credentials (
 
 create index if not exists api_credentials_tenant_id_idx on api_credentials(tenant_id);
 
+-- Fine-grained permissions attached to a credential (see the shared
+-- permissions model in @sm/contracts). Empty = legacy scope-derived access.
+alter table api_credentials add column if not exists permissions text[] not null default '{}';
+
 create table if not exists error_events (
   id text primary key,
   tenant_id text not null references tenants(id) on delete cascade,

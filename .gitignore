@@ -17,6 +17,8 @@ test-results/
 blob-report/
 .worktrees/
 .playwright-mcp/
+# Local MCP server config — contains the kaiad MCP bearer token; never commit
+.mcp.json
 
 env/*/data/
 

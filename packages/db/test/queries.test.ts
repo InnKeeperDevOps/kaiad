@@ -617,6 +617,43 @@ describe("api_credentials queries", () => {
     );
   });
 
+  it("createApiCredential persists fine-grained permissions", async () => {
+    const query = mockQuery([
+      {
+        id: "apicred-2",
+        tenant_id: "t1",
+        name: "op",
+        token_hash: "h",
+        scopes: ["mcp.write"],
+        permissions: ["services:read", "services:write"],
+        created_at: new Date().toISOString(),
+        created_by: null,
+        last_used_at: null,
+        revoked_at: null
+      }
+    ]);
+    const row = await createApiCredential(query, {
+      tenantId: "t1",
+      name: "op",
+      tokenHash: "h",
+      scopes: ["mcp.write"],
+      permissions: ["services:read", "services:write"]
+    });
+    expect(row.permissions).toEqual(["services:read", "services:write"]);
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO api_credentials"),
+      expect.arrayContaining([["services:read", "services:write"]])
+    );
+  });
+
+  it("mapApiCredential defaults permissions to [] for legacy rows", async () => {
+    const query = mockQuery([
+      { id: "c9", tenant_id: "t1", name: "legacy", token_hash: "h9", scopes: ["mcp.read"], created_at: "now", created_by: null, last_used_at: null, revoked_at: null }
+    ]);
+    const row = await findApiCredentialByTokenHash(query, "h9");
+    expect(row?.permissions).toEqual([]);
+  });
+
   it("listApiCredentials returns rows ordered by created_at desc", async () => {
     const query = mockQuery([
       { id: "c2", tenant_id: "t1", name: "b", token_hash: "h2", scopes: [], created_at: "2026-05-08", created_by: null, last_used_at: null, revoked_at: null },

@@ -1393,7 +1393,13 @@ export async function listAllServicesForPoller(
       WHERE locked = false`,
     []
   );
-  return rows.map((r) => ({
+  return rows.map(mapBuildableService);
+}
+
+export type BuildableService = Awaited<ReturnType<typeof listAllServicesForPoller>>[number];
+
+function mapBuildableService(r: Record<string, unknown>) {
+  return {
     id: String(r.id),
     tenantId: String(r.tenant_id),
     name: String(r.name),
@@ -1405,7 +1411,26 @@ export async function listAllServicesForPoller(
     kind: r.kind == null ? "deployable" : String(r.kind),
     dependsOn: Array.isArray(r.depends_on) ? (r.depends_on as unknown[]).map((v) => String(v)) : [],
     pipelineOverride: r.pipeline_override == null ? null : String(r.pipeline_override)
-  }));
+  };
+}
+
+/**
+ * The service a claimed build runs against, LOCKED OR NOT. `locked` only
+ * stops the poller (and the dependsOn chain/catch-up) from enqueueing
+ * builds on push; a build someone queued by hand ("manual release
+ * cadence") must still run. Null only when the service no longer exists.
+ */
+export async function getServiceForBuild(
+  query: QueryFn,
+  serviceId: string
+): Promise<BuildableService | null> {
+  const { rows } = await query(
+    `SELECT id, tenant_id, name, git_repo_url, ssh_key_id, branch, pipeline_name, kaiad_yaml_path, kind, depends_on, pipeline_override
+       FROM monitored_services
+      WHERE id = $1`,
+    [serviceId]
+  );
+  return rows.length === 0 ? null : mapBuildableService(rows[0]);
 }
 
 /**

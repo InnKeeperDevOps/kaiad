@@ -126,6 +126,9 @@ function makeDb(services: Svc[]) {
     const s = sql.replace(/\s+/g, " ").trim();
     sqlLog.push(s);
     const p = params as any[];
+    if (/FROM monitored_services WHERE id = \$1/.test(s)) {
+      return { rows: services.filter((x) => x.id === p[0]).map(svcRow) };
+    }
     if (/FROM monitored_services WHERE locked = false/.test(s)) {
       return { rows: services.filter((x) => !x.locked).map(svcRow) };
     }
@@ -323,6 +326,42 @@ describe("dependsOn same-commit", () => {
     });
   });
 
+  describe("locked services", () => {
+    it("a queued build of a LOCKED service still runs (MochiMask: app and worker both locked)", async () => {
+      const db = makeDb([{ ...app(), locked: true }, { ...worker(), locked: true }]);
+      db.addBuild({ service_id: "app", git_sha: X, status: "success" });
+      db.addBuild({ service_id: "worker", git_sha: X, status: "queued", triggered_by: "manual" });
+
+      await runDrainOnce(db.query, logger, db.tx);
+
+      const w = db.buildsOf("worker")[0];
+      expect(w.failure_reason).toBeNull();
+      expect(w.status).toBe("success");
+      const dockerBuild = state.spawns.find((c) => c.cmd === "docker" && c.args[0] === "build");
+      expect(dockerBuild!.args).toContain(`APP_IMAGE=panel.dev.kaiad.dev/mochimask-app:${X}`);
+    });
+
+    it("never chain-builds a LOCKED dependent off its dependency's success", async () => {
+      const db = makeDb([app(), { ...worker(), locked: true }]);
+      db.addBuild({ service_id: "app", git_sha: X, status: "queued" });
+      await runDrainOnce(db.query, logger, db.tx);
+      expect(db.buildsOf("app")[0].status).toBe("success");
+      expect(db.buildsOf("worker")).toEqual([]);
+    });
+
+    it("fails with 'service deleted' only when the service row is really gone", async () => {
+      const db = makeDb([app()]);
+      db.builds.push({
+        id: "ghost", tenant_id: "t1", service_id: "gone", git_sha: X, branch: "main", status: "queued",
+        triggered_by: "manual", image_ref: null, failure_reason: null, log: "", created_at: "2026-01-01T00:00:00Z"
+      });
+      await runDrainOnce(db.query, logger, db.tx);
+      expect(db.builds.find((b) => b.id === "ghost")).toMatchObject({
+        status: "failed",
+        failure_reason: "service deleted before build started"
+      });
+    });
+  });
   describe("same-sha resolution", () => {
     it("blocks a dependent whose dependency failed at that commit: no deploy, no incident", async () => {
       const db = makeDb([app(), worker()]);

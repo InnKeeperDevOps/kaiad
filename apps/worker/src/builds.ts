@@ -73,6 +73,7 @@ import {
   getLatestBuildSha,
   getLatestCommonSuccessfulSha,
   getRepoPipelineOverride,
+  getServiceForBuild,
   listAllServicesForPoller,
   listServiceDependencyRefs,
   listServicesWithSuccessfulBuildAtSha,
@@ -601,8 +602,9 @@ async function runBuild(
   logger: Logger
 ): Promise<void> {
   const startedAt = Date.now();
-  const services = await listAllServicesForPoller(query);
-  const svc = services.find((s) => s.id === build.serviceId);
+  // Look the service up regardless of `locked`: locking only stops
+  // push-triggered builds; a build queued by hand must still run.
+  const svc = await getServiceForBuild(query, build.serviceId);
   if (!svc) {
     await safelyFailBuild(query, build.id, "service deleted before build started");
     return;
@@ -1734,7 +1736,11 @@ async function triggerDependentBuilds(
   logger: Logger
 ): Promise<void> {
   const graph = await listServiceDependencyRefs(query, dep.tenantId);
-  const dependents = graph.filter((s) => s.id !== dep.id && s.dependsOn.includes(dep.name));
+  // Locked dependents are on a manual release cadence: never auto-build
+  // them off a dependency's success (same rule as the poller).
+  const dependents = graph.filter(
+    (s) => s.id !== dep.id && s.dependsOn.includes(dep.name) && !s.locked
+  );
   const failures: string[] = [];
   for (const d of dependents) {
     try {

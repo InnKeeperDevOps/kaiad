@@ -141,6 +141,49 @@ paths:
           description: Unauthorized
         '404':
           description: Not found
+  /api/v1/builds:
+    get:
+      operationId: listBuilds
+      description: Tenant-wide build history across all services (newest first). Rows omit log/pipelineYaml and add serviceName. Keyset-paginated via cursor.
+      parameters:
+        - name: serviceId
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [queued, running, success, failed]
+        - name: triggeredBy
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [poll, manual]
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque cursor from a previous response's nextCursor
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Build summaries plus nextCursor (null when exhausted)
+        '400':
+          description: Invalid filter, limit, or cursor
+        '401':
+          description: Unauthorized
   /api/v1/incidents:
     get:
       operationId: listIncidents

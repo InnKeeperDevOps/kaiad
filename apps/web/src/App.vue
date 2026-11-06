@@ -6,6 +6,7 @@ import {
   Building2,
   Cpu,
   Database,
+  Hammer,
   Key,
   LayoutDashboard,
   LogOut,
@@ -25,6 +26,7 @@ import IncidentsPage from "./features/incidents/IncidentsPage.vue";
 import ThreatsPage from "./features/threats/ThreatsPage.vue";
 import AgentsPage from "./features/agents/AgentsPage.vue";
 import ServicesPage from "./features/services/ServicesPage.vue";
+import BuildsPage from "./features/builds/BuildsPage.vue";
 import SshKeysPage from "./features/ssh-keys/SshKeysPage.vue";
 import TenantsPage from "./features/tenants/TenantsPage.vue";
 import RegistryPage from "./features/registry/RegistryPage.vue";
@@ -49,6 +51,7 @@ type Route =
   | "containerDetail"
   | "operator"
   | "services"
+  | "builds"
   | "serviceDetail"
   | "sshKeys"
   | "registry"
@@ -70,6 +73,7 @@ const NAV_GROUPS: NavGroup[] = [
       { route: "dashboard", label: "Dashboard", icon: LayoutDashboard },
       { route: "agents", label: "Agents", icon: Cpu },
       { route: "services", label: "Services", icon: Box },
+      { route: "builds", label: "Builds", icon: Hammer },
       { route: "incidents", label: "Incidents", icon: AlertTriangle },
       { route: "threats", label: "Threats", icon: Shield, adminOnly: true },
       { route: "operator", label: "Operator", icon: Workflow, adminOnly: true }
@@ -105,6 +109,7 @@ const PAGE_TITLE: Record<Route, string> = {
   containerDetail: "Container",
   operator: "Operator",
   services: "Services",
+  builds: "Builds",
   serviceDetail: "Service",
   sshKeys: "SSH Keys",
   registry: "Registry",
@@ -195,6 +200,7 @@ function readNavFromHash(): {
     "agents",
     "operator",
     "services",
+    "builds",
     "sshKeys",
     "registry",
     "loadBalancers",
@@ -786,6 +792,7 @@ const navItemStyle = (active: boolean): CSSProperties => ({
       />
       <OperatorPage v-else-if="route === 'operator'" />
       <ServicesPage v-else-if="route === 'services'" />
+      <BuildsPage v-else-if="route === 'builds'" />
       <ServiceDetailPage
         v-else-if="route === 'serviceDetail' && serviceDetailServiceId"
         :service-id="serviceDetailServiceId"

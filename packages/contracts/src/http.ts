@@ -505,3 +505,62 @@ export type UpdateRegistryRetentionPolicyRequest = z.infer<typeof updateRegistry
 export type RegistryStats = z.infer<typeof registryStatsSchema>;
 export type RegistryGcStats = z.infer<typeof registryGcStatsSchema>;
 export type RegistryRetentionResponse = z.infer<typeof registryRetentionResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Builds
+// ---------------------------------------------------------------------------
+
+export const buildStatusSchema = z.enum(["queued", "running", "success", "failed", "no_pipeline"]);
+export const buildTriggerSchema = z.enum(["poll", "manual"]);
+
+/** One service_builds row as returned by GET /api/v1/services/:id/builds[/:buildId]. */
+export const serviceBuildSchema = z.object({
+  id: z.string(),
+  tenantId: z.string(),
+  serviceId: z.string(),
+  /** Empty string for manual builds whose SHA hasn't been resolved yet. */
+  gitSha: z.string(),
+  branch: z.string(),
+  status: buildStatusSchema,
+  triggeredBy: buildTriggerSchema,
+  imageRef: z.string().nullable(),
+  log: z.string(),
+  pipelineYaml: z.string().nullable(),
+  failureReason: z.string().nullable(),
+  createdAt: z.string().datetime(),
+  startedAt: z.string().datetime().nullable(),
+  finishedAt: z.string().datetime().nullable()
+});
+
+/**
+ * Cross-service build row for GET /api/v1/builds. Drops the two heavy
+ * columns (`log`, `pipelineYaml`) — fetch one build for those — and adds
+ * the owning service's name so the list can render without a second
+ * lookup.
+ */
+export const buildSummarySchema = serviceBuildSchema
+  .omit({ log: true, pipelineYaml: true })
+  .extend({ serviceName: z.string() });
+
+/** Query string for GET /api/v1/builds. Always scoped to the session tenant. */
+export const listBuildsQuerySchema = z.object({
+  serviceId: z.string().min(1).optional(),
+  status: z.enum(["queued", "running", "success", "failed"]).optional(),
+  triggeredBy: buildTriggerSchema.optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  /** Opaque keyset cursor from a previous response's `nextCursor`. */
+  cursor: z.string().min(1).optional()
+});
+
+export const listBuildsResponseSchema = z.object({
+  builds: z.array(buildSummarySchema),
+  /** Pass back as `cursor` to fetch the next page; null when exhausted. */
+  nextCursor: z.string().nullable()
+});
+
+export type BuildStatus = z.infer<typeof buildStatusSchema>;
+export type BuildTrigger = z.infer<typeof buildTriggerSchema>;
+export type ServiceBuild = z.infer<typeof serviceBuildSchema>;
+export type BuildSummary = z.infer<typeof buildSummarySchema>;
+export type ListBuildsQuery = z.infer<typeof listBuildsQuerySchema>;
+export type ListBuildsResponse = z.infer<typeof listBuildsResponseSchema>;

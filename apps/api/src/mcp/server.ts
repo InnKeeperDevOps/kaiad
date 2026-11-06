@@ -7,6 +7,8 @@ import {
   getBuild,
   getRegistryStats,
   listBuildsForService,
+  listBuildsForTenant,
+  decodeBuildCursor,
   setRegistryRepoVisibility,
   listRegistryRepoVisibility,
   type QueryFn
@@ -231,6 +233,29 @@ export function buildMcpServer(deps: McpRouteDeps, session: SessionInfo): McpSer
       const q = await deps.getBuildsQuery();
       if (!q) return jsonResult({ builds: [] });
       return jsonResult({ builds: await listBuildsForService(q, tenantId, serviceId, limit) });
+    }
+  );
+
+  server.registerTool(
+    "list_all_builds",
+    {
+      title: "List builds across services",
+      description:
+        "Tenant-wide build history (newest first) with optional service/status/trigger filters and cursor pagination. Rows omit the log; use get_build for it.",
+      inputSchema: {
+        serviceId: z.string().optional(),
+        status: z.enum(["queued", "running", "success", "failed"]).optional(),
+        triggeredBy: z.enum(["poll", "manual"]).optional(),
+        limit: z.number().int().min(1).max(200).default(50),
+        cursor: z.string().optional().describe("nextCursor from a previous page")
+      },
+      annotations: READ_ONLY
+    },
+    async (args) => {
+      const q = await deps.getBuildsQuery();
+      if (!q) return jsonResult({ builds: [], nextCursor: null });
+      if (args.cursor && !decodeBuildCursor(args.cursor)) return errorResult("Invalid cursor");
+      return jsonResult(await listBuildsForTenant(q, tenantId, args));
     }
   );
 

@@ -60,6 +60,8 @@ import {
   hasPermission,
   permissionsForRole,
   PERMISSIONS,
+  listBuildsQuerySchema,
+  listBuildsResponseSchema,
   registryRetentionResponseSchema,
   registryGcStatsSchema,
   updateRegistryRetentionPolicyRequestSchema
@@ -152,6 +154,8 @@ import {
   getBuildArtifact,
   listBuildArtifacts,
   listBuildsForService,
+  listBuildsForTenant,
+  decodeBuildCursor,
   listAllDeployTargets,
   listLatestBuildsForBoundServices,
   listLoadBalancerStatusForTenant,
@@ -3608,6 +3612,44 @@ export function buildServer(opts: BuildServerOptions = {}) {
     if (!q) return { builds: [] };
     const builds = await listBuildsForService(q, session.tenantId, req.params.id);
     return { builds };
+  });
+
+  // Tenant-wide build history across every service (the Builds page).
+  // Keyset-paginated — see listBuildsForTenant for the cursor contract.
+  // Rows deliberately omit log/pipeline_yaml; GET /services/:id/builds/:buildId
+  // is the per-build detail call.
+  app.get("/api/v1/builds", async (req, reply) => {
+    const session = await resolveSession(authStore, req.headers.authorization);
+    if (!session) {
+      return reply
+        .status(401)
+        .send(apiErrorSchema.parse({ code: "UNAUTHORIZED", message: "Missing or invalid bearer token", correlationId: (req as any).correlationId }));
+    }
+    const parsed = listBuildsQuerySchema.safeParse(req.query ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send(
+        apiErrorSchema.parse({
+          code: "INVALID_REQUEST",
+          message: parsed.error.issues
+            .map((i) => `${i.path.join(".") || "query"}: ${i.message}`)
+            .join("; "),
+          correlationId: (req as any).correlationId
+        })
+      );
+    }
+    if (parsed.data.cursor && !decodeBuildCursor(parsed.data.cursor)) {
+      return reply.status(400).send(
+        apiErrorSchema.parse({
+          code: "INVALID_REQUEST",
+          message: "cursor: malformed pagination cursor",
+          correlationId: (req as any).correlationId
+        })
+      );
+    }
+    const q = await getBuildsQuery();
+    if (!q) return listBuildsResponseSchema.parse({ builds: [], nextCursor: null });
+    const result = await listBuildsForTenant(q, session.tenantId, parsed.data);
+    return listBuildsResponseSchema.parse(result);
   });
 
   // --- Pipeline override (panel-stored kaiad.yaml) ---

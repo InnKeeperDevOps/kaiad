@@ -59,9 +59,17 @@ async function createCredential(scopes: string[]): Promise<string> {
   return (res.json() as { token: string }).token;
 }
 
-/** Parse the first text content block of a tool result as JSON. */
-function parsed(result: { content: Array<{ type: string; text?: string }> }): unknown {
-  const block = result.content.find((c) => c.type === "text");
+/**
+ * Parse the first text content block of a tool result as JSON. The SDK's
+ * callTool result type is a union that also includes the legacy
+ * `{ toolResult }` shape, so narrow at runtime instead of in the signature.
+ */
+function parsed(result: object): unknown {
+  if (!("content" in result) || !Array.isArray(result.content)) {
+    throw new Error(`tool result has no content array: ${JSON.stringify(result)}`);
+  }
+  const content = result.content as Array<{ type: string; text?: string }>;
+  const block = content.find((c) => c.type === "text");
   return JSON.parse(block?.text ?? "null");
 }
 

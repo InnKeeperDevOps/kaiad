@@ -3,3 +3,4 @@ export * from "./ensureSchema.js";
 export * from "./queries.js";
 export * from "./audit.js";
 export * from "./registry.js";
+export * from "./transaction.js";

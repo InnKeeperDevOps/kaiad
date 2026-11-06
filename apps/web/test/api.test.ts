@@ -156,6 +156,27 @@ describe("api lib", () => {
     window.location = originalLocation;
   });
 
+  describe("listBuilds", () => {
+    it("omits unset filters and URL-encodes the cursor", async () => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ builds: [], nextCursor: null })
+      } as Response);
+
+      await api.listBuilds();
+      expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:3001/api/v1/builds");
+
+      await api.listBuilds({ serviceId: "svc 1", status: "failed", triggeredBy: "manual", limit: 25, cursor: "a+b/c=" });
+      expect(fetchMock.mock.calls[1]?.[0]).toBe(
+        "http://localhost:3001/api/v1/builds?serviceId=svc+1&status=failed&triggeredBy=manual&limit=25&cursor=a%2Bb%2Fc%3D"
+      );
+
+      await api.listBuilds({ serviceId: "", status: undefined, cursor: null });
+      expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:3001/api/v1/builds");
+    });
+  });
+
   describe("API endpoints coverage", () => {
     let fetchMock: any;
     beforeEach(() => {

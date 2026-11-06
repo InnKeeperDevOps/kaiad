@@ -73,6 +73,7 @@ for what the worker actually runs.
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | `/api/v1/services/:id/builds` | Bearer | Build history for one service. Each row carries `id`, `gitSha`, `status` (`queued`/`running`/`success`/`failed`), `imageRef`, `failureReason`, timestamps. |
+| GET | `/api/v1/builds` | Bearer | Tenant-wide build history across **all** services, newest first. Query: `serviceId`, `status` (`queued`/`running`/`success`/`failed`), `triggeredBy` (`poll`/`manual`), `limit` (default 50, max 200), `cursor`. Rows are build summaries (same fields as above **without** `log`/`pipelineYaml`) plus `serviceName`. Response is `{ builds, nextCursor }` — pass `nextCursor` back as `cursor` for the next page (`null` when exhausted). **400** on an invalid filter, limit, or malformed cursor. |
 | POST | `/api/v1/services/:id/builds` | Bearer (owner/admin) | Manually trigger a build. The worker resolves `HEAD` of the configured branch via `git ls-remote` on claim. Successful deployable builds dispatch a redeploy to every bound agent. |
 | GET | `/api/v1/services/:id/builds/:buildId` | Bearer | Get one build, including the full log buffer and resolved pipeline yaml. |
 | GET | `/api/v1/services/:id/builds/:buildId/artifacts/:name` | Bearer | Stream a captured artifact (anything listed under `artifacts:` in the pipeline). Octet-stream body. |

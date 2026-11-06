@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import { ChevronDown, ChevronRight, RefreshCw, Download, FileCode, Play, Rocket } from "lucide-vue-next";
+import { ChevronDown, ChevronRight, RefreshCw, FileCode, Play, Rocket } from "lucide-vue-next";
 import { api, type ServiceBuild, type ServiceBuildArtifact } from "../../lib/api.js";
 import { useAuth } from "../../lib/useAuth.js";
+import BuildDetail from "./BuildDetail.vue";
 
 const props = defineProps<{
   serviceId: string;
@@ -194,43 +195,6 @@ function formatDuration(b: ServiceBuild): string {
   const sec = Math.max(0, Math.floor((end - start) / 1000));
   if (sec < 60) return `${sec}s`;
   return `${Math.floor(sec / 60)}m${(sec % 60).toString().padStart(2, "0")}s`;
-}
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  const u = ["KB", "MB", "GB"];
-  let v = n / 1024;
-  let i = 0;
-  while (v >= 1024 && i < u.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(v < 10 ? 1 : 0)} ${u[i]}`;
-}
-
-function downloadArtifact(buildId: string, name: string) {
-  // Pull the file via fetch so we can attach the Authorization header,
-  // then trigger a download from the resulting blob URL.
-  const url = api.serviceBuildArtifactUrl(props.serviceId, buildId, name);
-  const token = localStorage.getItem("sm_token") ?? "";
-  fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-    .then((r) => {
-      if (!r.ok) throw new Error(`download ${r.status}`);
-      return r.blob();
-    })
-    .then((blob) => {
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(blobUrl);
-    })
-    .catch((e) => {
-      error.value = `Download failed: ${(e as Error).message}`;
-    });
 }
 
 const hasInFlight = computed(() => rows.value.some((r) => isInFlight(r.build)));
@@ -455,92 +419,12 @@ onUnmounted(() => {
           </tr>
           <tr v-if="row.expanded">
             <td colspan="7" :style="{ padding: '0.5rem 0.5rem 0.75rem 1.5rem' }">
-              <p
-                v-if="row.detailLoading && !row.detail"
-                :style="{ color: 'var(--color-text-secondary)', margin: 0 }"
-              >
-                Loading…
-              </p>
-
-              <template v-else-if="row.detail">
-                <p
-                  v-if="row.detail.build.failureReason"
-                  :style="{
-                    margin: '0 0 0.4rem',
-                    color: 'var(--color-danger)',
-                    fontSize: '0.85rem'
-                  }"
-                >
-                  {{ row.detail.build.failureReason }}
-                </p>
-
-                <div
-                  v-if="row.detail.artifacts.length > 0"
-                  :style="{ margin: '0.25rem 0 0.5rem', fontSize: '0.8rem' }"
-                >
-                  <strong :style="{ color: 'var(--color-text-secondary)' }">Artifacts:</strong>
-                  <span
-                    v-for="art in row.detail.artifacts"
-                    :key="art.name"
-                    :style="{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '0.25rem',
-                      marginLeft: '0.6rem',
-                      padding: '0.1rem 0.4rem',
-                      background: 'var(--color-bg)',
-                      border: '1px solid var(--color-border)',
-                      borderRadius: '4px',
-                      cursor: 'pointer',
-                      fontFamily: 'var(--font-mono)'
-                    }"
-                    @click="downloadArtifact(row.build.id, art.name)"
-                  >
-                    <Download :size="11" /> {{ art.name }}
-                    <span :style="{ color: 'var(--color-text-secondary)' }">({{ formatBytes(art.sizeBytes) }})</span>
-                  </span>
-                </div>
-
-                <details
-                  v-if="row.detail.build.pipelineYaml"
-                  :style="{ marginTop: '0.4rem', fontSize: '0.8rem' }"
-                >
-                  <summary :style="{ cursor: 'pointer', color: 'var(--color-text-secondary)' }">
-                    kaiad.yaml at this commit
-                  </summary>
-                  <pre
-                    :style="{
-                      margin: '0.3rem 0 0',
-                      padding: '0.5rem 0.6rem',
-                      background: 'var(--color-bg)',
-                      border: '1px solid var(--color-border)',
-                      borderRadius: '6px',
-                      overflowX: 'auto',
-                      fontSize: '0.78rem'
-                    }"
-                  >{{ row.detail.build.pipelineYaml }}</pre>
-                </details>
-
-                <details open :style="{ marginTop: '0.4rem', fontSize: '0.8rem' }">
-                  <summary :style="{ cursor: 'pointer', color: 'var(--color-text-secondary)' }">
-                    Build log
-                  </summary>
-                  <pre
-                    :style="{
-                      margin: '0.3rem 0 0',
-                      padding: '0.5rem 0.6rem',
-                      background: '#0c0c0c',
-                      color: '#e6e6e6',
-                      border: '1px solid var(--color-border)',
-                      borderRadius: '6px',
-                      maxHeight: '320px',
-                      overflow: 'auto',
-                      fontSize: '0.76rem',
-                      fontFamily: 'var(--font-mono)'
-                    }"
-                  >{{ row.detail.build.log || "(no output yet)" }}</pre>
-                </details>
-              </template>
+              <BuildDetail
+                :service-id="serviceId"
+                :detail="row.detail"
+                :loading="row.detailLoading"
+                @error="(m: string) => (error = m)"
+              />
             </td>
           </tr>
         </template>

@@ -367,6 +367,21 @@ export type ServiceBuildArtifact = {
   createdAt: string;
 };
 
+/** Row of GET /api/v1/builds — a ServiceBuild without log/pipelineYaml, plus the owning service's name. */
+export type BuildSummary = Omit<ServiceBuild, "log" | "pipelineYaml"> & { serviceName: string };
+
+/** Status values the tenant-wide list can filter on (no_pipeline is a skip, not a filterable outcome). */
+export type BuildStatusFilter = "queued" | "running" | "success" | "failed";
+
+export type ListBuildsFilters = {
+  serviceId?: string;
+  status?: BuildStatusFilter;
+  triggeredBy?: BuildTrigger;
+  limit?: number;
+  /** nextCursor from the previous page. */
+  cursor?: string | null;
+};
+
 export type DeployResult = {
   dispatched: number;
   results: Array<{ agentId: string; delivered: boolean; queued: boolean }>;
@@ -762,6 +777,20 @@ export const api = {
     apiFetch<{ build: ServiceBuild; artifacts: ServiceBuildArtifact[] }>(
       `/api/v1/services/${encodeURIComponent(serviceId)}/builds/${encodeURIComponent(buildId)}`
     ),
+
+  /** Tenant-wide build history across services, newest first; keyset-paginated via `cursor`. */
+  listBuilds: (filters: ListBuildsFilters = {}) => {
+    const params = new URLSearchParams();
+    if (filters.serviceId) params.set("serviceId", filters.serviceId);
+    if (filters.status) params.set("status", filters.status);
+    if (filters.triggeredBy) params.set("triggeredBy", filters.triggeredBy);
+    if (filters.limit != null) params.set("limit", String(filters.limit));
+    if (filters.cursor) params.set("cursor", filters.cursor);
+    const qs = params.toString();
+    return apiFetch<{ builds: BuildSummary[]; nextCursor: string | null }>(
+      `/api/v1/builds${qs ? `?${qs}` : ""}`
+    );
+  },
 
   /** Panel-stored kaiad.yaml override (null = use the repo file). */
   getPipelineOverride: (serviceId: string) =>

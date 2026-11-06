@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import type { TransactionRunner } from "./transaction.js";
 
 export type QueryFn = (
   sql: string,
@@ -1214,6 +1215,118 @@ export async function listBuildsForService(
   return rows.map(mapBuild);
 }
 
+/** Cross-service list row: ServiceBuildRow minus the heavy columns, plus the service name. */
+export interface BuildSummaryRow extends Omit<ServiceBuildRow, "log" | "pipelineYaml"> {
+  serviceName: string;
+}
+
+export interface ListBuildsForTenantFilters {
+  serviceId?: string;
+  status?: BuildStatus;
+  triggeredBy?: BuildTrigger;
+  /** Page size; defaults to 50, hard-capped at 200. */
+  limit?: number;
+  /** Opaque keyset cursor from a previous page's `nextCursor`. */
+  cursor?: string | null;
+}
+
+export interface ListBuildsForTenantResult {
+  builds: BuildSummaryRow[];
+  nextCursor: string | null;
+}
+
+const LIST_BUILDS_DEFAULT_LIMIT = 50;
+const LIST_BUILDS_MAX_LIMIT = 200;
+
+/**
+ * Keyset cursor for listBuildsForTenant: base64 of `<created_at>|<id>`.
+ * `createdAt` is the row's created_at as Postgres printed it (full
+ * microsecond precision) so the `(created_at, id) < (...)` continuation
+ * never skips rows that share a millisecond with the page boundary.
+ */
+export function encodeBuildCursor(createdAt: string, id: string): string {
+  return Buffer.from(`${createdAt}|${id}`, "utf8").toString("base64");
+}
+
+/** Inverse of encodeBuildCursor. Returns null for anything malformed. */
+export function decodeBuildCursor(cursor: string): { createdAt: string; id: string } | null {
+  const decoded = Buffer.from(cursor, "base64").toString("utf8");
+  const sep = decoded.lastIndexOf("|");
+  if (sep <= 0 || sep === decoded.length - 1) return null;
+  const createdAt = decoded.slice(0, sep);
+  const id = decoded.slice(sep + 1);
+  // created_at must at least look like a timestamp; rejects garbage that
+  // happens to base64-decode into printable text.
+  if (!/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}/.test(createdAt)) return null;
+  return { createdAt, id };
+}
+
+/**
+ * Tenant-wide build history (all services), newest first, with keyset
+ * pagination on (created_at DESC, id DESC). Explicit column list: the
+ * `log` and `pipeline_yaml` columns are deliberately NOT selected — a
+ * tenant's log buffers can be many MB and the list never shows them.
+ */
+export async function listBuildsForTenant(
+  query: QueryFn,
+  tenantId: string,
+  filters: ListBuildsForTenantFilters = {}
+): Promise<ListBuildsForTenantResult> {
+  const limit = Math.min(
+    Math.max(1, Math.floor(filters.limit ?? LIST_BUILDS_DEFAULT_LIMIT)),
+    LIST_BUILDS_MAX_LIMIT
+  );
+  const params: unknown[] = [tenantId];
+  const where: string[] = ["b.tenant_id = $1"];
+  if (filters.serviceId) {
+    params.push(filters.serviceId);
+    where.push(`b.service_id = $${params.length}`);
+  }
+  if (filters.status) {
+    params.push(filters.status);
+    where.push(`b.status = $${params.length}`);
+  }
+  if (filters.triggeredBy) {
+    params.push(filters.triggeredBy);
+    where.push(`b.triggered_by = $${params.length}`);
+  }
+  if (filters.cursor) {
+    const c = decodeBuildCursor(filters.cursor);
+    if (!c) {
+      throw new Error("listBuildsForTenant: invalid cursor");
+    }
+    params.push(c.createdAt, c.id);
+    where.push(`(b.created_at, b.id) < ($${params.length - 1}::timestamptz, $${params.length})`);
+  }
+  // Fetch one extra row to learn whether another page exists without a
+  // second COUNT query.
+  params.push(limit + 1);
+  const { rows } = await query(
+    `SELECT b.id, b.tenant_id, b.service_id, b.git_sha, b.branch, b.status, b.triggered_by,
+            b.image_ref, b.failure_reason, b.created_at, b.started_at, b.finished_at,
+            b.created_at::text AS created_at_cursor,
+            s.name AS service_name
+       FROM service_builds b
+       JOIN monitored_services s ON s.id = b.service_id
+      WHERE ${where.join(" AND ")}
+      ORDER BY b.created_at DESC, b.id DESC
+      LIMIT $${params.length}`,
+    params
+  );
+  const page = rows.slice(0, limit);
+  const builds = page.map((r): BuildSummaryRow => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { log: _log, pipelineYaml: _pipelineYaml, ...summary } = mapBuild(r);
+    return { ...summary, serviceName: String(r.service_name ?? "") };
+  });
+  const last = page[page.length - 1];
+  const nextCursor =
+    rows.length > limit && last
+      ? encodeBuildCursor(String(last.created_at_cursor ?? last.created_at), String(last.id))
+      : null;
+  return { builds, nextCursor };
+}
+
 export async function getBuild(
   query: QueryFn,
   tenantId: string,
@@ -1366,6 +1479,206 @@ export async function getLatestSuccessfulBuildByServiceName(
     gitSha: String(r.git_sha),
     imageRef: r.image_ref == null ? null : String(r.image_ref)
   };
+}
+
+// ─── dependsOn same-commit support ─────────────────────────────────────────
+
+/**
+ * failure_reason prefix for a dependent build that was refused because a
+ * same-repo dependency had no successful build at the same commit. Such
+ * builds deploy nothing, raise no incident, and do NOT count as "already
+ * built" for enqueueBuildAtShaIfMissing — so they get recovered once the
+ * dependency succeeds.
+ */
+export const BLOCKED_BUILD_REASON_PREFIX = "blocked: ";
+
+export interface ServiceDependencyRef {
+  id: string;
+  tenantId: string;
+  name: string;
+  gitRepoUrl: string;
+  branch: string;
+  dependsOn: string[];
+  locked: boolean;
+}
+
+/**
+ * Every service (locked ones included) with the fields needed to work out
+ * same-repo dependencies. Scoped to one tenant when `tenantId` is given.
+ */
+export async function listServiceDependencyRefs(
+  query: QueryFn,
+  tenantId?: string
+): Promise<ServiceDependencyRef[]> {
+  const { rows } = tenantId
+    ? await query(
+        `SELECT id, tenant_id, name, git_repo_url, branch, depends_on, locked
+           FROM monitored_services
+          WHERE tenant_id = $1`,
+        [tenantId]
+      )
+    : await query(
+        `SELECT id, tenant_id, name, git_repo_url, branch, depends_on, locked
+           FROM monitored_services`,
+        []
+      );
+  return rows.map((r) => ({
+    id: String(r.id),
+    tenantId: String(r.tenant_id),
+    name: String(r.name),
+    gitRepoUrl: String(r.git_repo_url ?? ""),
+    branch: String(r.branch ?? ""),
+    dependsOn: Array.isArray(r.depends_on) ? (r.depends_on as unknown[]).map((v) => String(v)) : [],
+    locked: r.locked === true
+  }));
+}
+
+/**
+ * The most relevant build of `serviceId` at exactly `gitSha`: a successful
+ * one if any exists, else an in-flight one (running, then queued), else the
+ * most recent terminal one. Null when the service never built that commit.
+ */
+export async function getServiceBuildAtSha(
+  query: QueryFn,
+  serviceId: string,
+  gitSha: string
+): Promise<{
+  buildId: string;
+  status: BuildStatus;
+  gitSha: string;
+  imageRef: string | null;
+  failureReason: string | null;
+} | null> {
+  const { rows } = await query(
+    `SELECT id, status, git_sha, image_ref, failure_reason
+       FROM service_builds
+      WHERE service_id = $1
+        AND git_sha    = $2
+      ORDER BY CASE status
+                 WHEN 'success' THEN 0
+                 WHEN 'running' THEN 1
+                 WHEN 'queued'  THEN 2
+                 ELSE 3
+               END,
+               created_at DESC
+      LIMIT 1`,
+    [serviceId, gitSha]
+  );
+  if (rows.length === 0) return null;
+  const r = rows[0];
+  return {
+    buildId: String(r.id),
+    status: String(r.status) as BuildStatus,
+    gitSha: String(r.git_sha),
+    imageRef: r.image_ref == null ? null : String(r.image_ref),
+    failureReason: r.failure_reason == null ? null : String(r.failure_reason)
+  };
+}
+
+/** Of `serviceIds`, the ones that have a successful build at `gitSha`. */
+export async function listServicesWithSuccessfulBuildAtSha(
+  query: QueryFn,
+  serviceIds: string[],
+  gitSha: string
+): Promise<string[]> {
+  if (serviceIds.length === 0) return [];
+  const { rows } = await query(
+    `SELECT DISTINCT service_id
+       FROM service_builds
+      WHERE service_id = ANY($1::text[])
+        AND git_sha    = $2
+        AND status     = 'success'`,
+    [serviceIds, gitSha]
+  );
+  return rows.map((r) => String(r.service_id));
+}
+
+/**
+ * The most recent commit on `branch` at which EVERY service in
+ * `serviceIds` has a successful build. Null when there is none.
+ */
+export async function getLatestCommonSuccessfulSha(
+  query: QueryFn,
+  serviceIds: string[],
+  branch: string
+): Promise<string | null> {
+  if (serviceIds.length === 0) return null;
+  const { rows } = await query(
+    `SELECT git_sha
+       FROM service_builds
+      WHERE service_id = ANY($1::text[])
+        AND branch     = $2
+        AND status     = 'success'
+        AND git_sha   <> ''
+      GROUP BY git_sha
+     HAVING COUNT(DISTINCT service_id) = $3
+      ORDER BY MAX(created_at) DESC
+      LIMIT 1`,
+    [serviceIds, branch, new Set(serviceIds).size]
+  );
+  return rows.length === 0 ? null : String(rows[0].git_sha);
+}
+
+/**
+ * Idempotently queue a build of `serviceId` pinned to `gitSha`. Returns the
+ * new row, or null when the commit is already covered.
+ *
+ * "Already covered" = any build of the service at that SHA in any status,
+ * EXCEPT failed builds whose failure_reason starts with
+ * BLOCKED_BUILD_REASON_PREFIX (those are retried). A genuinely failed build
+ * is never re-queued.
+ *
+ * Runs in one transaction: an advisory lock on (service_id, sha)
+ * serialises concurrent callers, then the NOT EXISTS check runs in a fresh
+ * READ COMMITTED snapshot taken after the lock, then the INSERT.
+ */
+export async function enqueueBuildAtShaIfMissing(
+  tx: TransactionRunner,
+  data: {
+    tenantId: string;
+    serviceId: string;
+    gitSha: string;
+    branch: string;
+    triggeredBy?: BuildTrigger;
+  }
+): Promise<ServiceBuildRow | null> {
+  if (!data.gitSha) {
+    const err = new Error(`enqueueBuildAtShaIfMissing: empty gitSha for service ${data.serviceId}`);
+    console.error("[db][ERR] enqueueBuildAtShaIfMissing called without a SHA", {
+      serviceId: data.serviceId
+    });
+    throw err;
+  }
+  return tx(async (q) => {
+    await q(`SELECT pg_advisory_xact_lock(hashtext($1::text || ':' || $2::text))`, [
+      data.serviceId,
+      data.gitSha
+    ]);
+    const existing = await q(
+      `SELECT 1
+         FROM service_builds
+        WHERE service_id = $1
+          AND git_sha    = $2
+          AND NOT (status = 'failed' AND COALESCE(failure_reason, '') LIKE $3)
+        LIMIT 1`,
+      [data.serviceId, data.gitSha, `${BLOCKED_BUILD_REASON_PREFIX}%`]
+    );
+    if (existing.rows.length > 0) return null;
+    const { rows } = await q(
+      `INSERT INTO service_builds (id, tenant_id, service_id, git_sha, branch, status, triggered_by)
+       VALUES ($1, $2, $3, $4, $5, 'queued', $6)
+       RETURNING *`,
+      [
+        crypto.randomUUID(),
+        data.tenantId,
+        data.serviceId,
+        data.gitSha,
+        data.branch,
+        data.triggeredBy ?? "poll"
+      ]
+    );
+    return mapBuild(rows[0]);
+  });
 }
 
 export async function recordBuildArtifact(

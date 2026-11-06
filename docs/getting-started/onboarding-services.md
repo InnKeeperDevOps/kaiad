@@ -144,8 +144,10 @@ brace-delimited variables. The most common ones:
 
 - `{kaiad_registry_host}` — the external registry hostname (so you
   don't hard-code `panel.kaiad.dev`).
-- `{<dep>_version}` — full git SHA of a `dependsOn` service's latest
-  successful build. With `dependsOn: [php-image]`, you can write
+- `{<dep>_version}` — full git SHA of the `dependsOn` service's build
+  being consumed: its build at the **same commit** when it lives in the
+  same repo + branch, otherwise its latest successful build. With
+  `dependsOn: [php-image]`, you can write
   `image: "{kaiad_registry_host}/php-image:{php_image_version}"`.
 
 A full list lives in [pipeline variables]({% link reference/pipeline-variables.md %}).
@@ -157,9 +159,12 @@ Three ways to kick off the first build:
 - **Manual** — click **Builds** on the service row, then the trigger
   button. Useful for first runs and for re-running a stuck build.
 - **Push** — the build worker polls the configured branch; new commits
-  fire builds automatically.
+  fire builds automatically. Services with a `dependsOn` dep in the same
+  repo + branch are skipped here — they build via the next bullet.
 - **Dependency** — when a service this one lists in `dependsOn:`
-  produces a successful build, Kaiad enqueues a follow-up build here.
+  produces a successful build, Kaiad enqueues a follow-up build here
+  (pinned to the dep's commit when both share a repo + branch; see
+  [same-commit rule]({% link reference/pipeline-dependencies.md %}#same-repo-dependencies-same-commit-rule)).
 
 The build page streams the log live. Stages you should see:
 

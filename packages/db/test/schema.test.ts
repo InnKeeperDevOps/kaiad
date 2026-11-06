@@ -113,5 +113,12 @@ describe("db schema", () => {
       expect(coreSchemaSql).toContain("created_by text not null");
       expect(coreSchemaSql).toContain("used_at timestamptz");
     });
+
+    it("indexes service_builds for tenant-wide keyset pagination", () => {
+      expect(coreSchemaSql).toContain("create index if not exists service_builds_tenant_created_idx");
+      expect(coreSchemaSql).toMatch(
+        /service_builds_tenant_created_idx\s+on service_builds\(tenant_id, created_at desc, id desc\)/
+      );
+    });
   });
 });

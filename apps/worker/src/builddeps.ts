@@ -2,7 +2,13 @@
 //
 // Services may declare `dependsOn: [<other-service-name>]` in their
 // kaiad.yaml. Before the build runs we:
-//   1. Look up each dep's latest successful build (by tenant + name).
+//   1. Look up the build of each dep to consume:
+//        - SAME-REPO dep (same normalised git URL + branch as the
+//          dependent, see samerepo.ts): ONLY the dep's successful build
+//          at the dependent build's own git SHA. If that build failed,
+//          is still queued/running, or doesn't exist, the dependent
+//          build is BLOCKED (BuildBlockedError, reason "blocked: …").
+//        - other deps: the dep's latest successful build.
 //   2. Compute a set of substitution variables:
 //        {<dep>_version}     → short git SHA (12 chars)
 //        {<dep>_image_ref}   → full image reference incl. tag
@@ -25,9 +31,12 @@
 // fail the build with an actionable log line.
 import type { PipelineDefinition } from "@sm/contracts";
 import {
+  BLOCKED_BUILD_REASON_PREFIX,
   getLatestSuccessfulBuildByServiceName,
+  getServiceBuildAtSha,
   type QueryFn
 } from "@sm/db";
+import { isSameRepo, type DependencyGraphNode } from "./samerepo.js";
 
 export class BuildDepsError extends Error {
   constructor(
@@ -40,24 +49,84 @@ export class BuildDepsError extends Error {
   }
 }
 
+/**
+ * A same-repo dependency has no successful build at the dependent's
+ * commit. The message always starts with BLOCKED_BUILD_REASON_PREFIX; the
+ * caller fails the build with it, deploys nothing, and raises no incident.
+ */
+export class BuildBlockedError extends BuildDepsError {
+  constructor(reason: string, depName: string) {
+    super(`${BLOCKED_BUILD_REASON_PREFIX}${reason}`, depName);
+    this.name = "BuildBlockedError";
+  }
+}
+
+/** The dependent build being resolved — enables the same-commit rule. */
+export type DependentBuildContext = {
+  gitRepoUrl: string;
+  branch: string;
+  /** The dependent build's pinned commit. Must be non-empty. */
+  gitSha: string;
+  /** Services of the dependent's tenant (for dep name → repo lookup). */
+  services: Array<Pick<DependencyGraphNode, "id" | "name" | "gitRepoUrl" | "branch">>;
+};
+
+type DepBuild = { buildId: string; gitSha: string; imageRef: string | null };
+
+async function resolveSameCommitDep(
+  query: QueryFn,
+  depName: string,
+  depServiceId: string,
+  gitSha: string
+): Promise<DepBuild> {
+  const short = gitSha.slice(0, 7);
+  const b = await getServiceBuildAtSha(query, depServiceId, gitSha);
+  if (!b) {
+    throw new BuildBlockedError(`dependency ${depName} has no build at ${short}`, depName);
+  }
+  switch (b.status) {
+    case "success":
+      return { buildId: b.buildId, gitSha: b.gitSha, imageRef: b.imageRef };
+    case "failed":
+      throw new BuildBlockedError(`dependency ${depName} at ${short} failed`, depName);
+    case "queued":
+    case "running":
+      throw new BuildBlockedError(
+        `dependency ${depName} at ${short} is still ${b.status}`,
+        depName
+      );
+    default:
+      throw new BuildBlockedError(
+        `dependency ${depName} at ${short} produced no image (status ${b.status})`,
+        depName
+      );
+  }
+}
+
 /** Sanitise a service name for use as a template-variable identifier. */
 function varKey(serviceName: string): string {
   return serviceName.toLowerCase().replace(/[^a-z0-9_]/g, "_");
 }
 
 /**
- * Resolve every dep listed in `pipeline.dependsOn` to its latest
- * successful build's vars. Returns the variable map plus the list of
- * resolved (dep → build) pairs so the caller can log them.
+ * Resolve every dep listed in `pipeline.dependsOn` to the build whose
+ * vars the dependent should interpolate. Returns the variable map plus
+ * the list of resolved (dep → build) pairs so the caller can log them.
  *
- * Throws BuildDepsError when a dep has no successful build yet; the
- * caller is expected to fail the build with that reason.
+ * With `options.dependent`, same-repo deps resolve to their successful
+ * build at `dependent.gitSha` only (BuildBlockedError otherwise). Without
+ * it — or for deps in another repo/branch — the dep's latest successful
+ * build is used; BuildDepsError when there is none yet.
  */
 export async function resolveDeps(
   query: QueryFn,
   tenantId: string,
   pipeline: PipelineDefinition,
-  options: { registryHost?: string; registryInternal?: string } = {}
+  options: {
+    registryHost?: string;
+    registryInternal?: string;
+    dependent?: DependentBuildContext;
+  } = {}
 ): Promise<{
   vars: Record<string, string>;
   resolved: Array<{
@@ -79,8 +148,24 @@ export async function resolveDeps(
     imageRef: string | null;
   }> = [];
 
+  const dependent = options.dependent;
+  if (dependent && !dependent.gitSha) {
+    const err = new Error("resolveDeps: dependent build has no git SHA pinned");
+    console.error("[builds][ERR] resolveDeps called with an unpinned dependent build", {
+      gitRepoUrl: dependent.gitRepoUrl,
+      branch: dependent.branch
+    });
+    throw err;
+  }
+
   for (const depName of pipeline.dependsOn) {
-    const dep = await getLatestSuccessfulBuildByServiceName(query, tenantId, depName);
+    const depSvc = dependent?.services.find((s) => s.name === depName);
+    let dep: DepBuild | null;
+    if (dependent && depSvc && isSameRepo(depSvc, dependent)) {
+      dep = await resolveSameCommitDep(query, depName, depSvc.id, dependent.gitSha);
+    } else {
+      dep = await getLatestSuccessfulBuildByServiceName(query, tenantId, depName);
+    }
     if (!dep) {
       throw new BuildDepsError(
         `dependency "${depName}" has no successful build yet — trigger or wait for its build first`,

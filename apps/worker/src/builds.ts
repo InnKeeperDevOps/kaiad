@@ -6,8 +6,11 @@
 //   Poller  — every BUILD_POLL_INTERVAL_MS, reads every MonitoredService,
 //             does a `git ls-remote` to find the latest SHA on the watched
 //             branch, and INSERTs a queued service_builds row if that SHA
-//             hasn't been seen yet. The unique index on
-//             (service_id, git_sha) makes this idempotent.
+//             hasn't been polled yet (getLatestBuildSha). Services with a
+//             SAME-REPO dependency (same repo URL + branch) are skipped:
+//             they only build at a commit where every same-repo dep built
+//             successfully — via the chain trigger and the catch-up pass
+//             (see triggerDependentBuilds / runDependentCatchUp).
 //
 //   Builder — every BUILD_DRAIN_INTERVAL_MS, claims one queued row at a
 //             time (FOR UPDATE SKIP LOCKED), clones at the SHA, reads
@@ -61,14 +64,18 @@ import { Pool } from "pg";
 import {
   appendBuildLog,
   claimNextBuild,
+  createTransactionRunner,
   ensureCoreSchema,
   enqueueBuild,
+  enqueueBuildAtShaIfMissing,
   enqueueManualBuild,
   finishBuild,
   getLatestBuildSha,
+  getLatestCommonSuccessfulSha,
   getRepoPipelineOverride,
   listAllServicesForPoller,
-  listServicesDependingOn,
+  listServiceDependencyRefs,
+  listServicesWithSuccessfulBuildAtSha,
   getServiceHealthcheck,
   getServiceSecurityContext,
   recordBuildArtifact,
@@ -77,7 +84,9 @@ import {
   updateServicePipelineMeta,
   upsertIncident,
   type QueryFn,
-  type ServiceBuildRow
+  type ServiceBuildRow,
+  type ServiceDependencyRef,
+  type TransactionRunner
 } from "@sm/db";
 import {
   ensureRegistryAuth,
@@ -85,7 +94,13 @@ import {
   type RegistryAccess,
   type RegistryAuthConfig
 } from "@sm/registry-auth";
-import { BuildDepsError, resolveDeps, substitutePipeline } from "./builddeps.js";
+import {
+  BuildBlockedError,
+  BuildDepsError,
+  resolveDeps,
+  substitutePipeline
+} from "./builddeps.js";
+import { isSameRepo, sameRepoDependencies } from "./samerepo.js";
 import {
   parsePipelineYaml,
   resolveEnvironment,
@@ -365,6 +380,9 @@ export async function startBuildLoops(
     const r = await pool.query(sql, params as unknown[]);
     return { rows: r.rows as Record<string, unknown>[] };
   };
+  // One-connection BEGIN/COMMIT runner for the idempotent dependent
+  // enqueue (advisory lock + NOT EXISTS + INSERT).
+  const tx = createTransactionRunner(pool, logger);
 
   let pollBusy = false;
   let drainBusy = false;
@@ -372,7 +390,7 @@ export async function startBuildLoops(
   const pollTimer = setInterval(() => {
     if (pollBusy) return;
     pollBusy = true;
-    runPollOnce(query, logger)
+    runPollOnce(query, logger, tx)
       .catch((err) => logger.error("poll loop crashed", { err: String(err) }))
       .finally(() => {
         pollBusy = false;
@@ -382,7 +400,7 @@ export async function startBuildLoops(
   const drainTimer = setInterval(() => {
     if (drainBusy) return;
     drainBusy = true;
-    runDrainOnce(query, logger)
+    runDrainOnce(query, logger, tx)
       .catch((err) => logger.error("drain loop crashed", { err: String(err) }))
       .finally(() => {
         drainBusy = false;
@@ -392,7 +410,7 @@ export async function startBuildLoops(
   // Kick off a first poll immediately so freshly-deployed kaiad doesn't
   // wait 60s for the first run.
   setImmediate(() => {
-    void runPollOnce(query, logger).catch(() => {
+    void runPollOnce(query, logger, tx).catch(() => {
       /* logged inside */
     });
   });
@@ -416,10 +434,23 @@ export async function startBuildLoops(
 /**
  * One pass over every service. Errors per-service are isolated — one
  * unreachable repo doesn't stop the rest from being polled.
+ *
+ * Services with at least one same-repo dependency are NOT built from the
+ * branch head: building them at a commit their dependency hasn't built
+ * would consume an older dependency image. They are built by the chain
+ * trigger (pinned to the dependency's commit) and by the catch-up pass at
+ * the end of every poll.
  */
-export async function runPollOnce(query: QueryFn, logger: Logger): Promise<void> {
+export async function runPollOnce(
+  query: QueryFn,
+  logger: Logger,
+  tx: TransactionRunner
+): Promise<void> {
   const services = await listAllServicesForPoller(query);
+  if (services.length === 0) return;
+  const graph = await listServiceDependencyRefs(query);
   for (const svc of services) {
+    if (sameRepoDependencies(svc, graph).length > 0) continue;
     try {
       const remoteSha = await gitLsRemoteHead(query, svc);
       if (!remoteSha) continue;
@@ -442,6 +473,69 @@ export async function runPollOnce(query: QueryFn, logger: Logger): Promise<void>
       // Don't surface every transient SSH failure — log once per pass and
       // move on. The next tick gets another shot.
       logger.warn("poll service failed", {
+        serviceId: svc.id,
+        name: svc.name,
+        err: (err as Error).message
+      });
+    }
+  }
+  await runDependentCatchUp(query, tx, logger, services, graph);
+}
+
+/**
+ * Catch-up for same-repo dependents: for each (unlocked) dependent, find
+ * the most recent commit at which ALL its same-repo deps have a successful
+ * build, and queue the dependent at that commit if it is missing there.
+ *
+ * "Missing" follows enqueueBuildAtShaIfMissing: builds blocked on a
+ * dependency (failure_reason "blocked: …") don't count, so they are
+ * recovered; genuinely failed builds do count and are never re-queued.
+ *
+ * Only the LATEST common commit is considered — back-filling older
+ * commits would deploy older code after newer code.
+ */
+export async function runDependentCatchUp(
+  query: QueryFn,
+  tx: TransactionRunner,
+  logger: Logger,
+  services: Array<{
+    id: string;
+    tenantId: string;
+    name: string;
+    gitRepoUrl: string;
+    branch: string;
+    dependsOn: string[];
+  }>,
+  graph: ServiceDependencyRef[]
+): Promise<void> {
+  for (const svc of services) {
+    const deps = sameRepoDependencies(svc, graph);
+    if (deps.length === 0) continue;
+    try {
+      const sha = await getLatestCommonSuccessfulSha(
+        query,
+        deps.map((d) => d.id),
+        svc.branch
+      );
+      if (!sha) continue;
+      const enq = await enqueueBuildAtShaIfMissing(tx, {
+        tenantId: svc.tenantId,
+        serviceId: svc.id,
+        gitSha: sha,
+        branch: svc.branch,
+        triggeredBy: "poll"
+      });
+      if (enq) {
+        logger.info("catch-up: queued dependent build", {
+          serviceId: svc.id,
+          name: svc.name,
+          sha: sha.slice(0, 12),
+          deps: deps.map((d) => d.name),
+          buildId: enq.id
+        });
+      }
+    } catch (err) {
+      logger.error("catch-up for dependent failed", {
         serviceId: svc.id,
         name: svc.name,
         err: (err as Error).message
@@ -480,13 +574,17 @@ async function gitLsRemoteHead(
 
 // ─── Builder ──────────────────────────────────────────────────────────────
 
-export async function runDrainOnce(query: QueryFn, logger: Logger): Promise<void> {
+export async function runDrainOnce(
+  query: QueryFn,
+  logger: Logger,
+  tx: TransactionRunner
+): Promise<void> {
   // Process a single build per tick so a long build doesn't starve the
   // poll loop; we get back to drain on the next tick anyway.
   const build = await claimNextBuild(query);
   if (!build) return;
   try {
-    await runBuild(query, build, logger);
+    await runBuild(query, tx, build, logger);
   } catch (err) {
     logger.error("build crashed", {
       buildId: build.id,
@@ -496,7 +594,12 @@ export async function runDrainOnce(query: QueryFn, logger: Logger): Promise<void
   }
 }
 
-async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger): Promise<void> {
+async function runBuild(
+  query: QueryFn,
+  tx: TransactionRunner,
+  build: ServiceBuildRow,
+  logger: Logger
+): Promise<void> {
   const startedAt = Date.now();
   const services = await listAllServicesForPoller(query);
   const svc = services.find((s) => s.id === build.serviceId);
@@ -637,11 +740,14 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
       })
     );
 
-    // Resolve dependsOn → latest successful build of each, plus the
-    // system-wide registry-host variables. Bail on the build if any
-    // dep is missing (clearer signal than a build that tries to
-    // interpolate `{php_image_version}` and fails at `docker pull`
-    // because the literal string was left intact).
+    // Resolve dependsOn → the dep build to consume, plus the
+    // system-wide registry-host variables. Same-repo deps (same repo
+    // URL + branch) resolve ONLY to their successful build at THIS
+    // build's commit — otherwise the build is "blocked" (see
+    // builddeps.ts). Other deps resolve to their latest successful
+    // build. Bail on the build if any dep is missing (clearer signal
+    // than a build that tries to interpolate `{php_image_version}` and
+    // fails at `docker pull` because the literal string was left intact).
     //
     // Substitution always runs — kaiad.yaml may reference
     // {kaiad_registry_host} even without dependsOn.
@@ -650,9 +756,17 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
     let depImageRefs: string[] = [];
     {
       try {
+        const depGraph =
+          pipeline.dependsOn.length > 0 ? await listServiceDependencyRefs(query, svc.tenantId) : [];
         const { vars, resolved } = await resolveDeps(query, svc.tenantId, pipeline, {
           registryHost: REGISTRY_HOST,
-          registryInternal: REGISTRY_INTERNAL
+          registryInternal: REGISTRY_INTERNAL,
+          dependent: {
+            gitRepoUrl: svc.gitRepoUrl,
+            branch: svc.branch,
+            gitSha: build.gitSha,
+            services: depGraph
+          }
         });
         for (const r of resolved) {
           await appendBuildLog(
@@ -675,6 +789,21 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
         }
         pipeline = sub.pipeline;
       } catch (err) {
+        if (err instanceof BuildBlockedError) {
+          // Not a real failure of THIS service: deploy nothing and raise
+          // no incident. The chain trigger / catch-up pass re-queues it
+          // once the dependency succeeds at this commit.
+          await appendBuildLog(query, build.id, `${err.message}\n`);
+          await finishBuild(query, build.id, { status: "failed", failureReason: err.message });
+          logger.info("build blocked on same-repo dependency", {
+            buildId: build.id,
+            serviceId: build.serviceId,
+            sha: build.gitSha.slice(0, 12),
+            dep: err.depName,
+            reason: err.message
+          });
+          return;
+        }
         if (err instanceof BuildDepsError) {
           await appendBuildLog(query, build.id, `${err.message}\n`);
           await failBuild(query, build, err.message, logger);
@@ -742,7 +871,7 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
       // Trigger downstream builds: any service in this tenant that
       // depends on the one we just built. The chain only fires on
       // success (no point cascading a broken base image).
-      await triggerDependentBuilds(query, svc.tenantId, svc.name, logger).catch((err) =>
+      await triggerDependentBuilds(query, tx, svc, build.gitSha, logger).catch((err) =>
         logger.warn("dependent-build trigger failed", {
           buildId: build.id,
           err: (err as Error).message
@@ -833,7 +962,7 @@ async function runBuild(query: QueryFn, build: ServiceBuildRow, logger: Logger):
       });
     }
     // Trigger downstream builds.
-    await triggerDependentBuilds(query, svc.tenantId, svc.name, logger).catch((err) =>
+    await triggerDependentBuilds(query, tx, svc, build.gitSha, logger).catch((err) =>
       logger.warn("dependent-build trigger failed", {
         buildId: build.id,
         err: (err as Error).message
@@ -1586,47 +1715,87 @@ async function buildViaDockerfile(params: {
 // ─── Chain-build trigger ──────────────────────────────────────────────────
 //
 // When a service finishes building (success), services that listed it
-// in `dependsOn` need a fresh build so they pick up the new image_ref
-// / version. We enqueue a manual-style build for each: empty gitSha so
-// the build worker resolves HEAD of the watched branch at run time —
-// exactly how the "Start build" panel button works.
+// in `dependsOn` need a fresh build so they pick up the new image.
+//
+//   - SAME-REPO dependents (same normalised repo URL + branch) are built
+//     at the dependency build's OWN commit — never the branch head — and
+//     only once ALL their same-repo deps have a successful build at that
+//     commit. The enqueue is idempotent (enqueueBuildAtShaIfMissing) and
+//     shared with the poller's catch-up pass.
+//   - Dependents in another repo/branch keep the previous behaviour: a
+//     manual-style build (empty SHA, HEAD of their branch resolved at run
+//     time), since the dependency's commit means nothing in their repo.
 
 async function triggerDependentBuilds(
   query: QueryFn,
-  tenantId: string,
-  depName: string,
+  tx: TransactionRunner,
+  dep: { id: string; tenantId: string; name: string; gitRepoUrl: string; branch: string },
+  gitSha: string,
   logger: Logger
 ): Promise<void> {
-  let dependents;
-  try {
-    dependents = await listServicesDependingOn(query, tenantId, depName);
-  } catch (err) {
-    logger.warn("listServicesDependingOn failed", {
-      depName,
-      err: (err as Error).message
-    });
-    return;
-  }
-  if (dependents.length === 0) return;
+  const graph = await listServiceDependencyRefs(query, dep.tenantId);
+  const dependents = graph.filter((s) => s.id !== dep.id && s.dependsOn.includes(dep.name));
+  const failures: string[] = [];
   for (const d of dependents) {
     try {
-      await enqueueManualBuild(query, {
-        tenantId,
+      if (!isSameRepo(d, dep)) {
+        const enq = await enqueueManualBuild(query, {
+          tenantId: dep.tenantId,
+          serviceId: d.id,
+          branch: d.branch
+        });
+        logger.info("dependent build queued", {
+          triggeredBy: dep.name,
+          dependentServiceId: d.id,
+          dependentName: d.name,
+          buildId: enq.id,
+          pinnedSha: null
+        });
+        continue;
+      }
+      const sameRepoDeps = sameRepoDependencies(d, graph);
+      const ready = await listServicesWithSuccessfulBuildAtSha(
+        query,
+        sameRepoDeps.map((s) => s.id),
+        gitSha
+      );
+      const waiting = sameRepoDeps.filter((s) => !ready.includes(s.id)).map((s) => s.name);
+      if (waiting.length > 0) {
+        logger.info("dependent build waiting for other same-repo deps", {
+          triggeredBy: dep.name,
+          dependentServiceId: d.id,
+          dependentName: d.name,
+          sha: gitSha.slice(0, 12),
+          waiting
+        });
+        continue;
+      }
+      const enq = await enqueueBuildAtShaIfMissing(tx, {
+        tenantId: d.tenantId,
         serviceId: d.id,
-        branch: d.branch
+        gitSha,
+        branch: d.branch,
+        triggeredBy: "poll"
       });
-      logger.info("dependent build queued", {
-        triggeredBy: depName,
+      logger.info(enq ? "dependent build queued" : "dependent build already exists at sha", {
+        triggeredBy: dep.name,
         dependentServiceId: d.id,
-        dependentName: d.name
+        dependentName: d.name,
+        pinnedSha: gitSha.slice(0, 12),
+        buildId: enq?.id ?? null
       });
     } catch (err) {
-      logger.warn("dependent enqueue failed", {
-        depName,
+      logger.error("dependent enqueue failed", {
+        depName: dep.name,
         dependentServiceId: d.id,
+        sha: gitSha.slice(0, 12),
         err: (err as Error).message
       });
+      failures.push(`${d.name}: ${(err as Error).message}`);
     }
+  }
+  if (failures.length > 0) {
+    throw new Error(`dependent enqueue failed for ${failures.join("; ")}`);
   }
 }
 

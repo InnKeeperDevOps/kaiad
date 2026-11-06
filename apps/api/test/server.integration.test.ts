@@ -284,6 +284,29 @@ d("server.ts Postgres integration — broad route coverage", () => {
     expect(detail.statusCode).toBeLessThan(500);
     const logs = await app2.inject({ method: "GET", url: `/api/v1/services/${svcId}/builds/bld-1/logs`, headers: AUTH });
     expect(logs.statusCode).toBeLessThan(500);
+    // Tenant-wide list: joined service name, no log column, keyset cursor.
+    const all = await app2.inject({ method: "GET", url: `/api/v1/builds?serviceId=${svcId}&limit=10`, headers: AUTH });
+    expect(all.statusCode).toBe(200);
+    const page = all.json() as { builds: Array<Record<string, unknown>>; nextCursor: string | null };
+    const row = page.builds.find((b) => b.id === "bld-1");
+    expect(row?.serviceName).toBe("b-svc");
+    expect(row).not.toHaveProperty("log");
+    expect(row).not.toHaveProperty("pipelineYaml");
+    expect(page.nextCursor).toBeNull();
+    // One-row pages produce a cursor that continues to the (empty) rest.
+    const first = await app2.inject({ method: "GET", url: `/api/v1/builds?limit=1`, headers: AUTH });
+    expect(first.statusCode).toBe(200);
+    const firstPage = first.json() as { builds: unknown[]; nextCursor: string | null };
+    expect(firstPage.builds).toHaveLength(1);
+    if (firstPage.nextCursor) {
+      const next = await app2.inject({
+        method: "GET",
+        url: `/api/v1/builds?limit=1&cursor=${encodeURIComponent(firstPage.nextCursor)}`,
+        headers: AUTH
+      });
+      expect(next.statusCode).toBe(200);
+    }
+    expect((await app2.inject({ method: "GET", url: `/api/v1/builds?status=bogus`, headers: AUTH })).statusCode).toBe(400);
     const patch = await app2.inject({
       method: "PATCH",
       url: `/api/v1/services/${svcId}`,

@@ -472,6 +472,11 @@ create index if not exists service_builds_service_id_idx
   on service_builds(service_id, created_at desc);
 create index if not exists service_builds_status_idx
   on service_builds(status, created_at);
+-- Tenant-wide build history (GET /api/v1/builds) pages by keyset on
+-- (created_at DESC, id DESC) within a tenant; this index serves both the
+-- ORDER BY and the (created_at, id) < (cursor) continuation.
+create index if not exists service_builds_tenant_created_idx
+  on service_builds(tenant_id, created_at desc, id desc);
 -- The unique index on (service_id, git_sha) was here originally for
 -- poller idempotency, but it blocks manual rebuilds at the same SHA.
 -- The poller dedupes via getLatestBuildSha (filtered to triggered_by='poll')

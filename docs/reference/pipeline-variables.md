@@ -58,9 +58,13 @@ build:
 
 ## Dependency variables
 
-For every entry in `dependsOn:`, the worker resolves the latest
-successful build of that service (tenant-scoped, by service name) and
-exposes the following variables. The placeholder `<dep>` is the dep's
+For every entry in `dependsOn:`, the worker resolves one build of that
+service (tenant-scoped, by service name) — for a dep in the **same repo
+and branch**, its successful build at the **same git SHA** as the build
+being run (otherwise the build is `blocked: …`); for any other dep, its
+latest successful build (see
+[same-commit rule]({% link reference/pipeline-dependencies.md %}#same-repo-dependencies-same-commit-rule)) —
+and exposes the following variables. The placeholder `<dep>` is the dep's
 service name with hyphens turned into underscores (`php-image` →
 `php_image`).
 

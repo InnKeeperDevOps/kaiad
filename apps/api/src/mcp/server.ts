@@ -14,6 +14,9 @@ import {
   getRegistryRetentionPolicy,
   updateRegistryRetentionPolicy,
   applyRegistryRetention,
+  getBuildWorkerSettings,
+  updateBuildWorkerSettings,
+  getBuildQueueStats,
   getServicePipelineOverride,
   setServicePipelineOverride,
   getRepoPipelineOverride,
@@ -701,6 +704,51 @@ export function buildMcpServer(deps: McpRouteDeps, session: SessionInfo): McpSer
       if (!q) return dbUnavailable;
       const policy = await getRegistryRetentionPolicy(q);
       return jsonResult(await applyRegistryRetention(q, policy));
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Build worker settings (instance-wide)
+  // ---------------------------------------------------------------------------
+  const buildSettingsPayload = async (q: QueryFn) => {
+    const [settings, stats] = await Promise.all([getBuildWorkerSettings(q), getBuildQueueStats(q)]);
+    return { ...settings, running: stats.running, queued: stats.queued };
+  };
+
+  server.registerTool(
+    "get_build_settings",
+    {
+      title: "Get build worker settings",
+      description: "Read the instance-wide parallel-build limit (maxConcurrentBuilds, 1-8) plus the number of running and queued builds. Requires settings:manage.",
+      annotations: READ_ONLY
+    },
+    async () => {
+      const denied = await ensureRead("settings:manage");
+      if (denied) return denied;
+      const q = await requireQuery();
+      if (!q) return dbUnavailable;
+      return jsonResult(await buildSettingsPayload(q));
+    }
+  );
+
+  server.registerTool(
+    "set_build_settings",
+    {
+      title: "Update build worker settings",
+      description: "Set how many builds may run in parallel across all worker processes (1-8). Lowering it never interrupts running builds; one build per service runs at a time regardless. Keep limit × ~25 GB under the free space of the build workspace. Requires settings:manage.",
+      inputSchema: { maxConcurrentBuilds: z.number().int().min(1).max(8) },
+      annotations: MUTATING
+    },
+    async (args) => {
+      const denied = await ensureWrite("settings:manage");
+      if (denied) return denied;
+      const q = await requireQuery();
+      if (!q) return dbUnavailable;
+      await updateBuildWorkerSettings(q, {
+        maxConcurrentBuilds: args.maxConcurrentBuilds,
+        updatedBy: session.email || session.id
+      });
+      return jsonResult(await buildSettingsPayload(q));
     }
   );
 

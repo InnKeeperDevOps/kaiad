@@ -483,6 +483,16 @@ export type RegistryGcStats = {
   totalBytesAfter: number;
 };
 
+/** GET/PUT /api/v1/admin/build-settings — instance-wide parallel-build cap + live queue/disk figures. */
+export type BuildSettings = {
+  maxConcurrentBuilds: number;
+  running: number;
+  queued: number;
+  buildsDisk: { freeBytes: number; totalBytes: number } | null;
+  updatedAt: string;
+  updatedBy: string | null;
+};
+
 export const api = {
   login: (email: string, password: string) =>
     apiFetch<{ token: string }>("/api/v1/auth/login", {
@@ -974,6 +984,13 @@ export const api = {
     }),
   runRegistryRetention: () =>
     apiFetch<RegistryGcStats>("/api/v1/admin/registry-retention/run", { method: "POST" }),
+
+  getBuildSettings: () => apiFetch<BuildSettings>("/api/v1/admin/build-settings"),
+  updateBuildSettings: (body: { maxConcurrentBuilds: number }) =>
+    apiFetch<BuildSettings>("/api/v1/admin/build-settings", {
+      method: "PUT",
+      body: JSON.stringify(body)
+    }),
 
   getAuthProviders: () => apiFetch<{ providers: AuthProviderEntry[] }>("/api/v1/auth/providers"),
 

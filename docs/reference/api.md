@@ -125,6 +125,17 @@ Token format: `kop_` + 64 hex chars. Stored as a SHA-256 hash; recovery
 of a lost plaintext is impossible — revoke and re-mint instead.
 
 ## Error groups
+## Admin / build settings
+
+Instance-wide knobs for the build worker. See
+[Build settings]({% link admin/build-settings.md %}) for how the limit,
+the one-build-per-service rule and orphan recovery interact.
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/v1/admin/build-settings` | Bearer (`settings:manage`) | Returns `{ maxConcurrentBuilds, running, queued, buildsDisk, updatedAt, updatedBy }`. `running`/`queued` are live counts across all tenants; `buildsDisk` is `{ freeBytes, totalBytes }` of the filesystem holding `KAIAD_DATA_DIR/builds`, or `null` when it cannot be read. **503** without a database. |
+| PUT | `/api/v1/admin/build-settings` | Bearer (`settings:manage`) | Body `{ maxConcurrentBuilds }` (integer **1–8**). Sets how many builds may run in parallel across every worker process; records the caller as `updatedBy`. Lowering it never interrupts running builds. **400** on an invalid value. |
+
 
 Deduplicated buckets of error-level log frames the agent has shipped.
 See [Error grouping]({% link agent/error-grouping.md %}) for

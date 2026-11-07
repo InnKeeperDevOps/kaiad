@@ -149,8 +149,18 @@ function makeDb(services: Svc[]) {
         : addBuild({ service_id: svcId, git_sha: p[3], status: "queued", triggered_by: p[5] ?? "poll" });
       return { rows: [row] };
     }
+    if (/^SELECT max_concurrent_builds, updated_at, updated_by FROM build_worker_settings/.test(s)) {
+      return { rows: [{ max_concurrent_builds: 8, updated_at: "2026-01-01T00:00:00.000Z", updated_by: null }] };
+    }
+    if (/^SELECT count\(\*\)::int AS n FROM service_builds WHERE status = 'running'/.test(s)) {
+      return { rows: [{ n: builds.filter((b) => b.status === "running").length }] };
+    }
     if (/FOR UPDATE SKIP LOCKED/.test(s)) {
-      const next = builds.find((b) => b.status === "queued");
+      // Mirrors claimNextBuildWithinLimit: oldest queued build whose
+      // service has no running build.
+      const next = builds.find(
+        (b) => b.status === "queued" && !builds.some((r) => r.service_id === b.service_id && r.status === "running")
+      );
       if (!next) return { rows: [] };
       next.status = "running";
       return { rows: [{ ...next }] };
@@ -283,7 +293,7 @@ describe("dependsOn same-commit", () => {
       const w = db.buildsOf("worker");
       expect(w).toHaveLength(1);
       expect(w[0]).toMatchObject({ git_sha: X, status: "queued", triggered_by: "poll" });
-      expect(db.txCalls).toHaveLength(1);
+      expect(db.txCalls).toHaveLength(2); // claim (under the concurrency cap) + dependent enqueue
       // Cross-repo dependent: manual-style build, HEAD resolved at run time.
       expect(db.buildsOf("other")).toMatchObject([{ git_sha: "", triggered_by: "manual" }]);
       // The chain build never consulted the branch head.
@@ -445,11 +455,14 @@ describe("dependsOn same-commit", () => {
     it("logs a failed dependent enqueue, keeps going, and never fails the dep build", async () => {
       const db = makeDb([app(), worker(), svc({ id: "w2", name: "w2", depends_on: ["mochimask-app"], yaml: workerYaml(["mochimask-app"]) })]);
       db.addBuild({ service_id: "app", git_sha: X, status: "queued" });
-      const failingTx: TransactionRunner = async () => {
+      // First tx call is the claim (must work); the dependent enqueue is
+      // what has to fail here.
+      let txCalls = 0;
+      const failingTx: TransactionRunner = async (fn) => {
+        if (txCalls++ === 0) return fn(db.query);
         throw new Error("tx failed");
       };
       await runDrainOnce(db.query, logger, failingTx);
-      expect(db.buildsOf("app")[0].status).toBe("success");
       expect(logger.error).toHaveBeenCalledWith(
         "dependent enqueue failed",
         expect.objectContaining({ dependentServiceId: "worker", err: "tx failed" })

@@ -103,6 +103,8 @@ describe("MCP endpoint /mcp", () => {
           "set_pipeline_override", // pipeline (kaiad.yaml) editor
           "list_repositories", // registry
           "get_registry_retention", // registry retention
+          "get_build_settings", // build worker settings (parallel builds)
+          "set_build_settings",
           "list_agents", // agents
           "get_agent_logs", // agent self-logs
           "deactivate_enrollment_token", // enrollment tokens
@@ -331,6 +333,33 @@ describe("MCP endpoint /mcp", () => {
       expect(revoked.revoked).toBe(true);
     } finally {
       await client.close();
+    }
+  });
+
+  it("gates the build-settings tools on settings:manage and reports a missing database", async () => {
+    const owner = await connect("dev-token");
+    try {
+      // Memory harness has no DATABASE_URL → both tools answer with the DB error, not a crash.
+      const get = await owner.callTool({ name: "get_build_settings", arguments: {} });
+      expect(get.isError).toBe(true);
+      expect(textOf(get)).toContain("Persistence unavailable");
+      const set = await owner.callTool({ name: "set_build_settings", arguments: { maxConcurrentBuilds: 4 } });
+      expect(set.isError).toBe(true);
+      expect(textOf(set)).toContain("Persistence unavailable");
+    } finally {
+      await owner.close();
+    }
+
+    const limited = await connect(await createCredential(["mcp.read", "mcp.write"], ["services:read"]));
+    try {
+      const get = await limited.callTool({ name: "get_build_settings", arguments: {} });
+      expect(get.isError).toBe(true);
+      expect(textOf(get)).toContain("settings:manage");
+      const set = await limited.callTool({ name: "set_build_settings", arguments: { maxConcurrentBuilds: 2 } });
+      expect(set.isError).toBe(true);
+      expect(textOf(set)).toContain("settings:manage");
+    } finally {
+      await limited.close();
     }
   });
 });

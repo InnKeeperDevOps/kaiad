@@ -64,7 +64,9 @@ import {
   listBuildsResponseSchema,
   registryRetentionResponseSchema,
   registryGcStatsSchema,
-  updateRegistryRetentionPolicyRequestSchema
+  updateRegistryRetentionPolicyRequestSchema,
+  buildSettingsResponseSchema,
+  updateBuildSettingsRequestSchema
 } from "@sm/contracts";
 import { correlationIdPlugin } from "./correlationId.js";
 import {
@@ -186,6 +188,9 @@ import {
   updateRegistryRetentionPolicy,
   applyRegistryRetention,
   getRegistryStats,
+  getBuildWorkerSettings,
+  updateBuildWorkerSettings,
+  getBuildQueueStats,
   type QueryFn,
   type LoadBalancerStatusRow
 } from "@sm/db";
@@ -2905,6 +2910,74 @@ export function buildServer(opts: BuildServerOptions = {}) {
     const policy = await getRegistryRetentionPolicy(q);
     const result = await applyRegistryRetention(q, policy);
     return registryGcStatsSchema.parse(result);
+  });
+
+  // --- Build worker settings (admin, instance-wide) ---
+  //
+  // max_concurrent_builds caps how many builds run at once across every
+  // worker process. Read + written here; enforced by the worker's claim
+  // query. The disk figures describe the filesystem holding the build
+  // workspace so operators can size the limit (a heavy build can need
+  // ~20-25 GB of scratch space).
+
+  const kaiadDataDir = process.env.KAIAD_DATA_DIR ?? "/data";
+  const buildsWorkspaceDir = path.join(kaiadDataDir, "builds");
+  async function readBuildsDisk(): Promise<{ freeBytes: number; totalBytes: number } | null> {
+    // The builds dir is created lazily by the first build; until then the
+    // data dir (same filesystem in every supported layout) stands in.
+    for (const dir of [buildsWorkspaceDir, kaiadDataDir]) {
+      try {
+        const st = await fs.promises.statfs(dir);
+        return {
+          freeBytes: Number(st.bavail) * Number(st.bsize),
+          totalBytes: Number(st.blocks) * Number(st.bsize)
+        };
+      } catch (err) {
+        app.log.warn({ err, dir }, "build workspace statfs failed");
+      }
+    }
+    app.log.warn({ dir: buildsWorkspaceDir }, "build workspace disk figures unavailable");
+    return null;
+  }
+  async function buildSettingsPayload(q: QueryFn) {
+    const [settings, stats, buildsDisk] = await Promise.all([
+      getBuildWorkerSettings(q),
+      getBuildQueueStats(q),
+      readBuildsDisk()
+    ]);
+    return buildSettingsResponseSchema.parse({
+      maxConcurrentBuilds: settings.maxConcurrentBuilds,
+      running: stats.running,
+      queued: stats.queued,
+      buildsDisk,
+      updatedAt: settings.updatedAt,
+      updatedBy: settings.updatedBy
+    });
+  }
+
+  app.get("/api/v1/admin/build-settings", async (req, reply) => {
+    const s = await authorize(req as any, reply as any, { perm: "settings:manage" });
+    if (!s) return;
+    const q = await getBuildsQuery();
+    if (!q) return reply.status(503).send(apiErrorSchema.parse({ code: "DB_UNAVAILABLE", message: "Persistence unavailable", correlationId: (req as any).correlationId }));
+    return buildSettingsPayload(q);
+  });
+
+  app.put("/api/v1/admin/build-settings", async (req, reply) => {
+    const s = await authorize(req as any, reply as any, { perm: "settings:manage" });
+    if (!s) return;
+    const parsed = updateBuildSettingsRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send(apiErrorSchema.parse({ code: "BAD_REQUEST", message: parsed.error.issues[0]?.message ?? "Invalid request", correlationId: (req as any).correlationId }));
+    }
+    const q = await getBuildsQuery();
+    if (!q) return reply.status(503).send(apiErrorSchema.parse({ code: "DB_UNAVAILABLE", message: "Persistence unavailable", correlationId: (req as any).correlationId }));
+    const updated = await updateBuildWorkerSettings(q, {
+      maxConcurrentBuilds: parsed.data.maxConcurrentBuilds,
+      updatedBy: s.email || s.id
+    });
+    app.log.info({ maxConcurrentBuilds: updated.maxConcurrentBuilds, userId: s.id }, "build concurrency limit updated");
+    return buildSettingsPayload(q);
   });
 
   // --- Agents ---

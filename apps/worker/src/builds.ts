@@ -12,11 +12,18 @@
 //             successfully — via the chain trigger and the catch-up pass
 //             (see triggerDependentBuilds / runDependentCatchUp).
 //
-//   Builder — every BUILD_DRAIN_INTERVAL_MS, claims one queued row at a
-//             time (FOR UPDATE SKIP LOCKED), clones at the SHA, reads
-//             kaiad.yaml, runs the build container via the host docker
-//             socket, captures artifacts, generates a runtime Dockerfile,
-//             docker-builds + docker-pushes to kaiad's built-in registry.
+//   Builder — every BUILD_DRAIN_INTERVAL_MS, sweeps orphaned builds, then
+//             fills free slots up to the instance-wide cap stored in
+//             build_worker_settings.max_concurrent_builds (panel: Settings
+//             → Builds). Each claim runs under an advisory lock so several
+//             worker processes can never exceed the cap, and a service
+//             never has two builds running at once. A claimed build is
+//             cloned at the SHA, kaiad.yaml is read, the build container
+//             runs via the host docker socket, artifacts are captured, a
+//             runtime Dockerfile is generated, docker-built + pushed to
+//             kaiad's built-in registry. Running builds heartbeat every
+//             30s; a build with no heartbeat for 120s (its worker died) is
+//             failed and re-queued once by the sweep.
 //
 // Why polling and not webhooks: works with the existing private-SSH-key
 // flow without anyone needing to expose a public webhook URL or configure
@@ -62,8 +69,11 @@ function decryptSshKey(stored: string): string | null {
 }
 import { Pool } from "pg";
 import {
+  claimNextBuildWithinLimit,
+  getBuildWorkerSettings,
+  heartbeatBuild,
+  sweepOrphanedBuilds,
   appendBuildLog,
-  claimNextBuild,
   createTransactionRunner,
   ensureCoreSchema,
   enqueueBuild,
@@ -113,6 +123,14 @@ import {
 const POLL_INTERVAL_MS = parseInt(process.env.BUILD_POLL_INTERVAL_MS ?? "60000", 10);
 const DRAIN_INTERVAL_MS = parseInt(process.env.BUILD_DRAIN_INTERVAL_MS ?? "5000", 10);
 const BUILD_TIMEOUT_MS = parseInt(process.env.BUILD_TIMEOUT_MS ?? "1800000", 10); // 30 min default
+// Parallel-build scheduler tunables. The LIMIT itself is a panel setting
+// (build_worker_settings.max_concurrent_builds), not an env var.
+const HEARTBEAT_INTERVAL_MS = parseInt(process.env.BUILD_HEARTBEAT_INTERVAL_MS ?? "30000", 10);
+const SETTINGS_CACHE_MS = parseInt(process.env.BUILD_SETTINGS_CACHE_MS ?? "5000", 10);
+const ORPHAN_STALE_SECONDS = parseInt(process.env.BUILD_ORPHAN_STALE_SECONDS ?? "120", 10);
+// How long stop() waits for in-flight builds before giving up on them
+// (they are then recovered by the orphan sweep of the next worker).
+const STOP_TIMEOUT_MS = parseInt(process.env.BUILD_STOP_TIMEOUT_MS ?? "30000", 10);
 
 // External hostname used in the image ref recorded in the DB and shown
 // in the panel — what agent kubelets pull from.
@@ -352,6 +370,7 @@ export type BuildLoopHandles = {
   pollTimer: NodeJS.Timeout;
   drainTimer: NodeJS.Timeout;
   pool: Pool;
+  scheduler: DrainScheduler;
   stop: () => Promise<void>;
 };
 
@@ -381,12 +400,17 @@ export async function startBuildLoops(
     const r = await pool.query(sql, params as unknown[]);
     return { rows: r.rows as Record<string, unknown>[] };
   };
-  // One-connection BEGIN/COMMIT runner for the idempotent dependent
+  // One-connection BEGIN/COMMIT runner for the claim (advisory lock +
+  // count + UPDATE), the orphan sweep, and the idempotent dependent
   // enqueue (advisory lock + NOT EXISTS + INSERT).
   const tx = createTransactionRunner(pool, logger);
 
+  const settings = await getBuildWorkerSettings(query);
+  const scheduler = createDrainScheduler(query, tx, logger, {
+    initialLimit: settings.maxConcurrentBuilds
+  });
+
   let pollBusy = false;
-  let drainBusy = false;
 
   const pollTimer = setInterval(() => {
     if (pollBusy) return;
@@ -398,14 +422,10 @@ export async function startBuildLoops(
       });
   }, POLL_INTERVAL_MS);
 
+  // tick() is single-flight internally (a tick already in progress makes
+  // the next one a no-op) and never awaits the builds it launches.
   const drainTimer = setInterval(() => {
-    if (drainBusy) return;
-    drainBusy = true;
-    runDrainOnce(query, logger, tx)
-      .catch((err) => logger.error("drain loop crashed", { err: String(err) }))
-      .finally(() => {
-        drainBusy = false;
-      });
+    scheduler.tick().catch((err) => logger.error("drain loop crashed", { err: String(err) }));
   }, DRAIN_INTERVAL_MS);
 
   // Kick off a first poll immediately so freshly-deployed kaiad doesn't
@@ -419,15 +439,19 @@ export async function startBuildLoops(
   const stop = async () => {
     clearInterval(pollTimer);
     clearInterval(drainTimer);
+    await scheduler.stop(STOP_TIMEOUT_MS);
     await pool.end();
   };
 
   logger.info("build loops started", {
     pollIntervalMs: POLL_INTERVAL_MS,
     drainIntervalMs: DRAIN_INTERVAL_MS,
+    maxConcurrentBuilds: settings.maxConcurrentBuilds,
+    heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
+    orphanStaleSeconds: ORPHAN_STALE_SECONDS,
     registryHost: REGISTRY_HOST
   });
-  return { pollTimer, drainTimer, pool, stop };
+  return { pollTimer, drainTimer, pool, scheduler, stop };
 }
 
 // ─── Poller ───────────────────────────────────────────────────────────────
@@ -575,24 +599,186 @@ async function gitLsRemoteHead(
 
 // ─── Builder ──────────────────────────────────────────────────────────────
 
-export async function runDrainOnce(
+export type DrainSchedulerOptions = {
+  /** Limit known at startup (avoids a "changed" log on the first read). */
+  initialLimit?: number;
+  /** How often a running build's heartbeat_at is touched. */
+  heartbeatMs?: number;
+  /** How long one read of max_concurrent_builds is reused. */
+  settingsCacheMs?: number;
+  /** A running build with no heartbeat for this long is orphaned. */
+  orphanStaleSeconds?: number;
+  /** Build executor — injectable for tests; defaults to runBuild. */
+  run?: (build: ServiceBuildRow) => Promise<void>;
+  now?: () => number;
+};
+
+export type DrainScheduler = {
+  /** One pass: sweep orphans, refresh the limit, fill free slots (unawaited). */
+  tick(): Promise<void>;
+  /** Ids of the builds this process is running right now. */
+  inFlightIds(): string[];
+  /** Last limit read from build_worker_settings (null before the first read). */
+  currentLimit(): number | null;
+  /** Stop claiming; resolves once in-flight builds finish or `timeoutMs` elapses. */
+  stop(timeoutMs: number): Promise<{ drained: boolean; remaining: string[] }>;
+};
+
+/**
+ * The parallel-build scheduler behind the drain timer.
+ *
+ * The DB-side claim (claimNextBuildWithinLimit) is the authoritative,
+ * cross-process guard on max_concurrent_builds; the local in-flight set
+ * only stops ONE process from over-claiming within a tick. Lowering the
+ * limit never interrupts a running build — it just stops new claims
+ * until enough builds finish.
+ */
+export function createDrainScheduler(
   query: QueryFn,
+  tx: TransactionRunner,
   logger: Logger,
-  tx: TransactionRunner
+  opts: DrainSchedulerOptions = {}
+): DrainScheduler {
+  const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_INTERVAL_MS;
+  const settingsCacheMs = opts.settingsCacheMs ?? SETTINGS_CACHE_MS;
+  const orphanStaleSeconds = opts.orphanStaleSeconds ?? ORPHAN_STALE_SECONDS;
+  const run = opts.run ?? ((b: ServiceBuildRow) => runBuild(query, tx, b, logger));
+  const now = opts.now ?? Date.now;
+
+  const inFlight = new Map<string, Promise<void>>();
+  let limit: number | null = opts.initialLimit ?? null;
+  let limitReadAt = -Infinity;
+  let stopping = false;
+  let ticking = false;
+
+  async function readLimit(): Promise<number> {
+    if (limit !== null && now() - limitReadAt < settingsCacheMs) return limit;
+    const s = await getBuildWorkerSettings(query);
+    limitReadAt = now();
+    if (s.maxConcurrentBuilds !== limit) {
+      logger.info("build concurrency limit changed", {
+        maxConcurrentBuilds: s.maxConcurrentBuilds,
+        previous: limit,
+        inFlight: inFlight.size
+      });
+      limit = s.maxConcurrentBuilds;
+    }
+    return limit;
+  }
+
+  async function sweep(): Promise<void> {
+    try {
+      const r = await sweepOrphanedBuilds(tx, orphanStaleSeconds);
+      if (r.orphaned.length > 0) {
+        logger.warn("orphaned builds failed and re-queued", {
+          orphaned: r.orphaned.map((b) => b.id),
+          requeued: r.requeued.map((b) => ({ id: b.id, serviceId: b.serviceId, sha: b.gitSha.slice(0, 12) })),
+          staleAfterSeconds: orphanStaleSeconds
+        });
+      }
+    } catch (err) {
+      // A failed sweep must not stop this tick from claiming work.
+      logger.error("orphan sweep failed", { err: (err as Error).message });
+    }
+  }
+
+  function launch(build: ServiceBuildRow): void {
+    const p = runClaimedBuild(query, build, logger, run, heartbeatMs).finally(() => {
+      inFlight.delete(build.id);
+    });
+    inFlight.set(build.id, p);
+  }
+
+  async function tick(): Promise<void> {
+    if (stopping || ticking) return;
+    ticking = true;
+    try {
+      await sweep();
+      const max = await readLimit();
+      while (!stopping && inFlight.size < max) {
+        const build = await claimNextBuildWithinLimit(tx, max);
+        if (!build) break;
+        logger.info("claimed build", { buildId: build.id, serviceId: build.serviceId, inFlight: inFlight.size + 1, limit: max });
+        launch(build);
+      }
+    } finally {
+      ticking = false;
+    }
+  }
+
+  async function stop(timeoutMs: number): Promise<{ drained: boolean; remaining: string[] }> {
+    stopping = true;
+    if (inFlight.size === 0) return { drained: true, remaining: [] };
+    logger.info("waiting for in-flight builds to finish", { inFlight: [...inFlight.keys()], timeoutMs });
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), timeoutMs);
+    });
+    const all = Promise.allSettled([...inFlight.values()]).then(() => "done" as const);
+    const outcome = await Promise.race([all, timeout]);
+    clearTimeout(timer);
+    const remaining = [...inFlight.keys()];
+    if (outcome === "timeout") {
+      logger.warn("stop timed out with builds still in flight; the orphan sweep will fail and re-queue them", {
+        remaining,
+        timeoutMs
+      });
+    }
+    return { drained: outcome === "done", remaining };
+  }
+
+  return {
+    tick,
+    inFlightIds: () => [...inFlight.keys()],
+    currentLimit: () => limit,
+    stop
+  };
+}
+
+/**
+ * Run one already-claimed build with a heartbeat and crash handling. The
+ * heartbeat keeps the orphan sweep from mistaking a long build for a dead
+ * worker; it is always cleared when the build settles.
+ */
+async function runClaimedBuild(
+  query: QueryFn,
+  build: ServiceBuildRow,
+  logger: Logger,
+  run: (build: ServiceBuildRow) => Promise<void>,
+  heartbeatMs: number
 ): Promise<void> {
-  // Process a single build per tick so a long build doesn't starve the
-  // poll loop; we get back to drain on the next tick anyway.
-  const build = await claimNextBuild(query);
-  if (!build) return;
+  const hb = setInterval(() => {
+    heartbeatBuild(query, build.id).catch((err) =>
+      logger.warn("build heartbeat failed", { buildId: build.id, err: (err as Error).message })
+    );
+  }, heartbeatMs);
   try {
-    await runBuild(query, tx, build, logger);
+    await run(build);
   } catch (err) {
     logger.error("build crashed", {
       buildId: build.id,
       err: (err as Error).message
     });
     await safelyFailBuild(query, build.id, `worker crashed: ${(err as Error).message}`);
+  } finally {
+    clearInterval(hb);
   }
+}
+
+/**
+ * Claim ONE build (honouring max_concurrent_builds) and run it to
+ * completion. The scheduler above is what the drain timer uses; this
+ * single-build form is kept for callers that want a synchronous pass.
+ */
+export async function runDrainOnce(
+  query: QueryFn,
+  logger: Logger,
+  tx: TransactionRunner
+): Promise<void> {
+  const { maxConcurrentBuilds } = await getBuildWorkerSettings(query);
+  const build = await claimNextBuildWithinLimit(tx, maxConcurrentBuilds);
+  if (!build) return;
+  await runClaimedBuild(query, build, logger, (b) => runBuild(query, tx, b, logger), HEARTBEAT_INTERVAL_MS);
 }
 
 async function runBuild(

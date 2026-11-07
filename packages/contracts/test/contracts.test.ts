@@ -13,7 +13,11 @@ import {
   healthResponseSchema,
   listEnrollmentTokensResponseSchema,
   serviceBuildSchema,
-  tenantSettingsSchema
+  tenantSettingsSchema,
+  buildSettingsResponseSchema,
+  updateBuildSettingsRequestSchema,
+  MAX_CONCURRENT_BUILDS_MAX,
+  MAX_CONCURRENT_BUILDS_MIN
 } from "../src/index.js";
 
 describe("contracts", () => {
@@ -131,4 +135,32 @@ describe("contracts", () => {
       expect(listBuildsQuerySchema.safeParse({ serviceId: "" }).success).toBe(false);
     });
   });
+
+describe("build worker settings contracts", () => {
+  it("parses the response, with and without disk figures", () => {
+    const base = {
+      maxConcurrentBuilds: 3,
+      running: 1,
+      queued: 4,
+      buildsDisk: { freeBytes: 10, totalBytes: 20 },
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      updatedBy: "admin@example.com"
+    };
+    expect(buildSettingsResponseSchema.parse(base)).toEqual(base);
+    expect(buildSettingsResponseSchema.parse({ ...base, buildsDisk: null, updatedBy: null }).buildsDisk).toBeNull();
+    expect(buildSettingsResponseSchema.safeParse({ ...base, maxConcurrentBuilds: 9 }).success).toBe(false);
+    expect(buildSettingsResponseSchema.safeParse({ ...base, running: -1 }).success).toBe(false);
+    expect(buildSettingsResponseSchema.safeParse({ ...base, updatedAt: "yesterday" }).success).toBe(false);
+  });
+
+  it("bounds the update body to integers 1..8", () => {
+    expect(MAX_CONCURRENT_BUILDS_MIN).toBe(1);
+    expect(MAX_CONCURRENT_BUILDS_MAX).toBe(8);
+    expect(updateBuildSettingsRequestSchema.parse({ maxConcurrentBuilds: 8 })).toEqual({ maxConcurrentBuilds: 8 });
+    for (const bad of [0, 9, 1.5, "2", null, undefined]) {
+      expect(updateBuildSettingsRequestSchema.safeParse({ maxConcurrentBuilds: bad }).success, String(bad)).toBe(false);
+    }
+    expect(updateBuildSettingsRequestSchema.safeParse({}).success).toBe(false);
+  });
+});
 });

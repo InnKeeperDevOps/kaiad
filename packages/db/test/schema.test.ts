@@ -123,5 +123,15 @@ describe("db schema", () => {
         /service_builds_tenant_created_idx\s+on service_builds\(tenant_id, created_at desc, id desc\)/
       );
     });
+
+    it("defines the build_worker_settings singleton and the service_builds heartbeat column", () => {
+      expect(coreSchemaSql).toContain("create table if not exists build_worker_settings");
+      expect(coreSchemaSql).toMatch(/build_worker_settings[\s\S]*?id integer primary key default 1 check \(id = 1\)/);
+      expect(coreSchemaSql).toMatch(
+        /max_concurrent_builds integer not null default 1 check \(max_concurrent_builds between 1 and 8\)/
+      );
+      expect(coreSchemaSql).toContain("insert into build_worker_settings (id) values (1) on conflict (id) do nothing");
+      expect(coreSchemaSql).toContain("alter table service_builds add column if not exists heartbeat_at timestamptz");
+    });
   });
 });

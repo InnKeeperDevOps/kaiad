@@ -1145,6 +1145,219 @@ export async function claimNextBuild(query: QueryFn): Promise<ServiceBuildRow | 
   return rows.length === 0 ? null : mapBuild(rows[0]);
 }
 
+// ---------------------------------------------------------------------------
+// Build worker settings + concurrency-aware claim
+// ---------------------------------------------------------------------------
+
+/** Inclusive bounds for max_concurrent_builds (mirrors the DB CHECK). */
+export const MAX_CONCURRENT_BUILDS_MIN = 1;
+export const MAX_CONCURRENT_BUILDS_MAX = 8;
+
+/**
+ * Fixed key for pg_advisory_xact_lock serialising every claim across all
+ * worker processes, so "count running, then claim" is atomic. Any
+ * distinct bigint works; chosen to not collide with the per-tenant
+ * hashtext() keys used by enqueueBuildAtShaIfMissing.
+ */
+export const BUILD_CLAIM_LOCK_KEY = 7_426_113_001;
+
+export interface BuildWorkerSettings {
+  maxConcurrentBuilds: number;
+  updatedAt: string;
+  updatedBy: string | null;
+}
+
+export interface BuildQueueStats {
+  running: number;
+  queued: number;
+}
+
+function tsToIso(v: unknown): string {
+  return v instanceof Date ? v.toISOString() : new Date(String(v)).toISOString();
+}
+
+export async function getBuildWorkerSettings(query: QueryFn): Promise<BuildWorkerSettings> {
+  const { rows } = await query(
+    `SELECT max_concurrent_builds, updated_at, updated_by
+       FROM build_worker_settings WHERE id = 1`,
+    [],
+  );
+  if (rows.length === 0) {
+    // ensureCoreSchema seeds row 1; only a half-migrated (or truncated
+    // test) DB lands here. Fall back to the documented default.
+    return { maxConcurrentBuilds: 1, updatedAt: new Date().toISOString(), updatedBy: null };
+  }
+  const r = rows[0];
+  return {
+    maxConcurrentBuilds: Number(r.max_concurrent_builds),
+    updatedAt: tsToIso(r.updated_at),
+    updatedBy: r.updated_by == null ? null : String(r.updated_by),
+  };
+}
+
+/**
+ * Persist the instance-wide build concurrency cap. Throws on an
+ * out-of-range or non-integer value so callers surface a 400 instead of
+ * a DB CHECK violation. Upserts so a truncated settings table heals.
+ */
+export async function updateBuildWorkerSettings(
+  query: QueryFn,
+  patch: { maxConcurrentBuilds: number; updatedBy?: string | null },
+): Promise<BuildWorkerSettings> {
+  const n = patch.maxConcurrentBuilds;
+  if (!Number.isInteger(n) || n < MAX_CONCURRENT_BUILDS_MIN || n > MAX_CONCURRENT_BUILDS_MAX) {
+    throw new Error(
+      `maxConcurrentBuilds must be an integer between ${MAX_CONCURRENT_BUILDS_MIN} and ${MAX_CONCURRENT_BUILDS_MAX} (got ${String(n)})`,
+    );
+  }
+  await query(
+    `INSERT INTO build_worker_settings (id, max_concurrent_builds, updated_at, updated_by)
+     VALUES (1, $1, now(), $2)
+     ON CONFLICT (id) DO UPDATE
+       SET max_concurrent_builds = EXCLUDED.max_concurrent_builds,
+           updated_at = now(),
+           updated_by = EXCLUDED.updated_by`,
+    [n, patch.updatedBy ?? null],
+  );
+  return getBuildWorkerSettings(query);
+}
+
+/** How many builds are running / waiting right now (instance-wide). */
+export async function getBuildQueueStats(query: QueryFn): Promise<BuildQueueStats> {
+  const { rows } = await query(
+    `SELECT count(*) FILTER (WHERE status = 'running')::int AS running,
+            count(*) FILTER (WHERE status = 'queued')::int AS queued
+       FROM service_builds
+      WHERE status IN ('running', 'queued')`,
+    [],
+  );
+  const r = rows[0] ?? {};
+  return { running: Number(r.running ?? 0), queued: Number(r.queued ?? 0) };
+}
+
+/**
+ * Claim the next queued build, honouring the instance-wide cap.
+ *
+ * Runs inside ONE transaction under a fixed advisory lock so concurrent
+ * claimers (several worker processes, or several slots in one process)
+ * serialise on "count running → claim": the cap can never be exceeded
+ * by a race. Returns null when `limit` builds are already running or
+ * nothing claimable is queued.
+ *
+ * One build per service: a queued row is skipped while another build of
+ * the same service is running, so two commits of the same service never
+ * build at once (the later one waits; FIFO otherwise).
+ *
+ * Sets status='running', started_at and heartbeat_at in the same UPDATE.
+ */
+export async function claimNextBuildWithinLimit(
+  tx: TransactionRunner,
+  limit: number,
+): Promise<ServiceBuildRow | null> {
+  const cap = Math.max(MAX_CONCURRENT_BUILDS_MIN, Math.floor(Number(limit) || 0));
+  return tx(async (q) => {
+    await q(`SELECT pg_advisory_xact_lock($1)`, [BUILD_CLAIM_LOCK_KEY]);
+    const { rows: cnt } = await q(
+      `SELECT count(*)::int AS n FROM service_builds WHERE status = 'running'`,
+      [],
+    );
+    const running = Number(cnt[0]?.n ?? 0);
+    if (running >= cap) return null;
+    const { rows } = await q(
+      `UPDATE service_builds
+          SET status = 'running', started_at = now(), heartbeat_at = now()
+        WHERE id = (
+          SELECT b.id FROM service_builds b
+           WHERE b.status = 'queued'
+             AND NOT EXISTS (
+               SELECT 1 FROM service_builds r
+                WHERE r.service_id = b.service_id AND r.status = 'running'
+             )
+           ORDER BY b.created_at ASC
+           LIMIT 1
+           FOR UPDATE SKIP LOCKED
+        )
+        RETURNING *`,
+      [],
+    );
+    return rows.length === 0 ? null : mapBuild(rows[0]);
+  });
+}
+
+/** Touch heartbeat_at on a running build (no-op once it has finished). */
+export async function heartbeatBuild(query: QueryFn, buildId: string): Promise<void> {
+  await query(
+    `UPDATE service_builds SET heartbeat_at = now() WHERE id = $1 AND status = 'running'`,
+    [buildId],
+  );
+}
+
+export const ORPHANED_BUILD_REASON = "orphaned: worker stopped mid-build";
+
+export interface OrphanSweepResult {
+  /** Running builds whose heartbeat went stale → marked failed. */
+  orphaned: ServiceBuildRow[];
+  /** Fresh queued builds created to retry the orphans (at most one each). */
+  requeued: ServiceBuildRow[];
+}
+
+/**
+ * Fail every 'running' build whose liveness stamp
+ * (coalesce(heartbeat_at, started_at, created_at)) is older than
+ * `staleAfterSeconds` — the worker that owned it died mid-build — and
+ * re-queue ONE replacement at the same sha/branch/trigger, unless:
+ *  - the service already has a newer build (created after the orphan),
+ *    which supersedes it; or
+ *  - an earlier build of the same service at the same sha was ALREADY
+ *    orphaned — i.e. the retry itself died. Retrying again would loop
+ *    forever on a build that reliably kills its worker (e.g. OOM).
+ * All in one transaction.
+ */
+export async function sweepOrphanedBuilds(
+  tx: TransactionRunner,
+  staleAfterSeconds: number,
+): Promise<OrphanSweepResult> {
+  const stale = Math.max(1, Math.floor(Number(staleAfterSeconds) || 0));
+  return tx(async (q) => {
+    const { rows } = await q(
+      `UPDATE service_builds
+          SET status = 'failed',
+              finished_at = now(),
+              failure_reason = $2,
+              log = log || $3
+        WHERE status = 'running'
+          AND coalesce(heartbeat_at, started_at, created_at) < now() - ($1::int * interval '1 second')
+        RETURNING *`,
+      [stale, ORPHANED_BUILD_REASON, `\n${ORPHANED_BUILD_REASON} (no heartbeat for ${stale}s)\n`],
+    );
+    const orphaned = rows.map(mapBuild);
+    const requeued: ServiceBuildRow[] = [];
+    for (const o of orphaned) {
+      const { rows: ins } = await q(
+        `INSERT INTO service_builds (id, tenant_id, service_id, git_sha, branch, status, triggered_by)
+         SELECT $1, $2, $3, $4, $5, 'queued', $6
+          WHERE NOT EXISTS (
+            SELECT 1 FROM service_builds n
+             WHERE n.service_id = $3
+               AND n.created_at > (SELECT o.created_at FROM service_builds o WHERE o.id = $7)
+          )
+            AND NOT EXISTS (
+            SELECT 1 FROM service_builds p
+             WHERE p.service_id = $3
+               AND p.git_sha = $4
+               AND p.id <> $7
+               AND p.status = 'failed'
+               AND p.failure_reason = $8
+          )
+         RETURNING *`,
+        [crypto.randomUUID(), o.tenantId, o.serviceId, o.gitSha, o.branch, o.triggeredBy, o.id, ORPHANED_BUILD_REASON],
+      );
+      if (ins.length > 0) requeued.push(mapBuild(ins[0]));
+    }
+    return { orphaned, requeued };
+  });
+}
+
 export async function appendBuildLog(
   query: QueryFn,
   buildId: string,

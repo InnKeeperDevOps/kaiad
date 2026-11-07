@@ -39,6 +39,27 @@ When `SM_EMBED_WORKER=1` (the compose default), the API process also runs the bu
 
 The build pipeline also needs `/var/run/docker.sock` bind-mounted into the container so the worker can spawn build containers via the host docker daemon. Both compose stacks wire this — see `env/dev/docker-compose.yml` and `env/prod/docker-compose.yml`.
 
+### Parallel builds
+
+The build loop runs every 5 s (`BUILD_DRAIN_INTERVAL_MS`). Each pass first
+sweeps orphaned builds, then claims queued builds until the **instance-wide
+limit** is reached. The limit is **not** an environment variable: it lives in
+the database (`build_worker_settings.max_concurrent_builds`, default `1`,
+range 1–8) and is changed from the panel under **Settings → Builds** or via
+`PUT /api/v1/admin/build-settings`. See
+[Build settings]({% link admin/build-settings.md %}) for the rules
+(one build per service, graceful lowering, orphan recovery) and disk sizing.
+
+Related tunables (rarely needed):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `BUILD_DRAIN_INTERVAL_MS` | `5000` | How often the loop sweeps + claims. |
+| `BUILD_HEARTBEAT_INTERVAL_MS` | `30000` | How often a running build stamps `heartbeat_at`. |
+| `BUILD_ORPHAN_STALE_SECONDS` | `120` | A running build with no heartbeat for this long is failed and re-queued once. |
+| `BUILD_SETTINGS_CACHE_MS` | `5000` | How long a worker reuses the last limit it read. |
+| `BUILD_STOP_TIMEOUT_MS` | `30000` | On shutdown, how long to wait for in-flight builds before leaving them to the orphan sweep. |
+
 For the build pipeline schema (`kaiad.yaml`) and variable interpolation, see [`kaiad.yaml` reference]({% link reference/pipeline.md %}) and [Pipeline variables]({% link reference/pipeline-variables.md %}).
 
 ## Built-in OCI registry

@@ -512,6 +512,35 @@ export type RegistryStats = z.infer<typeof registryStatsSchema>;
 export type RegistryGcStats = z.infer<typeof registryGcStatsSchema>;
 export type RegistryRetentionResponse = z.infer<typeof registryRetentionResponseSchema>;
 
+// --- Build worker settings (instance-wide) ----------------------------------
+
+/** Inclusive bounds for the parallel-build cap (mirrors the DB CHECK). */
+export const MAX_CONCURRENT_BUILDS_MIN = 1;
+export const MAX_CONCURRENT_BUILDS_MAX = 8;
+
+export const buildSettingsResponseSchema = z.object({
+  maxConcurrentBuilds: z.number().int().min(MAX_CONCURRENT_BUILDS_MIN).max(MAX_CONCURRENT_BUILDS_MAX),
+  /** Builds currently in the running state (instance-wide). */
+  running: z.number().int().min(0),
+  /** Builds waiting to be claimed (instance-wide). */
+  queued: z.number().int().min(0),
+  /** Free/total bytes of the filesystem holding the build workspace; null when unreadable. */
+  buildsDisk: z
+    .object({
+      freeBytes: z.number().int().min(0),
+      totalBytes: z.number().int().min(0)
+    })
+    .nullable(),
+  updatedAt: z.string().datetime(),
+  updatedBy: z.string().nullable()
+});
+export const updateBuildSettingsRequestSchema = z.object({
+  maxConcurrentBuilds: z.number().int().min(MAX_CONCURRENT_BUILDS_MIN).max(MAX_CONCURRENT_BUILDS_MAX)
+});
+
+export type BuildSettingsResponse = z.infer<typeof buildSettingsResponseSchema>;
+export type UpdateBuildSettingsRequest = z.infer<typeof updateBuildSettingsRequestSchema>;
+
 // ---------------------------------------------------------------------------
 // Builds
 // ---------------------------------------------------------------------------

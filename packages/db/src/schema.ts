@@ -630,6 +630,25 @@ create table if not exists registry_retention_policy (
 );
 insert into registry_retention_policy (id) values (1) on conflict (id) do nothing;
 
+-- Build worker settings. Single row (id=1) enforced by the CHECK.
+-- max_concurrent_builds is the INSTANCE-WIDE cap on builds in the
+-- 'running' state across every worker process (embedded or standalone);
+-- the claim query enforces it under an advisory lock. Changing it never
+-- interrupts builds already running — it only gates new claims.
+create table if not exists build_worker_settings (
+  id integer primary key default 1 check (id = 1),
+  max_concurrent_builds integer not null default 1 check (max_concurrent_builds between 1 and 8),
+  updated_at timestamptz not null default now(),
+  updated_by text
+);
+insert into build_worker_settings (id) values (1) on conflict (id) do nothing;
+
+-- Liveness stamp for running builds. The worker touches it every 30s
+-- while a build runs; the orphan sweep fails any 'running' row whose
+-- coalesce(heartbeat_at, started_at) is older than the stale threshold
+-- (a worker that died mid-build) and re-queues it once.
+alter table service_builds add column if not exists heartbeat_at timestamptz;
+
 -- Blob upload sessions. Client posts to /v2/<name>/blobs/uploads/,
 -- gets a uuid + Location, then PATCHes chunks and PUTs to commit.
 -- content_oid is allocated on session start; chunks lowrite() into it.

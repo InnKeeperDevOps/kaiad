@@ -444,6 +444,33 @@ paths:
           description: Owner or admin session required
         '404':
           description: Credential not found or already revoked
+  /api/v1/admin/build-settings:
+    get:
+      operationId: getBuildSettings
+      description: Instance-wide parallel-build limit (maxConcurrentBuilds, 1-8) plus live running/queued counts and free/total bytes of the build workspace filesystem (null when unreadable). Requires settings:manage.
+      responses:
+        '200':
+          description: Build worker settings
+        '401':
+          description: Unauthorized
+        '403':
+          description: Missing settings:manage permission
+        '503':
+          description: Persistence unavailable
+    put:
+      operationId: updateBuildSettings
+      description: Set maxConcurrentBuilds (integer 1-8). Lowering it never interrupts running builds; one build per service runs at a time regardless. Records the calling user as updatedBy. Requires settings:manage.
+      responses:
+        '200':
+          description: Updated build worker settings
+        '400':
+          description: Invalid payload
+        '401':
+          description: Unauthorized
+        '403':
+          description: Missing settings:manage permission
+        '503':
+          description: Persistence unavailable
   /api/v1/error-groups:
     get:
       operationId: listErrorGroups

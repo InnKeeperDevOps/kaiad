@@ -121,7 +121,11 @@ scope.
 ### Tenant settings
 - `get_tenant_settings` — any authenticated MCP caller
 - `update_tenant_settings` — `settings:manage`
+- `update_tenant_settings` — `settings:manage`
 
+### Build worker settings (instance-wide)
+- `get_build_settings` — `settings:manage` (parallel-build limit + running/queued counts)
+- `set_build_settings` — `settings:manage` (`maxConcurrentBuilds` 1–8; see [Build settings]({% link admin/build-settings.md %}))
 ### Users, groups & permissions — *user session only*
 - `list_users`, `list_groups`, `list_permissions` — `users:read`
 - `add_user`, `update_user`, `remove_user`, `create_group`, `update_group`, `delete_group` — `users:manage`

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { Settings, Lock, Database } from "lucide-vue-next";
+import { Settings, Lock, Database, Hammer } from "lucide-vue-next";
 import {
   api,
   type AuthProviderEntry,
@@ -11,6 +11,7 @@ import {
 } from "../../lib/api.js";
 import { useAuth } from "../../lib/useAuth.js";
 import ApiCredentialsPanel from "./ApiCredentialsPanel.vue";
+import { BUILD_LIMIT_OPTIONS, fmtGb, useBuildSettings } from "./useBuildSettings.js";
 
 const GOOGLE_OAUTH_DEFAULTS: Pick<
   OAuthProviderConfigPayload,
@@ -177,6 +178,16 @@ function fmtBytes(b: number): string {
 }
 
 onMounted(loadRegistry);
+
+// --- Builds (parallel-build limit) ---------------------------------------
+// Admin-only like the other settings surfaces; the API gates it on
+// settings:manage. Polls the live counts every 5s while the page is open.
+const canManageBuilds = computed(() => auth.value.isAdmin || auth.value.can("settings:manage"));
+const builds = useBuildSettings({ enabled: () => canManageBuilds.value });
+function fmtWhen(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
 
 const sectionStyle = {
   background: "var(--color-surface)",
@@ -459,6 +470,91 @@ const labelColStyle = {
           </tbody>
         </table>
       </details>
+    </div>
+
+    <div v-if="canManageBuilds" :style="sectionStyle" data-testid="builds-settings">
+      <h3 :style="{ margin: '0 0 0.75rem', fontSize: '1rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }">
+        <Hammer :size="16" /> Builds
+      </h3>
+      <p :style="{ color: 'var(--color-text-secondary)', margin: 0, fontSize: '0.85rem' }">
+        How many builds may run at the same time across every worker process
+        of this instance. A service never has two builds running at once, so
+        extra slots only help when several services are waiting. Lowering the
+        limit never interrupts a running build — new builds simply wait for a
+        free slot. A build whose worker died is failed after 2 minutes without
+        a heartbeat and re-queued once.
+      </p>
+      <div v-if="builds.error.value" role="alert" :style="{ color: 'var(--color-danger)', marginTop: '0.5rem', fontSize: '0.85rem' }">{{ builds.error.value }}</div>
+      <div v-if="builds.success.value" role="status" :style="{ color: 'var(--color-success)', marginTop: '0.5rem', fontSize: '0.85rem' }">{{ builds.success.value }}</div>
+
+      <div
+        v-if="builds.data.value"
+        :style="{ marginTop: '0.75rem', display: 'flex', gap: '1.25rem', flexWrap: 'wrap', fontSize: '0.85rem' }"
+        data-testid="builds-stats"
+      >
+        <div>
+          <div :style="{ color: 'var(--color-text-secondary)' }">Running</div>
+          <div :style="{ fontWeight: 600 }" data-testid="builds-running">{{ builds.data.value.running }}</div>
+        </div>
+        <div>
+          <div :style="{ color: 'var(--color-text-secondary)' }">Queued</div>
+          <div :style="{ fontWeight: 600 }" data-testid="builds-queued">{{ builds.data.value.queued }}</div>
+        </div>
+        <div>
+          <div :style="{ color: 'var(--color-text-secondary)' }">Current limit</div>
+          <div :style="{ fontWeight: 600 }" data-testid="builds-limit">{{ builds.data.value.maxConcurrentBuilds }}</div>
+        </div>
+        <div>
+          <div :style="{ color: 'var(--color-text-secondary)' }">Build workspace disk</div>
+          <div :style="{ fontWeight: 600 }" data-testid="builds-disk">
+            <template v-if="builds.data.value.buildsDisk">
+              {{ fmtGb(builds.data.value.buildsDisk.freeBytes) }} free of {{ fmtGb(builds.data.value.buildsDisk.totalBytes) }}
+            </template>
+            <template v-else>unavailable</template>
+          </div>
+        </div>
+      </div>
+      <p
+        v-if="builds.data.value?.updatedBy"
+        :style="{ margin: '0.35rem 0 0', fontSize: '0.78rem', color: 'var(--color-text-muted)' }"
+      >
+        Last changed by {{ builds.data.value.updatedBy }} on {{ fmtWhen(builds.data.value.updatedAt) }}.
+      </p>
+
+      <label :style="{ ...labelColStyle, marginTop: '0.85rem', maxWidth: '220px' }">
+        <span>Parallel builds</span>
+        <select v-model.number="builds.form.value" aria-label="Parallel builds" :style="inputStyle" :disabled="builds.loading.value">
+          <option v-for="n in BUILD_LIMIT_OPTIONS" :key="n" :value="n">{{ n }}</option>
+        </select>
+        <small :style="{ color: 'var(--color-text-secondary)' }">1 = one build at a time (default). Maximum 8.</small>
+      </label>
+
+      <p
+        role="note"
+        data-testid="builds-disk-warning"
+        :data-level="builds.warning.value.level"
+        :style="{
+          margin: '0.25rem 0 0',
+          padding: '0.5rem 0.65rem',
+          borderRadius: '6px',
+          fontSize: '0.82rem',
+          maxWidth: '780px',
+          background: builds.warning.value.level === 'danger' ? 'var(--color-danger-bg)' : 'var(--color-warning-bg)',
+          color: builds.warning.value.level === 'danger' ? 'var(--color-danger)' : 'var(--color-warning)',
+          border: `1px solid ${builds.warning.value.level === 'danger' ? 'var(--color-danger)' : 'var(--color-warning)'}`,
+          fontWeight: builds.warning.value.level === 'danger' ? 600 : 400
+        }"
+      >{{ builds.warning.value.text }}</p>
+
+      <div :style="{ display: 'flex', gap: '0.5rem', marginTop: '0.85rem', alignItems: 'center' }">
+        <button
+          type="button"
+          :disabled="builds.saving.value || !builds.dirty.value"
+          :style="{ background: 'var(--color-primary)', color: 'var(--color-primary-foreground)', border: 'none', borderRadius: '6px', padding: '0.45rem 0.8rem', fontSize: '0.85rem', cursor: builds.saving.value || !builds.dirty.value ? 'not-allowed' : 'pointer', opacity: builds.saving.value || !builds.dirty.value ? 0.6 : 1 }"
+          @click="builds.save"
+        >{{ builds.saving.value ? "Saving…" : "Save limit" }}</button>
+        <span v-if="builds.loading.value" :style="{ fontSize: '0.8rem', color: 'var(--color-text-secondary)' }">Loading…</span>
+      </div>
     </div>
 
     <ApiCredentialsPanel />

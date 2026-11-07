@@ -73,8 +73,13 @@ vi.mock("node:fs", () => {
   const m = { existsSync: () => true, promises };
   return { ...m, default: m };
 });
+import { runPollOnce, runDrainOnce as runDrainOnceRaw, startBuildLoops } from "../src/builds.js";
+import type { QueryFn, TransactionRunner } from "@sm/db";
 
-import { runPollOnce, runDrainOnce, startBuildLoops } from "../src/builds.js";
+// The claim now runs inside a transaction; bind a pass-through runner to
+// the same mocked query so every existing call site keeps its shape.
+const txFor = (q: QueryFn): TransactionRunner => (fn) => fn(q);
+const runDrainOnce = (q: QueryFn, l: Parameters<typeof runDrainOnceRaw>[1]) => runDrainOnceRaw(q, l, txFor(q));
 import type { QueryFn } from "@sm/db";
 
 const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };

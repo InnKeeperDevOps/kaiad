@@ -23,8 +23,11 @@ services:
       - PORT=8091
       - SM_EMBED_WORKER=1
       - KAIAD_DATA_DIR=/data
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/service_monitor
-      - REDIS_URL=redis://redis:6379
+      # Credentials come from env/prod/.env (never committed). Use
+      # URL-safe values (e.g. `openssl rand -hex 32`): they are
+      # interpolated into these URLs unescaped.
+      - DATABASE_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-service_monitor}
+      - REDIS_URL=redis://default:${REDIS_PASSWORD:?set REDIS_PASSWORD in env/prod/.env}@redis:6379
       - VITE_API_BASE=http://panel.kaiad.dev
       - KAIAD_ENCRYPTION_KEY=${KAIAD_ENCRYPTION_KEY}
       # Internal worker→API command channel (redeploy_service etc.).
@@ -61,8 +64,11 @@ services:
       # run` against the host daemon. Container runs as root, so no
       # group_add needed.
       - /var/run/docker.sock:/var/run/docker.sock
+    # Loopback only. panel.kaiad.dev is served by kaiad-proxy (host
+    # network) -> 127.0.0.1:8091; nothing on the LAN should reach the
+    # container port directly (2026-11-22 scan found it open on 0.0.0.0).
     ports:
-      - "8091:8091"
+      - "127.0.0.1:8091:8091"
     healthcheck:
       test:
         [
@@ -84,14 +90,19 @@ services:
         max-file: "5"
     user: "1000:1000"
     environment:
+      # Only applied when the data dir is first initialised. To rotate on
+      # an existing DB: ALTER USER ... PASSWORD first, then set it here
+      # via env/prod/.env and recreate (kaiad's DATABASE_URL follows).
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-service_monitor}
       PGDATA: /data/pgdata
     volumes:
       - ./data/pg-data:/data
+    # Loopback only: the kaiad container uses the compose network;
+    # only host-local tools need the published port.
     ports:
-      - "5002:5432"
+      - "127.0.0.1:5002:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-service_monitor}"]
       interval: 3s
@@ -108,12 +119,19 @@ services:
         max-size: "50m"
         max-file: "5"
     user: "1000:1000"
+    # Password-protected (was unauthenticated and LAN-reachable until
+    # 2026-11-22). kaiad's REDIS_URL carries the same value.
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in env/prod/.env}
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\""]
+    # Loopback only: the kaiad container uses the compose network;
+    # only host-local tools need the published port.
     ports:
-      - "6002:6379"
+      - "127.0.0.1:6002:6379"
     volumes:
       - ./data/redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
       interval: 3s
       timeout: 3s
       retries: 10

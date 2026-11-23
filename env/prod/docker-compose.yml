@@ -122,9 +122,13 @@ services:
     user: "1000:1000"
     # Password-protected (was unauthenticated and LAN-reachable until
     # 2026-11-22). kaiad's REDIS_URL carries the same value.
+    # The default user is defined here instead of --requirepass so the
+    # RESTORE block persists across recreates: GHSA-c8h9-259x-jff4
+    # (RESTORE RCE, no upstream fix). Kaiad/BullMQ never use
+    # RESTORE/DUMP/MIGRATE (commandstats, 2026-11-23).
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in env/prod/.env}
-    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\""]
+    command: ["sh", "-c", "exec redis-server --user default on \">$$REDIS_PASSWORD\" '~*' '&*' +@all -restore -restore-asking"]
     # Loopback only: the kaiad container uses the compose network;
     # only host-local tools need the published port.
     ports:
